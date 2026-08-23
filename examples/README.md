@@ -16,8 +16,7 @@ The shared helper reads:
 - `SCOPEDB_DATABASE` (defaults to `scopedb`)
 - `SCOPEDB_SCHEMA` (defaults to `public`)
 
-ScopeQL is documented in the [quickstart], [query guide], and [language
-reference].
+ScopeQL is documented in the [quickstart], [query guide], and [language reference].
 
 [quickstart]: https://docs.scopedb.io/guides/quickstart
 [query guide]: https://docs.scopedb.io/guides/query-events
@@ -25,30 +24,25 @@ reference].
 
 ## Before running a write example
 
-Every write example refuses to start unless `SCOPEDB_WRITE_TABLE` names an
-existing, unqualified destination table. Configure its database and schema
-separately. The examples never create or drop a table. Use a disposable table
-and confirm the configured database and schema before running them:
+Every write example refuses to start unless `SCOPEDB_WRITE_TABLE` names an existing, unqualified destination table. Configure its database and schema separately. The examples never create or drop a table. Use a disposable table and confirm the configured database and schema before running them:
 
 ```sh
 export SCOPEDB_WRITE_TABLE=sdk_example_events
 ```
 
-The example rows use the following columns so all write journeys can target the
-same table:
+The example rows use the following columns so all write journeys can target the same table:
 
-| Column | Value used by examples |
-| --- | --- |
-| `id` | integer |
-| `event_id` | string |
-| `occurred_at` | timestamp |
-| `name` | string |
-| `attributes` | object |
+| Column        | Value used by examples |
+| ------------- | ---------------------- |
+| `id`          | integer                |
+| `event_id`    | string                 |
+| `occurred_at` | timestamp              |
+| `name`        | string                 |
+| `attributes`  | object                 |
 
 ## Choose a write journey
 
-For most application writes, start with `append_stream`. It accepts typed rows
-and owns their encoding, batching, backpressure, and request concurrency.
+For most application writes, start with `append_stream`. It accepts typed rows and owns their encoding, batching, backpressure, and request concurrency.
 
 | Example | Choose it when | Run |
 | --- | --- | --- |
@@ -59,45 +53,27 @@ and owns their encoding, batching, backpressure, and request concurrency.
 
 ## Delivery contract
 
-- `Table.AppendNDJSON` sends one caller-encoded raw NDJSON body: one JSON object
-  per non-empty line, not a JSON array.
-- `Table.AppendStream` accepts typed rows and owns their JSON encoding, batching,
-  and concurrent request scheduling.
-- `AppendStream.Send` and `AppendStream.TrySend` confirm local admission only.
-  They do not confirm a remote commit.
-- Append stream admission is safe for concurrent producers; use a fixed worker
-  pool instead of starting one goroutine per row.
-- `TrySend` does not wait for stream capacity. Use it for latency-sensitive
-  logs and telemetry and monitor `Stats().DroppedByReason`.
-- `Flush` settles the prefix accepted before its barrier. `Shutdown` closes
-  admission and settles all accepted rows.
-- A successful strict append-stream barrier confirms its accepted prefix
-  committed. A continue-mode barrier is settlement; inspect every delivery
-  report for failed, unknown, and locally dropped rows.
-- The append stream retries only an exact temporary HTTP batch explicitly
-  reported as rejected. A timeout, transport failure, or invalid success
-  response is unknown and is not automatically retried.
-- Unknown rows may already be committed. Never blindly replay the same payload;
-  reconcile it or use an application-owned durable outbox.
-- Each background write request has a finite 30-second timeout by default. A
-  timeout makes that request's commit outcome unknown.
-- Concurrent append batches have no defined commit order. Set
-  `MaxConcurrentBatches: 1` when request submission must be serial.
+- `Table.AppendNDJSON` sends one caller-encoded raw NDJSON body: one JSON object per non-empty line, not a JSON array.
+- `Table.AppendStream` accepts typed rows and owns their JSON encoding, batching, and concurrent request scheduling.
+- `AppendStream.Send` and `AppendStream.TrySend` confirm local admission only. They do not confirm a remote commit.
+- Append stream admission is safe for concurrent producers; use a fixed worker pool instead of starting one goroutine per row.
+- `TrySend` does not wait for stream capacity. Use it for latency-sensitive logs and telemetry and monitor `Stats().DroppedByReason`.
+- `Flush` settles the prefix accepted before its barrier. `Shutdown` closes admission and settles all accepted rows.
+- A successful strict append-stream barrier confirms its accepted prefix committed. A continue-mode barrier is settlement; inspect every delivery report for failed, unknown, and locally dropped rows.
+- The append stream retries only an exact temporary HTTP batch explicitly reported as rejected. A timeout, transport failure, or invalid success response is unknown and is not automatically retried.
+- Unknown rows may already be committed. Never blindly replay the same payload; reconcile it or use an application-owned durable outbox.
+- Each background write request has a finite 30-second timeout by default. A timeout makes that request's commit outcome unknown.
+- Concurrent append batches have no defined commit order. Set `MaxConcurrentBatches: 1` when request submission must be serial.
 
 ## Advanced: server-side transformation
 
-Use [`ingest_transform`](ingest_transform) only when source JSON specifically
-needs a ScopeQL transformation before it can match the destination table. For
-normal typed events, use `Table.AppendStream`.
+Use [`ingest_transform`](ingest_transform) only when source JSON specifically needs a ScopeQL transformation before it can match the destination table. For normal typed events, use `Table.AppendStream`.
 
 ```sh
 go run ./examples/ingest_transform
 ```
 
-`IngestStream.Send` confirms local admission only. An ingest result returned
-with an error counts only earlier confirmed batches; it is not a safe offset
-for replaying the failing batch. Reconcile an unknown outcome before replaying
-records.
+`IngestStream.Send` confirms local admission only. An ingest result returned with an error counts only earlier confirmed batches; it is not a safe offset for replaying the failing batch. Reconcile an unknown outcome before replaying records.
 
 ## Compile every example
 
