@@ -42,6 +42,15 @@ check-mod-tidy:
 fix-mod-tidy:
 	{{GO}} mod tidy
 
-check: check-mod-tidy check-static
+download-hawkeye:
+	dev/download-hawkeye.sh
 
-fix: fix-mod-tidy fix-static
+check-license: download-hawkeye
+	hawkeye check
+
+fmt-license: download-hawkeye
+	hawkeye format
+
+check: check-license check-mod-tidy check-static
+
+fix: fmt-license fix-mod-tidy fix-static

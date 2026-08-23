@@ -23,7 +23,7 @@ import (
 	"testing"
 	"time"
 
-	scopedb "github.com/scopedb/scopedb-sdk/go"
+	scopedb "github.com/scopedb/goscopedb"
 	"github.com/stretchr/testify/require"
 )
 

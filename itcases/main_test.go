@@ -22,7 +22,7 @@ import (
 	"testing"
 
 	"github.com/lucasepe/codename"
-	scopedb "github.com/scopedb/scopedb-sdk/go"
+	scopedb "github.com/scopedb/goscopedb"
 	"github.com/stretchr/testify/require"
 
 	"go.uber.org/goleak"

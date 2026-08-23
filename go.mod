@@ -1,4 +1,4 @@
-module github.com/scopedb/scopedb-sdk/go
+module github.com/scopedb/goscopedb
 
 go 1.24
 

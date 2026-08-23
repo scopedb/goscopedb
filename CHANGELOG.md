@@ -4,6 +4,11 @@ All significant changes to this project will be documented in this file.
 
 ## Unreleased
 
+### Breaking Changes
+
+* Moved the module from `github.com/scopedb/scopedb-sdk/go` to
+  `github.com/scopedb/goscopedb`. Applications must update their import path.
+
 ## v0.6.2 (2026-08-22)
 
 ### Changed

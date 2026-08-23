@@ -23,7 +23,7 @@ import (
 	"log"
 
 	"github.com/google/uuid"
-	"github.com/scopedb/scopedb-sdk/go/examples/internal/exampleutil"
+	"github.com/scopedb/goscopedb/examples/internal/exampleutil"
 )
 
 func main() {

@@ -23,8 +23,8 @@ import (
 	"log"
 	"time"
 
-	scopedb "github.com/scopedb/scopedb-sdk/go"
-	"github.com/scopedb/scopedb-sdk/go/examples/internal/exampleutil"
+	scopedb "github.com/scopedb/goscopedb"
+	"github.com/scopedb/goscopedb/examples/internal/exampleutil"
 )
 
 const totalRows = 25_000

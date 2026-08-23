@@ -24,8 +24,8 @@ import (
 	"sync"
 	"time"
 
-	scopedb "github.com/scopedb/scopedb-sdk/go"
-	"github.com/scopedb/scopedb-sdk/go/examples/internal/exampleutil"
+	scopedb "github.com/scopedb/goscopedb"
+	"github.com/scopedb/goscopedb/examples/internal/exampleutil"
 )
 
 // Event is one typed row written to the example destination table.

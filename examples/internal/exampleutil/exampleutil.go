@@ -22,7 +22,7 @@ import (
 	"os"
 	"strings"
 
-	scopedb "github.com/scopedb/scopedb-sdk/go"
+	scopedb "github.com/scopedb/goscopedb"
 )
 
 const (

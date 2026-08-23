@@ -1,7 +1,6 @@
 # ScopeDB Go SDK examples
 
-Run these examples from the `go/` directory in a source checkout. They use only
-the public SDK API.
+Run these examples from the repository root. They use only the public SDK API.
 
 ## Read-only paths
 
