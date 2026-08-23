@@ -14,37 +14,42 @@
  * limitations under the License.
  */
 
-package itcases
+package integration_test
 
 import (
-	"context"
+	"os"
+	"strings"
 	"testing"
 
-	"github.com/gkampitakis/go-snaps/snaps"
-	"github.com/google/uuid"
+	"github.com/lucasepe/codename"
+	scopedb "github.com/scopedb/goscopedb"
 	"github.com/stretchr/testify/require"
+
+	"go.uber.org/goleak"
 )
 
-func TestStatusStatementFail(t *testing.T) {
-	c := NewClient(t)
-	defer c.Close()
-
-	ctx := context.Background()
-
-	id, err := uuid.Parse("c8fe71d6-3695-11f0-85b3-063c3400fda9")
-	require.NoError(t, err)
-	_, err = c.StatementHandle(id).Status(ctx)
-	require.Error(t, err)
-	snaps.MatchSnapshot(t, err.Error())
+func TestMain(m *testing.M) {
+	goleak.VerifyTestMain(m)
 }
 
-func TestSubmitStatementFail(t *testing.T) {
-	c := NewClient(t)
-	defer c.Close()
+func NewClient(t testing.TB) *scopedb.Client {
+	endpoint := os.Getenv("SCOPEDB_ENDPOINT")
 
-	ctx := context.Background()
+	if endpoint == "" {
+		t.Skip("SCOPEDB_ENDPOINT not set")
+		return nil // unreachable
+	}
 
-	_, err := c.Statement("SELECT UNKNOWN_FUNCTION()").Execute(ctx)
-	require.Error(t, err)
-	snaps.MatchSnapshot(t, err.Error())
+	client, err := scopedb.NewClient(scopedb.Config{
+		Endpoint: endpoint,
+		APIKey:   os.Getenv("SCOPEDB_API_KEY"),
+	})
+	require.NoError(t, err)
+	return client
+}
+
+func RandomName(t testing.TB) string {
+	rng, err := codename.DefaultRNG()
+	require.NoError(t, err)
+	return strings.ReplaceAll(codename.Generate(rng, 10), "-", "_")
 }

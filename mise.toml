@@ -1,0 +1,68 @@
+# Copyright 2024 ScopeDB, Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+[tools]
+go = "1.24.13"
+golangci-lint = "2.1.6"
+
+[tasks.build]
+description = "Build all packages"
+run = "go build ./..."
+
+[tasks.test]
+description = "Run unit tests and benchmarks"
+run = '''
+packages="$(go list ./... | grep -v '/tests/integration$')"
+go test -v -bench=. $packages
+'''
+
+[tasks.test-integration]
+description = "Run tests against a ScopeDB endpoint"
+run = "go test -v ./tests/integration"
+
+[tasks.check-license]
+description = "Check license headers"
+run = "hawkeye check"
+
+[tasks.fmt-license]
+description = "Format license headers"
+run = "hawkeye format"
+
+[tasks.check-static]
+description = "Run static analysis"
+run = "CGO_ENABLED=0 golangci-lint run -v"
+
+[tasks.fix-static]
+description = "Apply static analysis fixes"
+run = "CGO_ENABLED=0 golangci-lint run --fix -v"
+
+[tasks.check-mod-tidy]
+description = "Check Go module metadata"
+run = "go mod tidy -diff"
+
+[tasks.fix-mod-tidy]
+description = "Update Go module metadata"
+run = "go mod tidy"
+
+[tasks.check]
+description = "Run all checks"
+depends = ["check-license", "check-mod-tidy", "check-static"]
+
+[tasks.fix]
+description = "Apply all automated fixes"
+run = '''
+mise run fmt-license
+mise run fix-mod-tidy
+mise run fix-static
+'''

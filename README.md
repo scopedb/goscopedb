@@ -393,16 +393,18 @@ context canceled before its request starts is returned directly.
 ## Examples and development
 
 The [examples guide](examples/README.md) contains read-only discovery, guarded
-write examples, delivery contracts, and runnable commands.
+write examples, delivery contracts, and runnable commands. Development tasks
+are defined in [mise.toml](mise.toml); license tasks expect `hawkeye` on `PATH`.
 
 ```sh
-go test ./...
-go test -race ./...
-go vet ./...
+mise install
+mise run check
+mise run build
+mise run test
 ```
 
 Release notes and the maintainer runbook are in [CHANGELOG.md](CHANGELOG.md) and
-[RELEASE.md](RELEASE.md). See [CONTRIBUTING.md](CONTRIBUTING.md) to contribute.
+[RELEASE.md](RELEASE.md).
 
 ## License
 
