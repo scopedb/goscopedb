@@ -29,7 +29,7 @@ defer client.Close()
 
 `NewClient` validates the endpoint and returns an error for invalid configuration. Set `Config.HTTPClient` when the application needs to own HTTP timeouts, proxies, TLS, or connection pooling. `Client.Close` closes idle connections only for the HTTP client created by the SDK; it never closes a caller-provided client.
 
-Statement, transform-ingest, and `AppendStream` request bodies use zstd compression by default. Set `Config.Compression` to `CompressionGzip` when gzip is required. Direct caller-encoded `AppendNDJSON` requests remain identity-encoded.
+Request bodies, including direct `AppendNDJSON` requests and `AppendStream` batches, use zstd compression by default. Set `Config.Compression` to `CompressionGzip` when gzip is required. Append limits are based on the uncompressed NDJSON body.
 
 ## ScopeQL documentation
 
@@ -258,7 +258,7 @@ if err != nil {
 fmt.Println("committed rows:", result.NumRowsInserted)
 ```
 
-One request is limited to 16 MiB and 200,000 rows.
+One request is limited to 8 MiB of uncompressed NDJSON and 200,000 rows.
 
 ### Choose a delivery path
 

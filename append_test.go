@@ -29,7 +29,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestAppendNDJSONSendsRawPayload(t *testing.T) {
+func TestAppendNDJSONUsesConfiguredCompression(t *testing.T) {
 	t.Parallel()
 
 	ndjson := []byte("{\"id\":1}\n\n  \n{\"id\":2}\n")
@@ -42,9 +42,8 @@ func TestAppendNDJSONSendsRawPayload(t *testing.T) {
 		)
 		require.Equal(t, "Bearer append-key", r.Header.Get("Authorization"))
 		require.Equal(t, "application/x-ndjson", r.Header.Get("Content-Type"))
-		require.Empty(t, r.Header.Get("Content-Encoding"))
-		require.Empty(t, r.Header.Get("X-ScopeDB-Uncompressed-Content-Length"))
-		body, err := io.ReadAll(r.Body)
+		require.Equal(t, string(CompressionGzip), r.Header.Get("Content-Encoding"))
+		body, err := decodeCompressedRequestBody(r)
 		require.NoError(t, err)
 		require.Equal(t, ndjson, body)
 		writeJSONValue(t, w, AppendRowsResult{
@@ -55,8 +54,9 @@ func TestAppendNDJSONSendsRawPayload(t *testing.T) {
 	defer server.Close()
 
 	client, err := NewClient(Config{
-		Endpoint: server.URL + "/proxy",
-		APIKey:   "append-key",
+		Endpoint:    server.URL + "/proxy",
+		APIKey:      "append-key",
+		Compression: CompressionGzip,
 	})
 	require.NoError(t, err)
 	t.Cleanup(client.Close)
@@ -76,6 +76,7 @@ func TestAppendNDJSONSendsRawPayload(t *testing.T) {
 func TestAppendNDJSONRejectsLocalLimitsBeforeRequest(t *testing.T) {
 	t.Parallel()
 
+	const eightMiB = 8 * 1024 * 1024
 	requests := 0
 	client, err := NewClient(Config{
 		Endpoint: "https://example.com",
@@ -87,7 +88,7 @@ func TestAppendNDJSONRejectsLocalLimitsBeforeRequest(t *testing.T) {
 	require.NoError(t, err)
 
 	for _, ndjson := range [][]byte{
-		bytes.Repeat([]byte{'x'}, maxAppendBodyBytes+1),
+		bytes.Repeat([]byte{'x'}, eightMiB+1),
 		bytes.Repeat([]byte("{}\n"), maxAppendRows+1),
 	} {
 		_, err := client.appendNDJSON(context.Background(), "db", "schema", "table", ndjson)

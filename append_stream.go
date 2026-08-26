@@ -27,8 +27,7 @@ import (
 )
 
 const (
-	maxAppendStreamBodyBytes          = 8 * 1024 * 1024
-	defaultAppendTargetBatchBytes     = maxAppendStreamBodyBytes
+	defaultAppendTargetBatchBytes     = maxAppendBodyBytes
 	defaultAppendMaxBatchRows         = maxAppendRows
 	defaultAppendFlushInterval        = time.Second
 	defaultAppendCommandCapacity      = 1024
@@ -279,9 +278,9 @@ func normalizeAppendStreamOptions(options AppendStreamOptions) (normalizedAppend
 	if config.targetBatchBytes == 0 {
 		config.targetBatchBytes = defaultAppendTargetBatchBytes
 	}
-	if config.targetBatchBytes < 0 || config.targetBatchBytes > maxAppendStreamBodyBytes {
+	if config.targetBatchBytes < 0 || config.targetBatchBytes > maxAppendBodyBytes {
 		return config, appendStreamConfigError(
-			fmt.Sprintf("target batch bytes must be from 1 to %d", maxAppendStreamBodyBytes),
+			fmt.Sprintf("target batch bytes must be from 1 to %d", maxAppendBodyBytes),
 		)
 	}
 	if config.maxBatchRows == 0 {
@@ -774,8 +773,8 @@ func marshalAppendRecord(row any) ([]byte, error) {
 	if len(payload) == 0 || payload[0] != '{' {
 		return nil, ErrAppendRowInvalid
 	}
-	if len(payload) > maxAppendStreamBodyBytes {
-		return nil, fmt.Errorf("%w: encoded row is %d bytes, limit is %d", ErrAppendRowTooLarge, len(payload), maxAppendStreamBodyBytes)
+	if len(payload) > maxAppendBodyBytes {
+		return nil, fmt.Errorf("%w: encoded row is %d bytes, limit is %d", ErrAppendRowTooLarge, len(payload), maxAppendBodyBytes)
 	}
 	return payload, nil
 }
@@ -961,7 +960,7 @@ func (s *AppendStream) sendBatch(batch appendBatch) {
 		if s.config.attemptTimeout > 0 {
 			ctx, cancel = context.WithTimeout(ctx, s.config.attemptTimeout)
 		}
-		result, err = s.client.appendNDJSONCompressed(
+		result, err = s.client.appendNDJSON(
 			ctx,
 			s.database,
 			s.schema,

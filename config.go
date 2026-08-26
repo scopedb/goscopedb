@@ -18,9 +18,7 @@ package scopedb
 
 import "net/http"
 
-// Compression defines the compression used for statement, transform-ingest,
-// and AppendStream request bodies. Direct table appends send identity-encoded
-// NDJSON.
+// Compression defines the compression used for request bodies.
 type Compression string
 
 const (
@@ -39,8 +37,8 @@ type Config struct {
 	// When provided, the client sends it as the Authorization header using the
 	// Bearer scheme.
 	APIKey string `json:"api_key"`
-	// Compression controls how statement, transform-ingest, and AppendStream
-	// request bodies are compressed. It does not affect direct table appends.
+	// Compression controls how request bodies are compressed, including direct
+	// table appends and AppendStream batches.
 	//
 	// The default is CompressionZstd. Set this to CompressionGzip to talk to
 	// older deployments that do not support zstd yet.

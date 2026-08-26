@@ -18,7 +18,6 @@ package scopedb
 
 import (
 	"context"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -68,7 +67,8 @@ func TestTableAppendNDJSONDelegatesRequest(t *testing.T) {
 		require.Equal(t, http.MethodPost, r.Method)
 		require.Equal(t, "/v1/databases/analytics/schemas/events/tables/logs/rows", r.URL.Path)
 		require.Equal(t, "application/x-ndjson", r.Header.Get("Content-Type"))
-		body, err := io.ReadAll(r.Body)
+		require.Equal(t, string(CompressionZstd), r.Header.Get("Content-Encoding"))
+		body, err := decodeCompressedRequestBody(r)
 		require.NoError(t, err)
 		require.Equal(t, ndjson, body)
 		writeTestJSON(t, w, `{"append_state":"committed","num_rows_inserted":2}`)
