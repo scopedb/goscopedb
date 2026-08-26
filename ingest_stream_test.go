@@ -207,6 +207,53 @@ func TestIngestStreamBackpressureHonorsSendContext(t *testing.T) {
 	require.Equal(t, int64(1), result.NumRowsInserted)
 }
 
+func TestIngestByteBudgetPreservesWaiterOrder(t *testing.T) {
+	type acquireResult struct {
+		reservation *ingestByteReservation
+		err         error
+	}
+
+	budget := newIngestByteBudget(8)
+	initial, err := budget.acquire(context.Background(), 4)
+	require.NoError(t, err)
+
+	large := make(chan acquireResult, 1)
+	go func() {
+		reservation, acquireErr := budget.acquire(context.Background(), 8)
+		large <- acquireResult{reservation: reservation, err: acquireErr}
+	}()
+	require.Eventually(t, func() bool {
+		budget.mu.Lock()
+		defer budget.mu.Unlock()
+		return len(budget.waiters) == 1
+	}, time.Second, time.Millisecond)
+
+	small := make(chan acquireResult, 1)
+	go func() {
+		reservation, acquireErr := budget.acquire(context.Background(), 4)
+		small <- acquireResult{reservation: reservation, err: acquireErr}
+	}()
+	require.Eventually(t, func() bool {
+		budget.mu.Lock()
+		defer budget.mu.Unlock()
+		return len(budget.waiters) == 2
+	}, time.Second, time.Millisecond)
+
+	initial.release()
+	largeResult := <-large
+	require.NoError(t, largeResult.err)
+	select {
+	case result := <-small:
+		require.Failf(t, "small waiter jumped the queue", "unexpected result: %v", result.err)
+	default:
+	}
+
+	largeResult.reservation.release()
+	smallResult := <-small
+	require.NoError(t, smallResult.err)
+	smallResult.reservation.release()
+}
+
 func TestIngestStreamBarrierLinearizesConcurrentAdmission(t *testing.T) {
 	t.Parallel()
 

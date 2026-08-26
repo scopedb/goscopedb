@@ -4,6 +4,11 @@ All significant changes to this project will be documented in this file.
 
 ## Unreleased
 
+### Changed
+
+- Streaming write byte budgets now preserve FIFO waiter order so newer or
+  smaller records cannot starve an older blocked producer.
+
 ## v0.6.3 (2026-08-26)
 
 ### Changed

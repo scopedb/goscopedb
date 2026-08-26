@@ -652,14 +652,17 @@ type ingestByteBudget struct {
 	capacity int
 	used     int
 	closed   bool
-	changed  chan struct{}
+	waiters  []*ingestBudgetWaiter
 }
 
 func newIngestByteBudget(capacity int) *ingestByteBudget {
-	return &ingestByteBudget{
-		capacity: capacity,
-		changed:  make(chan struct{}),
-	}
+	return &ingestByteBudget{capacity: capacity}
+}
+
+type ingestBudgetWaiter struct {
+	requested int
+	ready     chan struct{}
+	granted   bool
 }
 
 func (b *ingestByteBudget) acquire(
@@ -672,25 +675,37 @@ func (b *ingestByteBudget) acquire(
 	if requested > b.capacity {
 		return nil, errIngestRecordTooBig
 	}
-	for {
+	b.mu.Lock()
+	if b.closed {
+		b.mu.Unlock()
+		return nil, errIngestBudgetClosed
+	}
+	if len(b.waiters) == 0 && requested <= b.capacity-b.used {
+		b.used += requested
+		b.mu.Unlock()
+		return &ingestByteReservation{budget: b, bytes: requested}, nil
+	}
+	waiter := &ingestBudgetWaiter{requested: requested, ready: make(chan struct{})}
+	b.waiters = append(b.waiters, waiter)
+	b.mu.Unlock()
+
+	select {
+	case <-ctx.Done():
 		b.mu.Lock()
-		if b.closed {
-			b.mu.Unlock()
-			return nil, errIngestBudgetClosed
+		if waiter.granted {
+			b.used -= requested
+			b.drainWaitersLocked()
+		} else {
+			b.removeWaiterLocked(waiter)
+			b.drainWaitersLocked()
 		}
-		if requested <= b.capacity-b.used {
-			b.used += requested
-			b.mu.Unlock()
+		b.mu.Unlock()
+		return nil, ctx.Err()
+	case <-waiter.ready:
+		if waiter.granted {
 			return &ingestByteReservation{budget: b, bytes: requested}, nil
 		}
-		changed := b.changed
-		b.mu.Unlock()
-
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-changed:
-		}
+		return nil, errIngestBudgetClosed
 	}
 }
 
@@ -701,7 +716,7 @@ func (b *ingestByteBudget) release(bytes int) {
 	} else {
 		b.used -= bytes
 	}
-	b.notifyLocked()
+	b.drainWaitersLocked()
 	b.mu.Unlock()
 }
 
@@ -709,14 +724,38 @@ func (b *ingestByteBudget) close() {
 	b.mu.Lock()
 	if !b.closed {
 		b.closed = true
-		b.notifyLocked()
+		for _, waiter := range b.waiters {
+			close(waiter.ready)
+		}
+		b.waiters = nil
 	}
 	b.mu.Unlock()
 }
 
-func (b *ingestByteBudget) notifyLocked() {
-	close(b.changed)
-	b.changed = make(chan struct{})
+func (b *ingestByteBudget) drainWaitersLocked() {
+	for len(b.waiters) > 0 {
+		waiter := b.waiters[0]
+		if waiter.requested > b.capacity-b.used {
+			return
+		}
+		b.waiters[0] = nil
+		b.waiters = b.waiters[1:]
+		b.used += waiter.requested
+		waiter.granted = true
+		close(waiter.ready)
+	}
+}
+
+func (b *ingestByteBudget) removeWaiterLocked(target *ingestBudgetWaiter) {
+	for index, waiter := range b.waiters {
+		if waiter != target {
+			continue
+		}
+		copy(b.waiters[index:], b.waiters[index+1:])
+		b.waiters[len(b.waiters)-1] = nil
+		b.waiters = b.waiters[:len(b.waiters)-1]
+		return
+	}
 }
 
 type ingestByteReservation struct {
