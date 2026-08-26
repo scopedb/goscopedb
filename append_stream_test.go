@@ -223,6 +223,46 @@ func TestAppendStreamBackpressureAndTrySend(t *testing.T) {
 	require.NoError(t, err)
 }
 
+func TestAppendByteBudgetPreservesWaiterOrder(t *testing.T) {
+	budget := newAppendByteBudget(8)
+	require.NoError(t, budget.acquire(context.Background(), 4))
+
+	large := make(chan error, 1)
+	go func() {
+		large <- budget.acquire(context.Background(), 8)
+	}()
+	require.Eventually(t, func() bool {
+		budget.mu.Lock()
+		defer budget.mu.Unlock()
+		return len(budget.waiters) == 1
+	}, time.Second, time.Millisecond)
+
+	// Four bytes are currently available, but immediate admission must not jump
+	// ahead of the older waiter that needs all eight.
+	require.False(t, budget.tryAcquire(4))
+	small := make(chan error, 1)
+	go func() {
+		small <- budget.acquire(context.Background(), 4)
+	}()
+	require.Eventually(t, func() bool {
+		budget.mu.Lock()
+		defer budget.mu.Unlock()
+		return len(budget.waiters) == 2
+	}, time.Second, time.Millisecond)
+
+	budget.release(4)
+	require.NoError(t, <-large)
+	select {
+	case err := <-small:
+		require.Failf(t, "small waiter jumped the queue", "unexpected result: %v", err)
+	default:
+	}
+
+	budget.release(8)
+	require.NoError(t, <-small)
+	budget.release(4)
+}
+
 func TestAppendStreamTrySendReportsConcurrentClose(t *testing.T) {
 	table := newAppendStreamTestTable(t, func(http.ResponseWriter, *http.Request) {
 		t.Fatal("a row rejected during shutdown must not reach the server")

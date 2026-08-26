@@ -1260,42 +1260,61 @@ type appendByteBudget struct {
 	capacity int
 	used     int
 	closed   bool
-	changed  chan struct{}
+	waiters  []*appendBudgetWaiter
 }
 
 func newAppendByteBudget(capacity int) *appendByteBudget {
-	return &appendByteBudget{capacity: capacity, changed: make(chan struct{})}
+	return &appendByteBudget{capacity: capacity}
+}
+
+type appendBudgetWaiter struct {
+	bytes   int
+	ready   chan struct{}
+	granted bool
 }
 
 func (b *appendByteBudget) acquire(ctx context.Context, bytes int) error {
-	for {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		b.mu.Lock()
-		if b.closed {
-			b.mu.Unlock()
-			return ErrAppendStreamClosed
-		}
-		if b.used <= b.capacity-bytes {
-			b.used += bytes
-			b.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	b.mu.Lock()
+	if b.closed {
+		b.mu.Unlock()
+		return ErrAppendStreamClosed
+	}
+	if len(b.waiters) == 0 && b.used <= b.capacity-bytes {
+		b.used += bytes
+		b.mu.Unlock()
+		return nil
+	}
+	waiter := &appendBudgetWaiter{bytes: bytes, ready: make(chan struct{})}
+	b.waiters = append(b.waiters, waiter)
+	b.mu.Unlock()
+
+	select {
+	case <-waiter.ready:
+		if waiter.granted {
 			return nil
 		}
-		changed := b.changed
-		b.mu.Unlock()
-		select {
-		case <-changed:
-		case <-ctx.Done():
-			return ctx.Err()
+		return ErrAppendStreamClosed
+	case <-ctx.Done():
+		b.mu.Lock()
+		if waiter.granted {
+			b.used -= bytes
+			b.drainWaitersLocked()
+		} else {
+			b.removeWaiterLocked(waiter)
+			b.drainWaitersLocked()
 		}
+		b.mu.Unlock()
+		return ctx.Err()
 	}
 }
 
 func (b *appendByteBudget) tryAcquire(bytes int) bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if b.closed || b.used > b.capacity-bytes {
+	if b.closed || len(b.waiters) > 0 || b.used > b.capacity-bytes {
 		return false
 	}
 	b.used += bytes
@@ -1308,7 +1327,7 @@ func (b *appendByteBudget) release(bytes int) {
 	if b.used < 0 {
 		b.used = 0
 	}
-	b.signalLocked()
+	b.drainWaitersLocked()
 	b.mu.Unlock()
 }
 
@@ -1316,12 +1335,36 @@ func (b *appendByteBudget) close() {
 	b.mu.Lock()
 	if !b.closed {
 		b.closed = true
-		b.signalLocked()
+		for _, waiter := range b.waiters {
+			close(waiter.ready)
+		}
+		b.waiters = nil
 	}
 	b.mu.Unlock()
 }
 
-func (b *appendByteBudget) signalLocked() {
-	close(b.changed)
-	b.changed = make(chan struct{})
+func (b *appendByteBudget) drainWaitersLocked() {
+	for len(b.waiters) > 0 {
+		waiter := b.waiters[0]
+		if b.used > b.capacity-waiter.bytes {
+			return
+		}
+		b.waiters[0] = nil
+		b.waiters = b.waiters[1:]
+		b.used += waiter.bytes
+		waiter.granted = true
+		close(waiter.ready)
+	}
+}
+
+func (b *appendByteBudget) removeWaiterLocked(target *appendBudgetWaiter) {
+	for index, waiter := range b.waiters {
+		if waiter != target {
+			continue
+		}
+		copy(b.waiters[index:], b.waiters[index+1:])
+		b.waiters[len(b.waiters)-1] = nil
+		b.waiters = b.waiters[:len(b.waiters)-1]
+		return
+	}
 }
