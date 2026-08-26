@@ -27,7 +27,7 @@ import (
 )
 
 const (
-	maxAppendBodyBytes = 16 * 1024 * 1024
+	maxAppendBodyBytes = 8 * 1024 * 1024
 	maxAppendRows      = 200_000
 )
 
@@ -75,17 +75,7 @@ func (c *Client) appendNDJSON(
 	table string,
 	ndjson []byte,
 ) (AppendRowsResult, error) {
-	return c.appendNDJSONRequest(ctx, database, schema, table, ndjson, false)
-}
-
-func (c *Client) appendNDJSONCompressed(
-	ctx context.Context,
-	database string,
-	schema string,
-	table string,
-	ndjson []byte,
-) (AppendRowsResult, error) {
-	return c.appendNDJSONRequest(ctx, database, schema, table, ndjson, true)
+	return c.appendNDJSONRequest(ctx, database, schema, table, ndjson)
 }
 
 func (c *Client) appendNDJSONRequest(
@@ -94,7 +84,6 @@ func (c *Client) appendNDJSONRequest(
 	schema string,
 	table string,
 	ndjson []byte,
-	compressed bool,
 ) (AppendRowsResult, error) {
 	if err := ctx.Err(); err != nil {
 		return AppendRowsResult{}, err
@@ -126,29 +115,21 @@ func (c *Client) appendNDJSONRequest(
 	if err != nil {
 		return AppendRowsResult{}, err
 	}
-	body := ndjson
-	contentEncoding := Compression("")
-	if compressed {
-		compressedBody, encoding, err := compressRequestBody(ndjson, c.http.compression)
-		if err != nil {
-			return AppendRowsResult{}, newError(
-				ErrorKindUnexpected,
-				"failed to compress table append request body",
-				err,
-			)
-		}
-		body = compressedBody.Bytes()
-		contentEncoding = encoding
+	compressedBody, contentEncoding, err := compressRequestBody(ndjson, c.http.compression)
+	if err != nil {
+		return AppendRowsResult{}, newError(
+			ErrorKindUnexpected,
+			"failed to compress table append request body",
+			err,
+		)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u.String(), bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u.String(), &compressedBody)
 	if err != nil {
 		return AppendRowsResult{}, newError(ErrorKindUnexpected, "failed to build table append request", err)
 	}
 	req.Header.Set("Content-Type", "application/x-ndjson")
-	if contentEncoding != "" {
-		req.Header.Set("Content-Encoding", string(contentEncoding))
-	}
+	req.Header.Set("Content-Encoding", string(contentEncoding))
 
 	resp, err := c.http.do(req)
 	if err != nil {

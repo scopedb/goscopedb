@@ -8,6 +8,11 @@ All significant changes to this project will be documented in this file.
 
 - Moved the module from `github.com/scopedb/scopedb-sdk/go` to `github.com/scopedb/goscopedb`. Applications must update their import path.
 
+### Changed
+
+- Direct `AppendNDJSON` requests now use the client's configured compression
+  and reject uncompressed bodies over 8 MiB.
+
 ## v0.6.2 (2026-08-22)
 
 ### Changed

@@ -56,8 +56,9 @@ func (t *Table) Describe(ctx context.Context) (TableResource, error) {
 	return t.c.FetchTable(ctx, t.databaseName(), t.schemaName(), t.Name)
 }
 
-// AppendNDJSON sends one caller-encoded NDJSON request to this table. The body
-// contains one JSON object per non-empty line, not a JSON array.
+// AppendNDJSON sends one caller-encoded NDJSON request of at most 8 MiB
+// uncompressed. The body contains one JSON object per non-empty line, not a
+// JSON array.
 func (t *Table) AppendNDJSON(ctx context.Context, ndjson []byte) (AppendRowsResult, error) {
 	return t.c.appendNDJSON(ctx, t.databaseName(), t.schemaName(), t.Name, ndjson)
 }
