@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -31,6 +32,35 @@ import (
 
 	"github.com/stretchr/testify/require"
 )
+
+func TestAppendStreamDefaultAndMaximumBatchTarget(t *testing.T) {
+	for _, target := range []int{0, 8 * 1024 * 1024} {
+		t.Run(fmt.Sprint(target), func(t *testing.T) {
+			table := newAppendStreamTestTable(t, func(w http.ResponseWriter, r *http.Request) {
+				body, err := io.ReadAll(r.Body)
+				require.NoError(t, err)
+				writeAppendStreamSuccess(t, w, countAppendRows(body))
+			})
+			stream, err := table.AppendStream(AppendStreamOptions{
+				TargetBatchBytes:     target,
+				FlushInterval:        time.Hour,
+				MaxConcurrentBatches: 1,
+			})
+			require.NoError(t, err)
+			row := map[string]any{"payload": strings.Repeat("x", 2*1024*1024)}
+			require.NoError(t, stream.Send(context.Background(), row))
+			require.NoError(t, stream.Send(context.Background(), row))
+			report, err := stream.Shutdown(context.Background())
+			require.NoError(t, err)
+			require.Equal(t, uint64(2), report.CommittedRows)
+			if target == 0 {
+				require.Equal(t, uint64(2), report.CommittedBatches)
+			} else {
+				require.Equal(t, uint64(1), report.CommittedBatches)
+			}
+		})
+	}
+}
 
 func TestAppendStreamBatchesByRowsAndBarrier(t *testing.T) {
 	var mu sync.Mutex
@@ -851,7 +881,7 @@ func TestAppendStreamOptionValidation(t *testing.T) {
 	}
 	defaults, err := normalizeAppendStreamOptions(AppendStreamOptions{})
 	require.NoError(t, err)
-	require.Equal(t, 8*1024*1024, defaults.targetBatchBytes)
+	require.Equal(t, 4*1024*1024, defaults.targetBatchBytes)
 	require.Equal(t, 64*1024*1024, defaults.maxBufferedBytes)
 	require.Equal(t, defaultAppendAttemptTimeout, defaults.attemptTimeout)
 	require.Equal(t, "stop", AppendFailureStop.String())

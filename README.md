@@ -163,6 +163,8 @@ Table appends write rows to an existing destination table. For most applications
 
 Use `AppendStream` for normal application writes, including continuous and large producers. `Send` accepts typed rows and uses `encoding/json` to encode each value as one top-level JSON object. Standard JSON tags and custom `MarshalJSON` methods apply. The stream batches those objects by size or time, bounds pending bytes, and sends a bounded number of append requests concurrently. The zero-value options use bounded defaults; override them only when the workload needs a different delivery policy or resource bound.
 
+`AppendStream` targets 4 MiB of uncompressed NDJSON per batch by default. Set `TargetBatchBytes` to customize the target, up to 8 MiB. A single row may exceed the target but must fit within the 8 MiB request limit.
+
 Each `AppendStream` request contains at most 8 MiB of uncompressed NDJSON and 200,000 rows. The stream splits automatically at either limit.
 
 ```go
