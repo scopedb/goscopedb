@@ -27,7 +27,7 @@ import (
 )
 
 const (
-	defaultAppendTargetBatchBytes     = maxAppendBodyBytes
+	defaultAppendTargetBatchBytes     = 4 * 1024 * 1024
 	defaultAppendMaxBatchRows         = maxAppendRows
 	defaultAppendFlushInterval        = time.Second
 	defaultAppendCommandCapacity      = 1024
@@ -135,7 +135,7 @@ func (o AppendDeliveryOutcome) String() string {
 type AppendStreamOptions struct {
 	// FailurePolicy defaults to AppendFailureStop.
 	FailurePolicy AppendFailurePolicy
-	// TargetBatchBytes defaults to 8 MiB and cannot exceed the request limit.
+	// TargetBatchBytes defaults to 4 MiB and cannot exceed the request limit.
 	TargetBatchBytes int
 	// MaxBatchRows defaults to 200,000 and cannot exceed the request limit.
 	MaxBatchRows int

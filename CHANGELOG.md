@@ -6,6 +6,8 @@ All significant changes to this project will be documented in this file.
 
 ### Changed
 
+- `AppendStream` now targets 4 MiB per batch by default; the maximum
+  configurable target and uncompressed request limit remain 8 MiB.
 - Streaming write byte budgets now preserve FIFO waiter order so newer or
   smaller records cannot starve an older blocked producer.
 
