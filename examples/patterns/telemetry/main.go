@@ -89,8 +89,8 @@ func run(ctx context.Context) error {
 	}
 	if report.Outcome != scopedb.AppendDeliveryOK {
 		log.Printf("telemetry loss or ambiguity: %+v", report)
-		// Unknown rows may already be committed. Reconcile them; never replay
-		// the same payload blindly.
+		// Retry of an unknown outcome may have created duplicates. Continue
+		// mode reports terminal loss but does not retain payloads for replay.
 	}
 	return nil
 }

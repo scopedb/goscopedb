@@ -210,6 +210,53 @@ JSON serialization validates only that each value encodes as an object. ScopeDB 
 
 The default `AppendFailureStop` policy is strict: the first failed batch stops admission, and a successful barrier confirms that its accepted prefix committed. Concurrent batches have no defined commit order; set `MaxConcurrentBatches: 1` when request submission must be serial.
 
+### At-least-once retries and recovery
+
+AppendStream now retries transient unknown outcomes (including timeouts and lost
+responses) as well as explicitly retryable rejected requests. Duplicates are
+possible. This changes the earlier rejected-only retry default; direct
+`AppendNDJSON` remains a single attempt. Set `Retry.RejectedOnly` to retain the
+previous conservative behavior.
+
+A nil `Retry` uses eight retries, equal-jitter exponential backoff starting at
+100 ms and capped at 5 s, and a five-minute elapsed budget per dispatched batch.
+`Retry-After` is a minimum wait and is not shortened by the backoff cap. The
+elapsed budget may end the batch without another attempt. A non-nil
+`&scopedb.AppendRetryOptions{MaxRetries: 0}` disables retries. Each HTTP attempt
+is additionally bounded by `AttemptTimeout` (30 s by default). Queue wait is
+outside the per-batch retry budget; Flush/Shutdown contexts bound caller waits.
+Use `errors.Is(err, scopedb.ErrAppendRetryExhausted)` to detect exhausted retry
+budgets; `errors.As` still exposes the last append error.
+
+In stop mode, a terminal failure closes admission and retains failed and unsent
+encoded payloads. Other HTTP requests already in flight settle; their successful
+batches are not returned for replay. Retained data continues to consume the
+encoded-byte budget. `Stats().RetainedRows` and `RetainedBytes` report it.
+
+```go
+batches, deliveryErr := stream.TakeUncommitted(ctx)
+// Closes admission and waits for workers before transferring ownership.
+// deliveryErr can be non-nil AND batches non-empty: recover the batches.
+// If ctx expires before settlement, nothing is transferred; call again later.
+for _, batch := range batches {
+    // batch.NDJSON is caller-owned. Save it or replay it through AppendNDJSON.
+    // batch.AppendState can be unknown: replay is allowed to produce duplicates.
+    // Do not advance source checkpoints until the corresponding data commits.
+    log.Printf("unconfirmed rows=%d state=%s error=%v", batch.Rows, batch.AppendState, batch.Err)
+}
+_ = deliveryErr
+```
+
+`TakeUncommitted` is available only in stop mode and transfers each payload once,
+in admission order. It cannot recover data after a process crash. Keep the
+returned bytes until recovery succeeds. A plain failure error or row count alone
+is not a replay cursor. `CommittedRows` counts logical acknowledged rows, not
+physical rows including duplicate copies from prior attempts. A later rejection
+never erases an earlier unknown outcome for that batch.
+
+See [the cross-SDK delivery baseline](DELIVERY.md) for the contract, compatibility
+notes, fault-test matrix, and the Rust/JS implementation gaps.
+
 ### Best-effort logs and telemetry
 
 Logs and telemetry often cannot block a request path or stop forever after one remote failure. Opt into `AppendFailureContinue`, use `TrySend`, and inspect the settlement report and lifetime statistics:
@@ -243,9 +290,9 @@ fmt.Printf("lifetime stats: %+v\n", telemetry.Stats())
 
 `TrySend` does not wait for stream capacity. A nil error still means local admission only; an error can indicate invalid input, an oversized row, a full buffer, or a closed stream. `Stats().DroppedByReason` separates local loss causes.
 
-Continue mode accounts for a failed batch and continues with later rows. A completed report separates committed, failed, unknown, and locally dropped rows. `Stats().LastFailure` preserves the latest HTTP status, request ID, retry metadata, and structured row errors for diagnostics. It is a settlement report, not a commit receipt for every row. The stream retries only an exact temporary batch that the server explicitly marks `rejected`. A timeout, transport failure, or malformed success response is `unknown` and is never automatically retried. Rows with an unknown outcome may already exist remotely, so never blindly replay them.
+Continue mode accounts for a failed batch and continues with later rows. A completed report separates committed, failed, unknown, and locally dropped rows. `Stats().LastFailure` preserves the latest HTTP status, request ID, retry metadata, and structured row errors for diagnostics. It is a settlement report, not a commit receipt for every row. Continue mode releases terminally failed payloads, so it is best-effort and does not provide the default stop mode’s recovery handoff.
 
-An in-memory stream is not a durable queue. Use an application-owned outbox and a reconciliation path when payloads must survive process failure or unknown outcomes.
+An in-memory stream is not a durable queue. Keep source records or an application-owned outbox until a successful commit barrier if payloads must survive process failure. Replaying an unconfirmed batch may create duplicates.
 
 ### Low-level: direct NDJSON append
 
@@ -294,7 +341,7 @@ if errors.As(err, &scopeErr) {
 
 	if details := scopeErr.AppendDetails; details != nil &&
 		details.AppendState == scopedb.AppendStateUnknown {
-		log.Print("append may have committed; reconcile before replaying")
+		log.Print("append may have committed; replay may create duplicates")
 	}
 }
 ```

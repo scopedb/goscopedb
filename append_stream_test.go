@@ -566,7 +566,7 @@ func TestAppendStreamContinuePreservesStructuredLastFailure(t *testing.T) {
 	require.Equal(t, "invalid timestamp", stream.Stats().LastFailure.RowErrors[0].Message)
 }
 
-func TestAppendStreamRetriesOnlyRejectedTemporaryBatches(t *testing.T) {
+func TestAppendStreamRetryPolicies(t *testing.T) {
 	t.Run("rejected temporary", func(t *testing.T) {
 		var calls atomic.Int64
 		table := newAppendStreamTestTable(t, func(w http.ResponseWriter, r *http.Request) {
@@ -588,13 +588,14 @@ func TestAppendStreamRetriesOnlyRejectedTemporaryBatches(t *testing.T) {
 		require.Equal(t, uint64(1), report.CommittedRows)
 	})
 
-	t.Run("unknown", func(t *testing.T) {
+	t.Run("unknown with retries disabled", func(t *testing.T) {
 		var calls atomic.Int64
 		table := newAppendStreamTestTable(t, func(w http.ResponseWriter, _ *http.Request) {
 			calls.Add(1)
 			writeAppendStreamFailure(t, w, http.StatusServiceUnavailable, AppendStateUnknown, true)
 		})
 		stream, err := table.AppendStream(AppendStreamOptions{
+			Retry:            &AppendRetryOptions{MaxRetries: 0},
 			FailurePolicy:    AppendFailureContinue,
 			TargetBatchBytes: 1,
 		})
@@ -616,6 +617,7 @@ func TestAppendStreamRetriesOnlyRejectedTemporaryBatches(t *testing.T) {
 			writeAppendStreamSuccess(t, w, 1)
 		})
 		stream, err := table.AppendStream(AppendStreamOptions{
+			Retry:            &AppendRetryOptions{MaxRetries: 0},
 			FailurePolicy:    AppendFailureContinue,
 			TargetBatchBytes: 1,
 			AttemptTimeout:   10 * time.Millisecond,
@@ -624,7 +626,8 @@ func TestAppendStreamRetriesOnlyRejectedTemporaryBatches(t *testing.T) {
 		require.NoError(t, stream.Send(context.Background(), map[string]int{"id": 1}))
 		report, err := stream.Shutdown(context.Background())
 		require.NoError(t, err)
-		require.Equal(t, int64(1), calls.Load())
+		// The deadline can expire before the request reaches the server.
+		require.LessOrEqual(t, calls.Load(), int64(1))
 		require.Zero(t, report.Retries)
 		require.Equal(t, uint64(1), report.UnknownRows)
 	})
@@ -871,6 +874,11 @@ func TestAppendStreamOptionValidation(t *testing.T) {
 		{MaxConcurrentBatches: -1},
 		{MaxConcurrentBatches: maxAppendConcurrentBatches + 1},
 		{AttemptTimeout: -1},
+		{Retry: &AppendRetryOptions{MaxRetries: -1}},
+		{Retry: &AppendRetryOptions{InitialBackoff: -1}},
+		{Retry: &AppendRetryOptions{MaxBackoff: -1}},
+		{Retry: &AppendRetryOptions{MaxElapsedTime: -1}},
+		{Retry: &AppendRetryOptions{InitialBackoff: time.Second, MaxBackoff: time.Millisecond}},
 	}
 	for _, options := range invalid {
 		_, err := table.AppendStream(options)
@@ -884,6 +892,14 @@ func TestAppendStreamOptionValidation(t *testing.T) {
 	require.Equal(t, 4*1024*1024, defaults.targetBatchBytes)
 	require.Equal(t, 64*1024*1024, defaults.maxBufferedBytes)
 	require.Equal(t, defaultAppendAttemptTimeout, defaults.attemptTimeout)
+	require.Equal(t, 8, defaults.retry.MaxRetries)
+	require.Equal(t, 5*time.Minute, defaults.retry.MaxElapsedTime)
+	require.False(t, defaults.retry.RejectedOnly)
+	for range 100 {
+		delay := appendRetryDelay(time.Second, 0)
+		require.GreaterOrEqual(t, delay, 500*time.Millisecond)
+		require.Less(t, delay, time.Second)
+	}
 	require.Equal(t, "stop", AppendFailureStop.String())
 	require.Equal(t, "continue", AppendFailureContinue.String())
 	require.Equal(t, "open", AppendStreamOpen.String())
@@ -895,7 +911,7 @@ func TestAppendStreamOptionValidation(t *testing.T) {
 	require.Equal(t, "failed", AppendDeliveryFailed.String())
 	require.Equal(t, "unknown", AppendDeliveryUnknown.String())
 	require.Equal(t, 2*time.Second, appendRetryDelay(time.Second, 2*time.Second))
-	require.Equal(t, defaultAppendMaxBackoff, appendRetryDelay(time.Second, time.Hour))
+	require.Equal(t, time.Hour, appendRetryDelay(time.Second, time.Hour))
 }
 
 func newAppendStreamTestTable(t *testing.T, handler http.HandlerFunc) *Table {
