@@ -21,6 +21,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/rand/v2"
+	"net/http"
 	"slices"
 	"sync"
 	"time"
@@ -38,6 +40,7 @@ const (
 	defaultAppendInitialBackoff       = 100 * time.Millisecond
 	defaultAppendMaxBackoff           = 5 * time.Second
 	defaultAppendAttemptTimeout       = 30 * time.Second
+	defaultAppendRetryElapsedTime     = 5 * time.Minute
 )
 
 var (
@@ -45,6 +48,9 @@ var (
 	ErrAppendStreamFull = errors.New("append stream buffer is full")
 	// ErrAppendStreamClosed means the stream no longer accepts rows.
 	ErrAppendStreamClosed = errors.New("append stream is closed")
+	// ErrAppendRetryExhausted means the configured retry count or elapsed budget
+	// ended. The wrapped append error still describes the last attempt.
+	ErrAppendRetryExhausted = errors.New("append retry budget exhausted")
 	// ErrAppendRowInvalid means a row did not encode to one JSON object.
 	ErrAppendRowInvalid = errors.New("append row must encode to a JSON object")
 	// ErrAppendRowTooLarge means one encoded row exceeds the append stream request limit.
@@ -130,18 +136,33 @@ func (o AppendDeliveryOutcome) String() string {
 	}
 }
 
+// AppendRetryOptions configures retries of an exact encoded batch. A nil Retry
+// uses the defaults; a non-nil option with MaxRetries=0 disables retries.
+type AppendRetryOptions struct {
+	MaxRetries int
+	// Zero durations use defaults: 100 ms initial, 5 s maximum backoff, 5 min
+	// elapsed budget per dispatched batch (including HTTP attempts).
+	InitialBackoff time.Duration
+	MaxBackoff     time.Duration
+	MaxElapsedTime time.Duration
+	// RejectedOnly restores conservative retry behavior. By default transient
+	// unknown outcomes are retried too, so the table may contain duplicates.
+	RejectedOnly bool
+}
+
 // AppendStreamOptions configures bounded asynchronous table appends.
 // Zero-valued fields use SDK defaults.
 type AppendStreamOptions struct {
 	// FailurePolicy defaults to AppendFailureStop.
 	FailurePolicy AppendFailurePolicy
+	Retry         *AppendRetryOptions
 	// TargetBatchBytes defaults to 4 MiB and cannot exceed the request limit.
 	TargetBatchBytes int
 	// MaxBatchRows defaults to 200,000 and cannot exceed the request limit.
 	MaxBatchRows int
 	// FlushInterval defaults to one second.
 	FlushInterval time.Duration
-	// MaxBufferedBytes bounds admitted rows not yet settled. It defaults to 64 MiB.
+	// MaxBufferedBytes bounds encoded pending rows. It defaults to 64 MiB.
 	MaxBufferedBytes int
 	// MaxConcurrentBatches defaults to four, cannot exceed 1024, and may be set
 	// to one for serial request submission.
@@ -198,8 +219,8 @@ type AppendLastFailure struct {
 	RequestID string
 	// RetryAfter is the service-provided retry delay, when present.
 	RetryAfter time.Duration
-	// Retryable reports the service's retry classification. AppendStream retries
-	// only exact rejected batches, regardless of this field alone.
+	// Retryable reports the service's classification, not the stream's retry
+	// decision. The stream also retries transient unknown outcomes by default.
 	Retryable bool
 	// RowErrors contains structured validation failures reported for the batch.
 	RowErrors []AppendRowError
@@ -235,6 +256,7 @@ type normalizedAppendStreamOptions struct {
 	maxBufferedBytes     int
 	maxConcurrentBatches int
 	attemptTimeout       time.Duration
+	retry                AppendRetryOptions
 }
 
 // AppendStream creates a bounded asynchronous append stream for this table.
@@ -256,6 +278,7 @@ func (t *Table) AppendStream(options AppendStreamOptions) (*AppendStream, error)
 		budget:        newAppendByteBudget(config.maxBufferedBytes),
 		admissionDone: make(chan struct{}),
 		terminalDone:  make(chan struct{}),
+		failureDone:   make(chan struct{}),
 	}
 	stream.shared.state = AppendStreamOpen
 	go stream.run()
@@ -271,6 +294,25 @@ func normalizeAppendStreamOptions(options AppendStreamOptions) (normalizedAppend
 		maxBufferedBytes:     options.MaxBufferedBytes,
 		maxConcurrentBatches: options.MaxConcurrentBatches,
 		attemptTimeout:       options.AttemptTimeout,
+	}
+	config.retry = AppendRetryOptions{MaxRetries: defaultAppendMaxRetries}
+	if options.Retry != nil {
+		config.retry = *options.Retry
+	}
+	if config.retry.MaxRetries < 0 || config.retry.InitialBackoff < 0 || config.retry.MaxBackoff < 0 || config.retry.MaxElapsedTime < 0 {
+		return config, appendStreamConfigError("retry limits must not be negative")
+	}
+	if config.retry.InitialBackoff == 0 {
+		config.retry.InitialBackoff = defaultAppendInitialBackoff
+	}
+	if config.retry.MaxBackoff == 0 {
+		config.retry.MaxBackoff = defaultAppendMaxBackoff
+	}
+	if config.retry.MaxElapsedTime == 0 {
+		config.retry.MaxElapsedTime = defaultAppendRetryElapsedTime
+	}
+	if config.retry.InitialBackoff > config.retry.MaxBackoff {
+		return config, appendStreamConfigError("initial retry backoff exceeds maximum backoff")
 	}
 	if config.failurePolicy != AppendFailureStop && config.failurePolicy != AppendFailureContinue {
 		return config, appendStreamConfigError("failure policy is invalid")
@@ -354,10 +396,9 @@ type appendBatch struct {
 }
 
 type appendBatchResult struct {
-	batch   appendBatch
-	result  AppendRowsResult
-	err     error
-	retries uint64
+	batch  appendBatch
+	result AppendRowsResult
+	err    error
 }
 
 type appendCounters struct {
@@ -407,6 +448,7 @@ type AppendStream struct {
 	admissionOnce sync.Once
 	terminalDone  chan struct{}
 	terminalOnce  sync.Once
+	failureDone   chan struct{}
 
 	shared appendSharedState
 }
@@ -452,6 +494,11 @@ func (s *AppendStream) Send(ctx context.Context, row any) error {
 
 	s.admissionMu.Lock()
 	defer s.admissionMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		s.releaseCommandSlot()
+		s.budget.release(reservedBytes)
+		return err
+	}
 	if err := s.checkOpen(); err != nil {
 		s.releaseCommandSlot()
 		s.budget.release(reservedBytes)
@@ -952,10 +999,26 @@ func (w *appendWorker) dispatchReady() {
 func (s *AppendStream) sendBatch(batch appendBatch) {
 	var result AppendRowsResult
 	var err error
-	var retries uint64
-	backoff := defaultAppendInitialBackoff
+	backoff := s.config.retry.InitialBackoff
+	deliveryCtx, deliveryCancel := context.WithTimeout(context.Background(), s.config.retry.MaxElapsedTime)
+	defer deliveryCancel()
+	var ambiguous error
+retryLoop:
 	for attempt := 0; ; attempt++ {
-		ctx := context.Background()
+		if attempt > 0 {
+			if deliveryCtx.Err() != nil {
+				break
+			}
+			select {
+			case <-s.failureDone:
+				break retryLoop
+			default:
+			}
+			s.shared.mu.Lock()
+			s.shared.counters.retries++
+			s.shared.mu.Unlock()
+		}
+		ctx := deliveryCtx
 		cancel := func() {}
 		if s.config.attemptTimeout > 0 {
 			ctx, cancel = context.WithTimeout(ctx, s.config.attemptTimeout)
@@ -976,7 +1039,14 @@ func (s *AppendStream) sendBatch(batch appendBatch) {
 				), nil)
 			}
 		}
-		if err == nil || attempt >= defaultAppendMaxRetries || !isRetryableRejectedAppend(err) {
+		if err != nil && appendErrorState(err) == AppendStateUnknown {
+			ambiguous = err
+		}
+		if err == nil || !s.isRetryableAppend(err) {
+			break
+		}
+		if attempt >= s.config.retry.MaxRetries {
+			err = fmt.Errorf("%w after %d attempts: %w", ErrAppendRetryExhausted, attempt+1, err)
 			break
 		}
 		var retryAfter time.Duration
@@ -985,27 +1055,58 @@ func (s *AppendStream) sendBatch(batch appendBatch) {
 			retryAfter = scopeErr.RetryAfter
 		}
 		delay := appendRetryDelay(backoff, retryAfter)
-		time.Sleep(delay)
-		retries++
-		if backoff < defaultAppendMaxBackoff {
+		timer := time.NewTimer(delay)
+		select {
+		case <-timer.C:
+		case <-deliveryCtx.Done():
+			timer.Stop()
+			break retryLoop
+		case <-s.failureDone:
+			timer.Stop()
+			break retryLoop
+		}
+		if backoff > s.config.retry.MaxBackoff/2 {
+			backoff = s.config.retry.MaxBackoff
+		} else {
 			backoff *= 2
-			if backoff > defaultAppendMaxBackoff {
-				backoff = defaultAppendMaxBackoff
-			}
 		}
 	}
-	s.results <- appendBatchResult{batch: batch, result: result, err: err, retries: retries}
+	if err != nil && deliveryCtx.Err() != nil {
+		err = fmt.Errorf("%w after elapsed budget %s: %w", ErrAppendRetryExhausted, s.config.retry.MaxElapsedTime, err)
+	}
+	// A later rejected attempt cannot prove an earlier unknown attempt did not
+	// commit. Only a successful acknowledgement resolves the batch for replay.
+	if err != nil && ambiguous != nil && appendErrorState(err) != AppendStateUnknown {
+		err = unknownAppendStreamError("an earlier append attempt may have committed; last attempt: "+err.Error(), err)
+	}
+	s.results <- appendBatchResult{batch: batch, result: result, err: err}
 }
 
 func appendRetryDelay(backoff time.Duration, retryAfter time.Duration) time.Duration {
-	delay := backoff
+	// Equal jitter avoids synchronized retries. Retry-After is a lower bound,
+	// even when longer than MaxBackoff; the elapsed budget bounds the wait.
+	delay := backoff/2 + time.Duration(rand.Int64N(max(int64(backoff-backoff/2), 1))) // #nosec G404 -- retry jitter does not require cryptographic randomness.
 	if retryAfter > delay {
 		delay = retryAfter
 	}
-	if delay > defaultAppendMaxBackoff {
-		delay = defaultAppendMaxBackoff
-	}
 	return delay
+}
+
+func (s *AppendStream) isRetryableAppend(err error) bool {
+	if isRetryableRejectedAppend(err) {
+		return true
+	}
+	if s.config.retry.RejectedOnly {
+		return false
+	}
+	var e *Error
+	if !errors.As(err, &e) || e.AppendDetails == nil || e.AppendDetails.AppendState != AppendStateUnknown {
+		return false
+	}
+	// Authentication, schema, and other permanent HTTP errors must not spin.
+	return e.HTTPStatus == 0 || (e.HTTPStatus >= 200 && e.HTTPStatus < 300) ||
+		e.HTTPStatus == http.StatusRequestTimeout || e.HTTPStatus == http.StatusTooManyRequests ||
+		e.HTTPStatus >= 500
 }
 
 func isRetryableRejectedAppend(err error) bool {
@@ -1017,7 +1118,7 @@ func isRetryableRejectedAppend(err error) bool {
 }
 
 func unknownAppendStreamError(message string, cause error) error {
-	return &Error{
+	result := &Error{
 		Kind:      ErrorKindAppendRowsFailed,
 		Message:   message,
 		Retryable: false,
@@ -1027,17 +1128,30 @@ func unknownAppendStreamError(message string, cause error) error {
 		},
 		cause: cause,
 	}
+	// Preserve the last attempt's diagnostic metadata while the state describes
+	// the outcome across all attempts, including an earlier lost response.
+	var last *Error
+	if errors.As(cause, &last) {
+		result.HTTPStatus = last.HTTPStatus
+		result.RequestID = last.RequestID
+		result.RetryAfter = last.RetryAfter
+		if last.AppendDetails != nil {
+			result.AppendDetails.RowErrors = slices.Clone(last.AppendDetails.RowErrors)
+			result.AppendDetails.RowErrorsTruncated = last.AppendDetails.RowErrorsTruncated
+		}
+	}
+	return result
 }
 
 func (w *appendWorker) handleResult(result appendBatchResult) {
 	w.inFlight--
-	w.stream.budget.release(result.batch.reservedBytes)
+	// Update pending counters before capacity can admit another producer.
+	defer w.stream.budget.release(result.batch.reservedBytes)
 	rows := uint64(result.batch.rows) // #nosec G115 -- batch rows are capped at maxAppendRows.
 	w.stream.shared.mu.Lock()
 	w.stream.shared.inFlightBatches--
 	w.stream.shared.pendingRows -= rows
 	w.stream.shared.pendingBytes -= result.batch.reservedBytes
-	w.stream.shared.counters.retries += result.retries
 	if result.err == nil {
 		w.stream.shared.counters.committedRows += rows
 		w.stream.shared.counters.committedBatches++
@@ -1102,6 +1216,7 @@ func copyAppendLastFailure(failure *AppendLastFailure) *AppendLastFailure {
 func (w *appendWorker) startStopping(err error) {
 	if !w.stopping {
 		w.stopping = true
+		close(w.stream.failureDone)
 		w.fatal = err
 		w.stopTimer()
 		w.stream.admissionMu.Lock()
@@ -1135,22 +1250,22 @@ func (w *appendWorker) startStopping(err error) {
 }
 
 func (w *appendWorker) failUnsentRecord(record appendRecord) {
-	w.stream.budget.release(record.reservedBytes)
 	w.stream.shared.mu.Lock()
 	w.stream.shared.pendingRows--
 	w.stream.shared.pendingBytes -= record.reservedBytes
 	w.stream.shared.counters.failedRows++
 	w.stream.shared.mu.Unlock()
+	w.stream.budget.release(record.reservedBytes)
 }
 
 func (w *appendWorker) failUnsentBatch(batch appendBatch) {
-	w.stream.budget.release(batch.reservedBytes)
 	rows := uint64(batch.rows) // #nosec G115 -- batch rows are capped at maxAppendRows.
 	w.stream.shared.mu.Lock()
 	w.stream.shared.pendingRows -= rows
 	w.stream.shared.pendingBytes -= batch.reservedBytes
 	w.stream.shared.counters.failedRows += rows
 	w.stream.shared.mu.Unlock()
+	w.stream.budget.release(batch.reservedBytes)
 }
 
 func (w *appendWorker) drainAfterFailure() {
