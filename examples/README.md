@@ -60,7 +60,7 @@ For most application writes, start with `append_stream`. It accepts typed rows a
 - `TrySend` does not wait for stream capacity. Use it for latency-sensitive logs and telemetry and monitor `Stats().DroppedByReason`.
 - `Flush` settles the prefix accepted before its barrier. `Shutdown` closes admission and settles all accepted rows.
 - A successful strict append-stream barrier confirms its accepted prefix committed. A continue-mode barrier is settlement; inspect every delivery report for failed, unknown, and locally dropped rows.
-- The append stream retries exact batches after transient failures, including unknown outcomes. Retries use bounded exponential backoff with jitter and respect Retry-After. See [the delivery baseline](../DELIVERY.md).
+- The append stream retries exact batches after transient failures, including unknown outcomes. See [retries and recovery](../README.md#at-least-once-retries-and-recovery).
 - Unknown rows may already be committed; replay can create duplicates. In stop mode, `TakeUncommitted` transfers terminally failed and unsent batches for application-owned recovery. Keep a durable source or outbox if data must survive a crash.
 - Each background write request has a finite 30-second timeout by default. A timeout makes that request's commit outcome unknown.
 - Concurrent append batches have no defined commit order. Set `MaxConcurrentBatches: 1` when request submission must be serial.

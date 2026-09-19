@@ -212,50 +212,19 @@ The default `AppendFailureStop` policy is strict: the first failed batch stops a
 
 ### At-least-once retries and recovery
 
-AppendStream now retries transient unknown outcomes (including timeouts and lost
-responses) as well as explicitly retryable rejected requests. Duplicates are
-possible. This changes the earlier rejected-only retry default; direct
-`AppendNDJSON` remains a single attempt. Set `Retry.RejectedOnly` to retain the
-previous conservative behavior.
+`AppendStream` retries transient failures, including timeouts and lost responses,
+so delivery may produce duplicates. Configure retries through `AppendRetryOptions`;
+a nil `Retry` uses defaults, while `MaxRetries: 0` in a non-nil option disables
+retries. Set `MaxRetries: 8, RejectedOnly: true` to keep the previous retry behavior.
 
-A nil `Retry` uses eight retries, equal-jitter exponential backoff starting at
-100 ms and capped at 5 s, and a five-minute elapsed budget per dispatched batch.
-`Retry-After` is a minimum wait and is not shortened by the backoff cap. The
-elapsed budget may end the batch without another attempt. A non-nil
-`&scopedb.AppendRetryOptions{MaxRetries: 0}` disables retries. Each HTTP attempt
-is additionally bounded by `AttemptTimeout` (30 s by default). Queue wait is
-outside the per-batch retry budget; Flush/Shutdown contexts bound caller waits.
-Use `errors.Is(err, scopedb.ErrAppendRetryExhausted)` to detect exhausted retry
-budgets; `errors.As` still exposes the last append error.
+In stop mode, `TakeUncommitted(ctx)` closes the stream, waits for in-flight requests,
+and returns failed and unsent NDJSON for recovery. Process returned batches even
+when the error is non-nil; each payload is transferred only once. If the caller's
+wait times out, no data is transferred and the call can be retried.
 
-In stop mode, a terminal failure closes admission and retains failed and unsent
-encoded payloads. Other HTTP requests already in flight settle; their successful
-batches are not returned for replay. Retained data continues to consume the
-encoded-byte budget. `Stats().RetainedRows` and `RetainedBytes` report it.
-
-```go
-batches, deliveryErr := stream.TakeUncommitted(ctx)
-// Closes admission and waits for workers before transferring ownership.
-// deliveryErr can be non-nil AND batches non-empty: recover the batches.
-// If ctx expires before settlement, nothing is transferred; call again later.
-for _, batch := range batches {
-    // batch.NDJSON is caller-owned. Save it or replay it through AppendNDJSON.
-    // batch.AppendState can be unknown: replay is allowed to produce duplicates.
-    // Do not advance source checkpoints until the corresponding data commits.
-    log.Printf("unconfirmed rows=%d state=%s error=%v", batch.Rows, batch.AppendState, batch.Err)
-}
-_ = deliveryErr
-```
-
-`TakeUncommitted` is available only in stop mode and transfers each payload once,
-in admission order. It cannot recover data after a process crash. Keep the
-returned bytes until recovery succeeds. A plain failure error or row count alone
-is not a replay cursor. `CommittedRows` counts logical acknowledged rows, not
-physical rows including duplicate copies from prior attempts. A later rejection
-never erases an earlier unknown outcome for that batch.
-
-See [the cross-SDK delivery baseline](DELIVERY.md) for the contract, compatibility
-notes, fault-test matrix, and the Rust/JS implementation gaps.
+The buffer is in memory. Keep a durable source or outbox for crash recovery, and
+advance source checkpoints only after a successful commit barrier. Continue mode
+is best effort and does not retain failed payloads.
 
 ### Best-effort logs and telemetry
 
