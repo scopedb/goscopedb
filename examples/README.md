@@ -61,7 +61,7 @@ For most application writes, start with `append_stream`. It accepts typed rows a
 - `Flush` settles the prefix accepted before its barrier. `Shutdown` closes admission and settles all accepted rows.
 - A successful strict append-stream barrier confirms its accepted prefix committed. A continue-mode barrier is settlement; inspect every delivery report for failed, unknown, and locally dropped rows.
 - The append stream retries exact batches after transient failures, including unknown outcomes. See [retries and recovery](../README.md#at-least-once-retries-and-recovery).
-- Unknown rows may already be committed; replay can create duplicates. In stop mode, `TakeUncommitted` transfers terminally failed and unsent batches for application-owned recovery. Keep a durable source or outbox if data must survive a crash.
+- Unknown rows may already be committed; replay can create duplicates. Keep source records until a successful stop-mode commit barrier; on failure, settle the old stream and replay the unconfirmed interval. Use a durable source or outbox for crash recovery.
 - Each background write request has a finite 30-second timeout by default. A timeout makes that request's commit outcome unknown.
 - Concurrent append batches have no defined commit order. Set `MaxConcurrentBatches: 1` when request submission must be serial.
 

@@ -217,14 +217,11 @@ so delivery may produce duplicates. Configure retries through `AppendRetryOption
 a nil `Retry` uses defaults, while `MaxRetries: 0` in a non-nil option disables
 retries. Set `MaxRetries: 8, RejectedOnly: true` to keep the previous retry behavior.
 
-In stop mode, `TakeUncommitted(ctx)` closes the stream, waits for in-flight requests,
-and returns failed and unsent NDJSON for recovery. Process returned batches even
-when the error is non-nil; each payload is transferred only once. If the caller's
-wait times out, no data is transferred and the call can be retried.
-
-The buffer is in memory. Keep a durable source or outbox for crash recovery, and
-advance source checkpoints only after a successful commit barrier. Continue mode
-is best effort and does not retain failed payloads.
+In stop mode, a failed commit barrier stops the stream. Keep source data until
+`Flush` or `Shutdown` succeeds; on failure, settle the old stream with `Shutdown`
+and replay the unconfirmed source interval through a new stream. Replaying may
+duplicate batches that already committed. The SDK does not retain failed payloads.
+Use a durable source or outbox for crash recovery; continue mode is best effort.
 
 ### Best-effort logs and telemetry
 
@@ -259,7 +256,7 @@ fmt.Printf("lifetime stats: %+v\n", telemetry.Stats())
 
 `TrySend` does not wait for stream capacity. A nil error still means local admission only; an error can indicate invalid input, an oversized row, a full buffer, or a closed stream. `Stats().DroppedByReason` separates local loss causes.
 
-Continue mode accounts for a failed batch and continues with later rows. A completed report separates committed, failed, unknown, and locally dropped rows. `Stats().LastFailure` preserves the latest HTTP status, request ID, retry metadata, and structured row errors for diagnostics. It is a settlement report, not a commit receipt for every row. Continue mode releases terminally failed payloads, so it is best-effort and does not provide the default stop mode’s recovery handoff.
+Continue mode accounts for a failed batch and continues with later rows. A completed report separates committed, failed, unknown, and locally dropped rows. `Stats().LastFailure` preserves the latest HTTP status, request ID, retry metadata, and structured row errors for diagnostics. It is a settlement report, not a commit receipt for every row. Continue mode releases terminally failed payloads and proceeds with later rows, so it is best effort.
 
 An in-memory stream is not a durable queue. Keep source records or an application-owned outbox until a successful commit barrier if payloads must survive process failure. Replaying an unconfirmed batch may create duplicates.
 

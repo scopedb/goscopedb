@@ -162,7 +162,7 @@ type AppendStreamOptions struct {
 	MaxBatchRows int
 	// FlushInterval defaults to one second.
 	FlushInterval time.Duration
-	// MaxBufferedBytes bounds encoded pending and retained rows. It defaults to 64 MiB.
+	// MaxBufferedBytes bounds encoded pending rows. It defaults to 64 MiB.
 	MaxBufferedBytes int
 	// MaxConcurrentBatches defaults to four, cannot exceed 1024, and may be set
 	// to one for serial request submission.
@@ -242,11 +242,6 @@ type AppendStreamStats struct {
 	PendingRows     uint64
 	PendingBytes    int
 	InFlightBatches int
-	// RetainedRows and RetainedBytes describe failed/unsent data held for
-	// TakeUncommitted in stop mode. PendingBytes + RetainedBytes stays within
-	// MaxBufferedBytes (encoded admission bytes, not total process memory).
-	RetainedRows  uint64
-	RetainedBytes int
 	// LastFailure is nil until a remote batch fails.
 	LastFailure *AppendLastFailure
 	// LastReport is nil until a delivery barrier completes.
@@ -377,7 +372,6 @@ type appendCommand struct {
 }
 
 type appendRecord struct {
-	sequence      uint64
 	payload       []byte
 	reservedBytes int
 }
@@ -396,7 +390,6 @@ type appendBarrierResult struct {
 }
 
 type appendBatch struct {
-	sequence      uint64
 	payload       []byte
 	rows          int
 	reservedBytes int
@@ -434,24 +427,6 @@ type appendSharedState struct {
 	fatal           error
 	terminalReport  AppendDeliveryReport
 	hasTerminal     bool
-	retained        []retainedAppendBatch
-	retainedRows    uint64
-	retainedBytes   int
-}
-
-// AppendUncommittedBatch contains accepted data without a successful commit
-// acknowledgement. Replaying it may insert duplicates. NDJSON is caller-owned
-// after TakeUncommitted; Err explains why this batch was not confirmed.
-type AppendUncommittedBatch struct {
-	NDJSON      []byte
-	Rows        int
-	AppendState AppendState
-	Err         error
-}
-
-type retainedAppendBatch struct {
-	AppendUncommittedBatch
-	sequence uint64
 }
 
 // AppendStream asynchronously batches rows into bounded NDJSON append requests.
@@ -529,9 +504,8 @@ func (s *AppendStream) Send(ctx context.Context, row any) error {
 		s.budget.release(reservedBytes)
 		return err
 	}
-	sequence := s.noteAccepted(reservedBytes)
+	s.noteAccepted(reservedBytes)
 	s.commands <- appendCommand{record: &appendRecord{
-		sequence:      sequence,
 		payload:       payload,
 		reservedBytes: reservedBytes,
 	}}
@@ -578,9 +552,8 @@ func (s *AppendStream) TrySend(row any) error {
 		s.noteDrop(appendDropClosed)
 		return err
 	}
-	sequence := s.noteAccepted(reservedBytes)
+	s.noteAccepted(reservedBytes)
 	s.commands <- appendCommand{record: &appendRecord{
-		sequence:      sequence,
 		payload:       payload,
 		reservedBytes: reservedBytes,
 	}}
@@ -700,8 +673,6 @@ func (s *AppendStream) Stats() AppendStreamStats {
 		PendingRows:     s.shared.pendingRows,
 		PendingBytes:    s.shared.pendingBytes,
 		InFlightBatches: s.shared.inFlightBatches,
-		RetainedRows:    s.shared.retainedRows,
-		RetainedBytes:   s.shared.retainedBytes,
 	}
 	if s.shared.lastFailure != nil {
 		stats.LastFailure = copyAppendLastFailure(s.shared.lastFailure)
@@ -710,48 +681,6 @@ func (s *AppendStream) Stats() AppendStreamStats {
 		stats.LastReport = copyAppendReport(*s.shared.lastReport)
 	}
 	return stats
-}
-
-// TakeUncommitted closes admission, waits for all workers to settle, and
-// transfers failed and unsent batches in admission order. Only stop mode
-// retains payloads. The returned error is the terminal delivery error: batches
-// can be non-empty alongside that error. A context timeout transfers nothing;
-// call again later. Subsequent calls return no batches. Cancellation never
-// transfers data still owned by an HTTP worker. This is not a durable outbox.
-func (s *AppendStream) TakeUncommitted(ctx context.Context) ([]AppendUncommittedBatch, error) {
-	if s.config.failurePolicy != AppendFailureStop {
-		return nil, appendStreamConfigError("TakeUncommitted requires stop failure policy")
-	}
-	_, err := s.Shutdown(ctx)
-	if err != nil && err == ctx.Err() { //nolint:errorlint // Match the caller wait error exactly, not a terminal append error wrapping a deadline.
-		return nil, err
-	}
-	select {
-	case <-s.terminalDone:
-	default:
-		return nil, err
-	}
-	s.shared.mu.Lock()
-	slices.SortFunc(s.shared.retained, func(a, b retainedAppendBatch) int {
-		if a.sequence < b.sequence {
-			return -1
-		}
-		if a.sequence > b.sequence {
-			return 1
-		}
-		return 0
-	})
-	batches := make([]AppendUncommittedBatch, len(s.shared.retained))
-	for i, batch := range s.shared.retained {
-		batches[i] = batch.AppendUncommittedBatch
-	}
-	bytes := s.shared.retainedBytes
-	s.shared.retained = nil
-	s.shared.retainedRows = 0
-	s.shared.retainedBytes = 0
-	s.shared.mu.Unlock()
-	s.budget.release(bytes)
-	return batches, err
 }
 
 func (s *AppendStream) enqueueShutdown() {
@@ -824,14 +753,12 @@ func (s *AppendStream) closedOrFatalError() error {
 	return ErrAppendStreamClosed
 }
 
-func (s *AppendStream) noteAccepted(bytes int) uint64 {
+func (s *AppendStream) noteAccepted(bytes int) {
 	s.shared.mu.Lock()
 	s.shared.counters.acceptedRows++
 	s.shared.pendingRows++
 	s.shared.pendingBytes += bytes
-	sequence := s.shared.counters.acceptedRows
 	s.shared.mu.Unlock()
-	return sequence
 }
 
 type appendDropReason uint8
@@ -1048,7 +975,6 @@ func (w *appendWorker) finalizeCurrent() {
 		reservedBytes += w.current[index].reservedBytes
 	}
 	w.ready = append(w.ready, appendBatch{
-		sequence:      w.current[0].sequence,
 		payload:       payload,
 		rows:          len(w.current),
 		reservedBytes: reservedBytes,
@@ -1219,19 +1145,13 @@ func unknownAppendStreamError(message string, cause error) error {
 
 func (w *appendWorker) handleResult(result appendBatchResult) {
 	w.inFlight--
-	retain := result.err != nil && w.stream.config.failurePolicy == AppendFailureStop
-	if !retain {
-		// Update pending counters before capacity can admit another producer.
-		defer w.stream.budget.release(result.batch.reservedBytes)
-	}
+	// Update pending counters before capacity can admit another producer.
+	defer w.stream.budget.release(result.batch.reservedBytes)
 	rows := uint64(result.batch.rows) // #nosec G115 -- batch rows are capped at maxAppendRows.
 	w.stream.shared.mu.Lock()
 	w.stream.shared.inFlightBatches--
 	w.stream.shared.pendingRows -= rows
 	w.stream.shared.pendingBytes -= result.batch.reservedBytes
-	if retain {
-		w.retainBatchLocked(result.batch, appendErrorState(result.err), result.err)
-	}
 	if result.err == nil {
 		w.stream.shared.counters.committedRows += rows
 		w.stream.shared.counters.committedBatches++
@@ -1334,8 +1254,8 @@ func (w *appendWorker) failUnsentRecord(record appendRecord) {
 	w.stream.shared.pendingRows--
 	w.stream.shared.pendingBytes -= record.reservedBytes
 	w.stream.shared.counters.failedRows++
-	w.retainBatchLocked(appendBatch{sequence: record.sequence, payload: record.payload, rows: 1, reservedBytes: record.reservedBytes}, AppendStateRejected, w.fatal)
 	w.stream.shared.mu.Unlock()
+	w.stream.budget.release(record.reservedBytes)
 }
 
 func (w *appendWorker) failUnsentBatch(batch appendBatch) {
@@ -1344,17 +1264,8 @@ func (w *appendWorker) failUnsentBatch(batch appendBatch) {
 	w.stream.shared.pendingRows -= rows
 	w.stream.shared.pendingBytes -= batch.reservedBytes
 	w.stream.shared.counters.failedRows += rows
-	w.retainBatchLocked(batch, AppendStateRejected, w.fatal)
 	w.stream.shared.mu.Unlock()
-}
-
-func (w *appendWorker) retainBatchLocked(batch appendBatch, state AppendState, err error) {
-	w.stream.shared.retained = append(w.stream.shared.retained, retainedAppendBatch{
-		AppendUncommittedBatch: AppendUncommittedBatch{NDJSON: batch.payload, Rows: batch.rows, AppendState: state, Err: err},
-		sequence:               batch.sequence,
-	})
-	w.stream.shared.retainedRows += uint64(batch.rows) // #nosec G115 -- bounded batch.
-	w.stream.shared.retainedBytes += batch.reservedBytes
+	w.stream.budget.release(batch.reservedBytes)
 }
 
 func (w *appendWorker) drainAfterFailure() {

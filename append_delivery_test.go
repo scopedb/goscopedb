@@ -57,9 +57,6 @@ func TestAppendAtLeastOnceLostAcknowledgement(t *testing.T) {
 	require.Equal(t, uint64(1), report.CommittedRows) // logical rows, not remote copies
 	require.Equal(t, uint64(1), report.Retries)
 	require.Zero(t, report.UnknownRows)
-	batches, err := stream.TakeUncommitted(context.Background())
-	require.NoError(t, err)
-	require.Empty(t, batches)
 }
 
 func TestAppendRetryTimeoutThenCommit(t *testing.T) {
@@ -115,7 +112,7 @@ func TestAppendOutageBackpressureAndRecovery(t *testing.T) {
 	require.Zero(t, stream.Stats().PendingBytes)
 }
 
-func TestAppendTakeUncommittedRetainsUnsentAndFailed(t *testing.T) {
+func TestAppendStopReleasesFailedAndUnsentCapacity(t *testing.T) {
 	release := make(chan struct{})
 	var calls atomic.Int64
 	table := newAppendStreamTestTable(t, func(w http.ResponseWriter, _ *http.Request) {
@@ -129,29 +126,17 @@ func TestAppendTakeUncommittedRetainsUnsentAndFailed(t *testing.T) {
 		require.NoError(t, stream.Send(context.Background(), map[string]int{"id": id}))
 	}
 	close(release)
-	_, err = stream.Shutdown(context.Background())
+	report, err := stream.Shutdown(context.Background())
 	require.Error(t, err)
-	stats := stream.Stats()
-	require.Equal(t, uint64(3), stats.RetainedRows)
-	require.Equal(t, 27, stats.RetainedBytes)
-	require.Zero(t, stats.PendingBytes)
+	require.Equal(t, uint64(3), report.FailedRows)
+	require.Zero(t, stream.Stats().PendingRows)
+	require.Zero(t, stream.Stats().PendingBytes)
 	require.Equal(t, int64(1), calls.Load())
-	batches, err := stream.TakeUncommitted(context.Background())
-	require.Error(t, err)
-	require.Len(t, batches, 3)
-	for i, batch := range batches {
-		require.Equal(t, 1, batch.Rows)
-		require.Equal(t, AppendStateRejected, batch.AppendState)
-		require.Contains(t, string(batch.NDJSON), string(rune('1'+i)))
-		require.Error(t, batch.Err)
-	}
-	require.Zero(t, stream.Stats().RetainedBytes)
+	require.Error(t, stream.Send(context.Background(), map[string]int{"id": 4}))
 	stream.budget.mu.Lock()
-	require.Zero(t, stream.budget.used)
+	used := stream.budget.used
 	stream.budget.mu.Unlock()
-	again, err := stream.TakeUncommitted(context.Background())
-	require.Error(t, err)
-	require.Empty(t, again)
+	require.Zero(t, used)
 }
 
 func TestAppendUnknownRemainsUnknownAfterRejectedRetry(t *testing.T) {
@@ -172,10 +157,6 @@ func TestAppendUnknownRemainsUnknownAfterRejectedRetry(t *testing.T) {
 	require.Equal(t, uint64(1), report.UnknownRows)
 	require.Zero(t, report.FailedRows)
 	require.Equal(t, 422, stream.Stats().LastFailure.HTTPStatus)
-	batches, err := stream.TakeUncommitted(context.Background())
-	require.Error(t, err)
-	require.Len(t, batches, 1)
-	require.Equal(t, AppendStateUnknown, batches[0].AppendState)
 }
 
 func TestAppendRetryAfterDoesNotRetryEarly(t *testing.T) {
@@ -194,10 +175,11 @@ func TestAppendRetryAfterDoesNotRetryEarly(t *testing.T) {
 	require.ErrorIs(t, err, ErrAppendRetryExhausted)
 	require.Equal(t, int64(1), calls.Load())
 	require.Zero(t, report.Retries)
-	require.Equal(t, uint64(1), stream.Stats().RetainedRows)
+	require.Equal(t, uint64(1), report.FailedRows)
+	require.Zero(t, stream.Stats().PendingBytes)
 }
 
-func TestAppendRecoveryWaitsForInFlightAndReturnsOnlyUnconfirmed(t *testing.T) {
+func TestAppendShutdownWaitsForInFlightAfterFailure(t *testing.T) {
 	release := make(chan struct{})
 	started := make(chan struct{})
 	table := newAppendStreamTestTable(t, func(w http.ResponseWriter, r *http.Request) {
@@ -218,14 +200,14 @@ func TestAppendRecoveryWaitsForInFlightAndReturnsOnlyUnconfirmed(t *testing.T) {
 	require.NoError(t, stream.Send(context.Background(), map[string]int{"id": 2}))
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
-	batches, err := stream.TakeUncommitted(ctx)
+	report, err := stream.Shutdown(ctx)
 	require.ErrorIs(t, err, context.DeadlineExceeded)
-	require.Nil(t, batches)
+	require.Zero(t, report)
 	close(release)
-	batches, err = stream.TakeUncommitted(context.Background())
+	report, err = stream.Shutdown(context.Background())
 	require.Error(t, err)
-	require.Len(t, batches, 1)
-	require.JSONEq(t, `{"id":2}`, string(batches[0].NDJSON))
+	require.Equal(t, uint64(1), report.FailedRows)
+	require.Zero(t, stream.Stats().PendingBytes)
 	require.Equal(t, uint64(1), stream.Stats().CommittedRows)
 }
 
@@ -260,15 +242,15 @@ func TestAppendDeliveryRetryLimitsAndPermanentErrors(t *testing.T) {
 			stream, err := table.AppendStream(AppendStreamOptions{Retry: retry})
 			require.NoError(t, err)
 			require.NoError(t, stream.Send(context.Background(), map[string]int{"id": 1}))
-			batches, err := stream.TakeUncommitted(context.Background())
+			report, err := stream.Shutdown(context.Background())
 			require.Error(t, err)
 			require.Equal(t, tc.wantCalls, calls.Load())
 			if tc.state == AppendStateUnknown && !tc.rejectedOnly {
 				require.ErrorIs(t, err, ErrAppendRetryExhausted)
 			}
 			require.EqualValues(t, tc.wantCalls-1, stream.Stats().Retries)
-			require.Len(t, batches, 1)
-			require.JSONEq(t, `{"id":1}`, string(batches[0].NDJSON))
+			require.Equal(t, uint64(1), report.FailedRows+report.UnknownRows)
+			require.Zero(t, stream.Stats().PendingBytes)
 		})
 	}
 }
@@ -296,10 +278,10 @@ func TestAppendFailureInterruptsOtherBatchRetrySleep(t *testing.T) {
 	require.NoError(t, stream.Send(context.Background(), map[string]int{"id": 2}))
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	batches, err := stream.TakeUncommitted(ctx)
+	report, err := stream.Shutdown(ctx)
 	require.Error(t, err)
 	require.NotErrorIs(t, err, context.DeadlineExceeded)
-	require.Len(t, batches, 2)
+	require.Equal(t, uint64(2), report.FailedRows)
 	require.Zero(t, stream.Stats().Retries)
 }
 
@@ -339,42 +321,46 @@ func TestAppendSendCanceledBeforeAdmissionDoesNotLeakCapacity(t *testing.T) {
 	require.Zero(t, used)
 }
 
-func TestAppendContinueModeDoesNotRetainPayloads(t *testing.T) {
-	table := newAppendStreamTestTable(t, func(w http.ResponseWriter, _ *http.Request) {
-		writeAppendStreamFailure(t, w, 422, AppendStateRejected, false)
-	})
-	stream, err := table.AppendStream(AppendStreamOptions{FailurePolicy: AppendFailureContinue})
-	require.NoError(t, err)
-	require.NoError(t, stream.Send(context.Background(), map[string]int{"id": 1}))
-	report, err := stream.Shutdown(context.Background())
-	require.NoError(t, err)
-	require.Equal(t, uint64(1), report.FailedRows)
-	require.Zero(t, stream.Stats().RetainedBytes)
-	batches, err := stream.TakeUncommitted(context.Background())
-	require.Error(t, err)
-	require.Empty(t, batches)
-}
-
-func TestAppendRecoveredPayloadCanBeReplayed(t *testing.T) {
-	var fixed atomic.Bool
+func TestAppendReplayUsesCallerOwnedSourceInterval(t *testing.T) {
+	var repaired atomic.Bool
+	var firstCopies, secondCopies atomic.Int64
 	table := newAppendStreamTestTable(t, func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(r.Body)
 		require.NoError(t, err)
-		require.JSONEq(t, `{"id":1}`, string(body))
-		if !fixed.Load() {
+		if strings.Contains(string(body), `"id":1`) {
+			firstCopies.Add(1)
+		} else if !repaired.Load() {
 			writeAppendStreamFailure(t, w, 422, AppendStateRejected, false)
 			return
+		} else {
+			secondCopies.Add(1)
 		}
 		writeAppendStreamSuccess(t, w, 1)
 	})
-	stream, err := table.AppendStream(AppendStreamOptions{})
+	// The caller owns the source interval independently of SDK batch boundaries.
+	source := []map[string]int{{"id": 1}, {"id": 2}}
+	options := AppendStreamOptions{MaxBatchRows: 1, MaxConcurrentBatches: 1}
+	stream, err := table.AppendStream(options)
 	require.NoError(t, err)
-	require.NoError(t, stream.Send(context.Background(), map[string]int{"id": 1}))
-	batches, err := stream.TakeUncommitted(context.Background())
+	for _, row := range source {
+		require.NoError(t, stream.Send(context.Background(), row))
+	}
+	report, err := stream.Flush(context.Background())
 	require.Error(t, err)
-	require.Len(t, batches, 1)
-	fixed.Store(true) // Simulate correcting the destination schema.
-	result, err := table.AppendNDJSON(context.Background(), batches[0].NDJSON)
+	require.Equal(t, uint64(1), report.CommittedRows)
+	_, err = stream.Shutdown(context.Background())
+	require.Error(t, err)
+
+	// No checkpoint is advanced on failure. Repair and replay the whole interval.
+	repaired.Store(true)
+	replay, err := table.AppendStream(options)
 	require.NoError(t, err)
-	require.Equal(t, int64(1), result.NumRowsInserted)
+	for _, row := range source {
+		require.NoError(t, replay.Send(context.Background(), row))
+	}
+	report, err = replay.Shutdown(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, uint64(2), report.CommittedRows)
+	require.Equal(t, int64(2), firstCopies.Load())
+	require.Equal(t, int64(1), secondCopies.Load())
 }
