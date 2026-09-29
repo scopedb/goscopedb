@@ -157,15 +157,11 @@ fmt.Println(description.Columns)
 
 ## Streaming writes
 
-Table appends write rows to an existing destination table. For most applications, `AppendStream` is the recommended path: the SDK accepts typed rows and owns their encoding, bounded batching, backpressure, and request concurrency. Its current wire encoding is NDJSON, but callers do not construct the wire payload. Evaluate the examples against an explicitly selected disposable table before using a production destination.
+Use `AppendStream` to write Go structs or maps to an existing table. The SDK encodes and batches the rows for you.
 
-### Recommended: asynchronous append stream
+### Append rows
 
-Use `AppendStream` for normal application writes, including continuous and large producers. `Send` accepts typed rows and uses `encoding/json` to encode each value as one top-level JSON object. Standard JSON tags and custom `MarshalJSON` methods apply. The stream batches those objects by size or time, bounds pending bytes, and sends a bounded number of append requests concurrently. The zero-value options use bounded defaults; override them only when the workload needs a different delivery policy or resource bound.
-
-`AppendStream` targets 4 MiB of uncompressed NDJSON per batch by default. Set `TargetBatchBytes` to customize the target, up to 8 MiB. A single row may exceed the target but must fit within the 8 MiB request limit.
-
-Each `AppendStream` request contains at most 8 MiB of uncompressed NDJSON and 200,000 rows. The stream splits automatically at either limit.
+Create a stream with the default options, add rows with `Send`, and call `Shutdown` when you are done. Struct fields use standard Go JSON tags.
 
 ```go
 type Event struct {
@@ -188,57 +184,33 @@ for _, event := range []Event{
 	}
 }
 
+report, err := stream.Shutdown(ctx)
+if err != nil {
+	return err
+}
+fmt.Println("written rows:", report.CommittedRows)
+```
+
+`Send` adds a row to the SDK's queue. `Shutdown` sends any remaining rows, waits for writes to finish, and closes the stream. Check the errors returned by both calls.
+
+For a long-running stream, call `Flush` when you need to wait for the rows sent so far without closing the stream:
+
+```go
 report, err := stream.Flush(ctx)
 if err != nil {
 	_, _ = stream.Shutdown(ctx)
 	return err
 }
-fmt.Println("flush committed:", report.CommittedRows)
-
-// Permanently closes admission and settles all remaining accepted rows.
-_, err = stream.Shutdown(ctx)
-return err
+fmt.Println("written rows:", report.CommittedRows)
 ```
 
-`Send` waits for bounded local admission capacity. A nil error means only that the row entered the local stream; it does not confirm a remote commit. Feed large sources one row at a time instead of starting one goroutine per row, which would move an unbounded backlog outside the stream.
+### Continue after write errors
 
-JSON serialization validates only that each value encodes as an object. ScopeDB validates that object's fields and types against the destination table when it processes the batch. With the default stop policy, `Flush` or `Shutdown` returns the server error and structured row details. Continue mode reports failed rows through the barrier report and `Stats().LastFailure`. An earlier successful `Send` does not imply schema compatibility.
-
-`Send` and `TrySend` are safe for concurrent producers. When source-side work benefits from parallelism, use a fixed worker pool; the [`append_stream`](examples/append_stream) example uses four producers. Remote batch commits are still unordered when `MaxConcurrentBatches` is greater than one.
-
-`Flush` settles every row accepted before its barrier. `Shutdown` permanently closes admission and settles all accepted rows. Canceling either call's context stops that caller's wait after an enqueued barrier, but does not cancel remote settlement. Inspect `Stats().LastReport` if the wait is interrupted.
-
-The default `AppendFailureStop` policy is strict: the first failed batch stops admission, and a successful barrier confirms that its accepted prefix committed. Concurrent batches have no defined commit order; set `MaxConcurrentBatches: 1` when request submission must be serial.
-
-### At-least-once retries and recovery
-
-`AppendStream` retries temporary rejections and transient unknown outcomes,
-including timeouts and lost responses, so delivery may produce duplicates.
-Configure retries through `AppendRetryOptions`;
-a nil `Retry` uses defaults, while `MaxRetries: 0` in a non-nil option disables
-retries.
-
-Reports count logical input rows. If an unknown attempt is followed by a
-committed acknowledgement, those rows count once in `CommittedRows`, even if
-the earlier attempt also committed. If any attempt is unknown and no later
-attempt confirms a commit, the batch remains unknown, including when the last
-attempt is rejected. `FailedRows` counts accepted rows that were definitively
-rejected or never sent after a terminal stream failure.
-
-In stop mode, a failed commit barrier stops the stream. Keep source data until
-`Flush` or `Shutdown` succeeds; on failure, settle the old stream with `Shutdown`
-and replay the unconfirmed source interval through a new stream. Replaying may
-duplicate batches that already committed. The SDK does not retain failed payloads.
-Use a durable source or outbox for crash recovery; continue mode is best effort.
-
-### Best-effort logs and telemetry
-
-Logs and telemetry often cannot block a request path or stop forever after one remote failure. Opt into `AppendFailureContinue`, use `TrySend`, and inspect the settlement report and lifetime statistics:
+For logs and telemetry, set `FailurePolicy` to `AppendFailureContinue` to keep processing later rows after a write fails:
 
 ```go
 telemetry, err := table.AppendStream(scopedb.AppendStreamOptions{
 	FailurePolicy: scopedb.AppendFailureContinue,
-	FlushInterval: time.Second,
 })
 if err != nil {
 	return err
@@ -248,8 +220,7 @@ if err := telemetry.TrySend(map[string]any{
 	"name":   "request.completed",
 	"status": 200,
 }); err != nil {
-	// Send this diagnostic to a different sink.
-	log.Printf("telemetry row dropped locally: %v", err)
+	log.Printf("could not queue telemetry row: %v", err)
 }
 
 report, err := telemetry.Shutdown(ctx)
@@ -257,20 +228,15 @@ if err != nil {
 	return err
 }
 if report.Outcome != scopedb.AppendDeliveryOK {
-	log.Printf("telemetry loss or ambiguity: %+v", report)
+	log.Printf("some telemetry rows were not confirmed written: %+v", report)
 }
-fmt.Printf("lifetime stats: %+v\n", telemetry.Stats())
 ```
 
-`TrySend` does not wait for stream capacity. A nil error still means local admission only; an error can indicate invalid input, an oversized row, a full buffer, or a closed stream. `Stats().DroppedByReason` separates local loss causes.
+`TrySend` adds a row without waiting for queue space. Check the report returned by `Flush` or `Shutdown`: `CommittedRows` counts confirmed writes, `FailedRows` counts failed rows, `UnknownRows` counts writes without a confirmed result, and `DroppedRows` counts rows rejected by `TrySend`. Each report covers activity since the previous report.
 
-Continue mode accounts for a failed batch and continues with later rows. A completed report separates committed, failed, unknown, and locally dropped rows. `Stats().LastFailure` preserves the latest HTTP status, request ID, retry metadata, and structured row errors for diagnostics. It is a settlement report, not a commit receipt for every row. Continue mode releases terminally failed payloads and proceeds with later rows, so it is best effort.
+### Append NDJSON directly
 
-An in-memory stream is not a durable queue. Keep source records or an application-owned outbox until a successful commit barrier if payloads must survive process failure. Replaying an unconfirmed batch may create duplicates.
-
-### Low-level: direct NDJSON append
-
-Use `AppendNDJSON` only when the caller already owns one exact raw NDJSON body and its request boundary. The body contains one JSON object per non-empty line, not a JSON array:
+If you already have NDJSON, use `AppendNDJSON`. Put one JSON object on each line:
 
 ```go
 ndjson := []byte("{\"id\":1,\"name\":\"first\"}\n{\"id\":2,\"name\":\"second\"}")
@@ -281,24 +247,13 @@ if err != nil {
 fmt.Println("committed rows:", result.NumRowsInserted)
 ```
 
-One request is limited to 8 MiB of uncompressed NDJSON and 200,000 rows.
-`AppendNDJSON` makes one attempt and does not automatically retry. An unknown
-outcome may already have committed, so replay can create duplicates.
+One request supports up to 8 MiB of uncompressed NDJSON and 200,000 rows.
 
-### Choose a delivery path
-
-| Workload | Admission and delivery | Example |
-| --- | --- | --- |
-| Normal typed application writes | SDK owns encoding and batches; strict barriers | [`append_stream`](examples/append_stream) |
-| Backfill or file import | Sequential producer admission and bounded concurrent batches | [`bulk_append`](examples/patterns/bulk_append) |
-| Long-running logs and events | Non-blocking continue mode with observable loss | [`telemetry`](examples/patterns/telemetry) |
-| One exact raw NDJSON payload | Caller encodes the body and owns the request boundary | [`append_ndjson`](examples/append_ndjson) |
+See the examples for [streaming writes](examples/append_stream), [file imports](examples/patterns/bulk_append), [telemetry](examples/patterns/telemetry), and [NDJSON](examples/append_ndjson).
 
 ## Advanced: transform before writing
 
 Use `Client.IngestStream` only when source JSON specifically needs a server-side ScopeQL transformation before it can match the destination table. For normal typed events, shape the row in the producer and use `Table.AppendStream`. See the guarded [`ingest_transform`](examples/ingest_transform) example for the advanced path.
-
-This path is sequential and fail-fast. `IngestStream.Send` confirms local admission only, while `Flush` and `Shutdown` wait for the accepted prefix to settle when they succeed. If a remote ingest request returns an error, its commit outcome may be unknown. A nonzero result returned with that error counts only earlier confirmed batches; it is not a safe replay offset. Reconcile the failing batch before replaying records.
 
 ## Structured errors
 
@@ -314,19 +269,14 @@ if errors.As(err, &scopeErr) {
 		scopeErr.Retryable,
 		scopeErr.RetryAfter,
 	)
-
-	if details := scopeErr.AppendDetails; details != nil &&
-		details.AppendState == scopedb.AppendStateUnknown {
-		log.Print("append may have committed; replay may create duplicates")
-	}
 }
 ```
 
-The main kinds are `ErrorKindConfigInvalid`, `ErrorKindStatementFailed`, `ErrorKindAppendRowsFailed`, and `ErrorKindUnexpected`. Transport and decoding causes support `errors.Is` and `errors.As` through `Unwrap`. A direct append context canceled before its request starts is returned directly.
+The main kinds are `ErrorKindConfigInvalid`, `ErrorKindStatementFailed`, `ErrorKindAppendRowsFailed`, and `ErrorKindUnexpected`. Use `errors.Is` and `errors.As` to inspect the underlying cause.
 
 ## Examples and development
 
-The [examples guide](examples/README.md) contains read-only discovery, guarded write examples, delivery contracts, and runnable commands. Development tasks are defined in [mise.toml](mise.toml); license tasks expect `hawkeye` on `PATH`.
+The [examples guide](examples/README.md) contains query and write examples with runnable commands. Development tasks are defined in [mise.toml](mise.toml); license tasks expect `hawkeye` on `PATH`.
 
 ```sh
 mise install

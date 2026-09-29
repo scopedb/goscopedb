@@ -2,12 +2,12 @@
 
 Run these examples from the repository root. They use only the public SDK API.
 
-## Read-only paths
+## Query and catalog examples
 
 | Example | Shows | Run |
 | --- | --- | --- |
-| [`statement`](statement) | Query conversion, an optional caller-provided ID and execution timeout, and the asynchronous statement handle lifecycle | `go run ./examples/statement` |
-| [`catalog`](catalog) | Lazy REST catalog pagination and table metadata | `go run ./examples/catalog` |
+| [`statement`](statement) | Run a query and read its results | `go run ./examples/statement` |
+| [`catalog`](catalog) | List databases, schemas, and tables, and inspect table metadata | `go run ./examples/catalog` |
 
 The shared helper reads:
 
@@ -24,13 +24,13 @@ ScopeQL is documented in the [quickstart], [query guide], and [language referenc
 
 ## Before running a write example
 
-Every write example refuses to start unless `SCOPEDB_WRITE_TABLE` names an existing, unqualified destination table. Configure its database and schema separately. The examples never create or drop a table. Use a disposable table and confirm the configured database and schema before running them:
+Set `SCOPEDB_WRITE_TABLE` to an existing table name. Configure its database and schema with `SCOPEDB_DATABASE` and `SCOPEDB_SCHEMA`:
 
 ```sh
 export SCOPEDB_WRITE_TABLE=sdk_example_events
 ```
 
-The example rows use the following columns so all write journeys can target the same table:
+The write examples use these columns:
 
 | Column        | Value used by examples |
 | ------------- | ---------------------- |
@@ -40,30 +40,28 @@ The example rows use the following columns so all write journeys can target the 
 | `name`        | string                 |
 | `attributes`  | object                 |
 
-## Choose a write journey
+## Choose a write example
 
-For most application writes, start with `append_stream`. It accepts typed rows and owns their encoding, batching, backpressure, and request concurrency.
+Start with `append_stream` to write Go structs. The SDK encodes and batches the rows for you.
 
 | Example | Choose it when | Run |
 | --- | --- | --- |
-| [`append_stream`](append_stream) | Typed application rows need asynchronous batching with strict delivery | `go run ./examples/append_stream` |
-| [`bulk_append`](patterns/bulk_append) | A backfill needs bounded memory and concurrent strict batches | `go run ./examples/patterns/bulk_append` |
-| [`telemetry`](patterns/telemetry) | Logs or events need non-blocking, observable best-effort delivery | `go run ./examples/patterns/telemetry` |
-| [`append_ndjson`](append_ndjson) | The caller already owns one exact raw NDJSON request body | `go run ./examples/append_ndjson` |
+| [`append_stream`](append_stream) | Write Go structs with an append stream | `go run ./examples/append_stream` |
+| [`bulk_append`](patterns/bulk_append) | Write a large collection of rows | `go run ./examples/patterns/bulk_append` |
+| [`telemetry`](patterns/telemetry) | Write logs or events with `TrySend` and continue after write errors | `go run ./examples/patterns/telemetry` |
+| [`append_ndjson`](append_ndjson) | Write data that is already encoded as NDJSON | `go run ./examples/append_ndjson` |
 
-## Delivery contract
+## Using an append stream
 
-- `Table.AppendNDJSON` sends one caller-encoded raw NDJSON body: one JSON object per non-empty line, not a JSON array.
-- `Table.AppendStream` accepts typed rows and owns their JSON encoding, batching, and concurrent request scheduling.
-- `AppendStream.Send` and `AppendStream.TrySend` confirm local admission only. They do not confirm a remote commit.
-- Append stream admission is safe for concurrent producers; use a fixed worker pool instead of starting one goroutine per row.
-- `TrySend` does not wait for stream capacity. Use it for latency-sensitive logs and telemetry and monitor `Stats().DroppedByReason`.
-- `Flush` settles the prefix accepted before its barrier. `Shutdown` closes admission and settles all accepted rows.
-- A successful strict append-stream barrier confirms its accepted prefix committed. A continue-mode barrier is settlement; inspect every delivery report for failed, unknown, and locally dropped rows.
-- The append stream retries exact batches after transient failures, including unknown outcomes. See [retries and recovery](../README.md#at-least-once-retries-and-recovery).
-- Unknown rows may already be committed; replay can create duplicates. Keep source records until a successful stop-mode commit barrier; on failure, settle the old stream and replay the unconfirmed interval. Use a durable source or outbox for crash recovery.
-- Each background write request has a finite 30-second timeout by default. A timeout makes that request's commit outcome unknown.
-- Concurrent append batches have no defined commit order. Set `MaxConcurrentBatches: 1` when request submission must be serial.
+1. Create a stream with `table.AppendStream(scopedb.AppendStreamOptions{})`.
+2. Add rows to the SDK's queue with `Send(ctx, row)`.
+3. Call `Shutdown(ctx)` when you are done to wait for writes to finish and close the stream.
+
+Call `Flush(ctx)` if you need to wait for current writes while keeping the stream open. Check the errors returned by each call.
+
+The telemetry example uses `TrySend` to add rows without waiting for queue space. It sets `FailurePolicy: scopedb.AppendFailureContinue` and checks the report returned by `Shutdown`.
+
+See the [streaming writes guide](../README.md#streaming-writes) for code snippets and report fields.
 
 ## Advanced: server-side transformation
 
@@ -72,8 +70,6 @@ Use [`ingest_transform`](ingest_transform) only when source JSON specifically ne
 ```sh
 go run ./examples/ingest_transform
 ```
-
-`IngestStream.Send` confirms local admission only. An ingest result returned with an error counts only earlier confirmed batches; it is not a safe offset for replaying the failing batch. Reconcile an unknown outcome before replaying records.
 
 ## Compile every example
 
