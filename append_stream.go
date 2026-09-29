@@ -136,8 +136,9 @@ func (o AppendDeliveryOutcome) String() string {
 	}
 }
 
-// AppendRetryOptions configures retries of an exact encoded batch. A nil Retry
-// uses the defaults; a non-nil option with MaxRetries=0 disables retries.
+// AppendRetryOptions configures retries of an exact encoded batch for temporary
+// rejections and transient unknown outcomes. A nil Retry uses the defaults;
+// a non-nil option with MaxRetries=0 disables retries.
 type AppendRetryOptions struct {
 	MaxRetries int
 	// Zero durations use defaults: 100 ms initial, 5 s maximum backoff, 5 min
@@ -145,9 +146,6 @@ type AppendRetryOptions struct {
 	InitialBackoff time.Duration
 	MaxBackoff     time.Duration
 	MaxElapsedTime time.Duration
-	// RejectedOnly restores conservative retry behavior. By default transient
-	// unknown outcomes are retried too, so the table may contain duplicates.
-	RejectedOnly bool
 }
 
 // AppendStreamOptions configures bounded asynchronous table appends.
@@ -219,8 +217,9 @@ type AppendLastFailure struct {
 	RequestID string
 	// RetryAfter is the service-provided retry delay, when present.
 	RetryAfter time.Duration
-	// Retryable reports the service's classification, not the stream's retry
-	// decision. The stream also retries transient unknown outcomes by default.
+	// Retryable reports the underlying error's conservative retry classification;
+	// it is false for unknown outcomes. The stream also retries transient unknown
+	// outcomes by default, so this field is not the stream's retry decision.
 	Retryable bool
 	// RowErrors contains structured validation failures reported for the batch.
 	RowErrors []AppendRowError
@@ -1095,9 +1094,6 @@ func appendRetryDelay(backoff time.Duration, retryAfter time.Duration) time.Dura
 func (s *AppendStream) isRetryableAppend(err error) bool {
 	if isRetryableRejectedAppend(err) {
 		return true
-	}
-	if s.config.retry.RejectedOnly {
-		return false
 	}
 	var e *Error
 	if !errors.As(err, &e) || e.AppendDetails == nil || e.AppendDetails.AppendState != AppendStateUnknown {

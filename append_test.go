@@ -25,6 +25,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -314,29 +315,42 @@ func TestAppendNDJSONTransportAndReadErrorsPreserveCause(t *testing.T) {
 		require.Equal(t, AppendStateUnknown, scopeErr.AppendDetails.AppendState)
 	})
 
-	t.Run("response body", func(t *testing.T) {
-		t.Parallel()
+	for _, status := range []int{http.StatusOK, http.StatusUnauthorized, http.StatusForbidden, http.StatusServiceUnavailable} {
+		t.Run("response body "+http.StatusText(status), func(t *testing.T) {
+			t.Parallel()
 
-		readErr := errors.New("response stream interrupted")
-		client, err := NewClient(Config{
-			Endpoint: "https://example.com",
-			HTTPClient: &http.Client{Transport: appendRoundTripFunc(func(*http.Request) (*http.Response, error) {
-				return &http.Response{
-					StatusCode: http.StatusOK,
-					Header:     make(http.Header),
-					Body:       errorReadCloser{err: readErr},
-				}, nil
-			})},
+			readErr := errors.New("response stream interrupted")
+			calls := 0
+			client, err := NewClient(Config{
+				Endpoint: "https://example.com",
+				HTTPClient: &http.Client{Transport: appendRoundTripFunc(func(*http.Request) (*http.Response, error) {
+					calls++
+					return &http.Response{
+						StatusCode: status,
+						Header: http.Header{
+							"X-Request-Id": {"interrupted-append"},
+							"Retry-After":  {"2"},
+						},
+						Body: errorReadCloser{err: readErr},
+					}, nil
+				})},
+			})
+			require.NoError(t, err)
+			t.Cleanup(client.Close)
+
+			_, err = client.appendNDJSON(context.Background(), "db", "schema", "table", []byte("{}"))
+			var scopeErr *Error
+			require.ErrorAs(t, err, &scopeErr)
+			require.Equal(t, readErr.Error(), scopeErr.Error())
+			require.ErrorIs(t, scopeErr, readErr)
+			require.Equal(t, AppendStateUnknown, scopeErr.AppendDetails.AppendState)
+			require.False(t, scopeErr.Retryable)
+			require.Equal(t, status, scopeErr.HTTPStatus)
+			require.Equal(t, "interrupted-append", scopeErr.RequestID)
+			require.Equal(t, 2*time.Second, scopeErr.RetryAfter)
+			require.Equal(t, 1, calls)
 		})
-		require.NoError(t, err)
-
-		_, err = client.appendNDJSON(context.Background(), "db", "schema", "table", []byte("{}"))
-		var scopeErr *Error
-		require.ErrorAs(t, err, &scopeErr)
-		require.Equal(t, readErr.Error(), scopeErr.Error())
-		require.ErrorIs(t, scopeErr, readErr)
-		require.Equal(t, AppendStateUnknown, scopeErr.AppendDetails.AppendState)
-	})
+	}
 }
 
 func TestAppendNDJSONReturnsPreCancelledContextUnchanged(t *testing.T) {

@@ -6,6 +6,9 @@ All significant changes to this project will be documented in this file.
 
 ### Changed
 
+- `AppendStream` now retries temporary rejections and transient `unknown`
+  outcomes, providing at-least-once delivery that may insert duplicate rows.
+  Direct `AppendNDJSON` remains a single attempt.
 - `AppendStream` now targets 4 MiB per batch by default; the maximum
   configurable target and uncompressed request limit remain 8 MiB.
 - Streaming write byte budgets now preserve FIFO waiter order so newer or
