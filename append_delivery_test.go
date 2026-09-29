@@ -18,6 +18,7 @@ package scopedb
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -255,6 +256,64 @@ func TestAppendDeliveryRetryLimitsAndPermanentErrors(t *testing.T) {
 	}
 }
 
+func TestAppendDeliveryUsesStatusWhenResponseBodyFails(t *testing.T) {
+	for _, tc := range []struct {
+		status    int
+		wantCalls int64
+	}{
+		{status: http.StatusUnauthorized, wantCalls: 1},
+		{status: http.StatusForbidden, wantCalls: 1},
+		{status: http.StatusServiceUnavailable, wantCalls: 2},
+	} {
+		t.Run(http.StatusText(tc.status), func(t *testing.T) {
+			var calls atomic.Int64
+			readErr := errors.New("response stream interrupted")
+			client, err := NewClient(Config{
+				Endpoint: "https://example.com",
+				HTTPClient: &http.Client{Transport: appendRoundTripFunc(func(*http.Request) (*http.Response, error) {
+					if calls.Add(1) == 1 {
+						return &http.Response{
+							StatusCode: tc.status,
+							Header:     http.Header{"X-Request-Id": {"interrupted-append"}},
+							Body:       errorReadCloser{err: readErr},
+						}, nil
+					}
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Header:     make(http.Header),
+						Body:       io.NopCloser(strings.NewReader(`{"append_state":"committed","num_rows_inserted":1}`)),
+					}, nil
+				})},
+			})
+			require.NoError(t, err)
+			t.Cleanup(client.Close)
+			stream, err := client.Table("events").AppendStream(AppendStreamOptions{Retry: quickAppendRetry(1)})
+			require.NoError(t, err)
+			require.NoError(t, stream.Send(context.Background(), map[string]int{"id": 1}))
+			report, err := stream.Shutdown(context.Background())
+			require.Equal(t, tc.wantCalls, calls.Load())
+			require.EqualValues(t, tc.wantCalls-1, report.Retries)
+			require.Equal(t, uint64(1), report.AcceptedRows)
+			if tc.status == http.StatusServiceUnavailable {
+				require.NoError(t, err)
+				require.Equal(t, AppendDeliveryOK, report.Outcome)
+				require.Equal(t, uint64(1), report.CommittedRows)
+				require.Zero(t, report.UnknownRows)
+			} else {
+				require.ErrorIs(t, err, readErr)
+				require.Equal(t, AppendDeliveryUnknown, report.Outcome)
+				require.Equal(t, uint64(1), report.UnknownRows)
+				require.Zero(t, report.CommittedRows)
+				failure := stream.Stats().LastFailure
+				require.NotNil(t, failure)
+				require.Equal(t, tc.status, failure.HTTPStatus)
+				require.Equal(t, "interrupted-append", failure.RequestID)
+			}
+			require.Zero(t, report.FailedRows)
+		})
+	}
+}
+
 func TestAppendFailureInterruptsOtherBatchRetrySleep(t *testing.T) {
 	firstStarted := make(chan struct{})
 	table := newAppendStreamTestTable(t, func(w http.ResponseWriter, r *http.Request) {
@@ -347,7 +406,11 @@ func TestAppendReplayUsesCallerOwnedSourceInterval(t *testing.T) {
 	}
 	report, err := stream.Flush(context.Background())
 	require.Error(t, err)
+	require.Equal(t, AppendDeliveryPartial, report.Outcome)
+	require.Equal(t, uint64(2), report.AcceptedRows)
 	require.Equal(t, uint64(1), report.CommittedRows)
+	require.Equal(t, uint64(1), report.FailedRows)
+	require.Zero(t, report.UnknownRows)
 	_, err = stream.Shutdown(context.Background())
 	require.Error(t, err)
 

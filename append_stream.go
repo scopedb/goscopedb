@@ -219,8 +219,9 @@ type AppendLastFailure struct {
 	RequestID string
 	// RetryAfter is the service-provided retry delay, when present.
 	RetryAfter time.Duration
-	// Retryable reports the service's classification, not the stream's retry
-	// decision. The stream also retries transient unknown outcomes by default.
+	// Retryable reports the underlying error's conservative retry classification;
+	// it is false for unknown outcomes. The stream also retries transient unknown
+	// outcomes by default, so this field is not the stream's retry decision.
 	Retryable bool
 	// RowErrors contains structured validation failures reported for the batch.
 	RowErrors []AppendRowError

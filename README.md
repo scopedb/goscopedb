@@ -217,6 +217,13 @@ so delivery may produce duplicates. Configure retries through `AppendRetryOption
 a nil `Retry` uses defaults, while `MaxRetries: 0` in a non-nil option disables
 retries. Set `MaxRetries: 8, RejectedOnly: true` to keep the previous retry behavior.
 
+Reports count logical input rows. If an unknown attempt is followed by a
+committed acknowledgement, those rows count once in `CommittedRows`, even if
+the earlier attempt also committed. If any attempt is unknown and no later
+attempt confirms a commit, the batch remains unknown, including when the last
+attempt is rejected. `FailedRows` counts accepted rows that were definitively
+rejected or never sent after a terminal stream failure.
+
 In stop mode, a failed commit barrier stops the stream. Keep source data until
 `Flush` or `Shutdown` succeeds; on failure, settle the old stream with `Shutdown`
 and replay the unconfirmed source interval through a new stream. Replaying may
@@ -274,6 +281,8 @@ fmt.Println("committed rows:", result.NumRowsInserted)
 ```
 
 One request is limited to 8 MiB of uncompressed NDJSON and 200,000 rows.
+`AppendNDJSON` makes one attempt and does not automatically retry. An unknown
+outcome may already have committed, so replay can create duplicates.
 
 ### Choose a delivery path
 
