@@ -894,7 +894,6 @@ func TestAppendStreamOptionValidation(t *testing.T) {
 	require.Equal(t, defaultAppendAttemptTimeout, defaults.attemptTimeout)
 	require.Equal(t, 8, defaults.retry.MaxRetries)
 	require.Equal(t, 5*time.Minute, defaults.retry.MaxElapsedTime)
-	require.False(t, defaults.retry.RejectedOnly)
 	for range 100 {
 		delay := appendRetryDelay(time.Second, 0)
 		require.GreaterOrEqual(t, delay, 500*time.Millisecond)

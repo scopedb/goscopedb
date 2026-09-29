@@ -214,16 +214,14 @@ func TestAppendShutdownWaitsForInFlightAfterFailure(t *testing.T) {
 
 func TestAppendDeliveryRetryLimitsAndPermanentErrors(t *testing.T) {
 	for _, tc := range []struct {
-		name         string
-		status       int
-		state        AppendState
-		rejectedOnly bool
-		maxRetries   int
-		wantCalls    int64
+		name       string
+		status     int
+		state      AppendState
+		maxRetries int
+		wantCalls  int64
 	}{
 		{name: "unknown retry budget", status: 503, state: AppendStateUnknown, maxRetries: 2, wantCalls: 3},
 		{name: "unknown retries disabled", status: 503, state: AppendStateUnknown, maxRetries: 0, wantCalls: 1},
-		{name: "rejected only compatibility", status: 503, state: AppendStateUnknown, rejectedOnly: true, maxRetries: 2, wantCalls: 1},
 		{name: "unstructured authentication failure", status: 401, maxRetries: 2, wantCalls: 1},
 		{name: "unstructured oversized request", status: 413, maxRetries: 2, wantCalls: 1},
 		{name: "permanent schema rejection", status: 422, state: AppendStateRejected, maxRetries: 2, wantCalls: 1},
@@ -239,14 +237,13 @@ func TestAppendDeliveryRetryLimitsAndPermanentErrors(t *testing.T) {
 				writeAppendStreamFailure(t, w, tc.status, tc.state, false)
 			})
 			retry := quickAppendRetry(tc.maxRetries)
-			retry.RejectedOnly = tc.rejectedOnly
 			stream, err := table.AppendStream(AppendStreamOptions{Retry: retry})
 			require.NoError(t, err)
 			require.NoError(t, stream.Send(context.Background(), map[string]int{"id": 1}))
 			report, err := stream.Shutdown(context.Background())
 			require.Error(t, err)
 			require.Equal(t, tc.wantCalls, calls.Load())
-			if tc.state == AppendStateUnknown && !tc.rejectedOnly {
+			if tc.state == AppendStateUnknown {
 				require.ErrorIs(t, err, ErrAppendRetryExhausted)
 			}
 			require.EqualValues(t, tc.wantCalls-1, stream.Stats().Retries)

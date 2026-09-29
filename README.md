@@ -212,10 +212,11 @@ The default `AppendFailureStop` policy is strict: the first failed batch stops a
 
 ### At-least-once retries and recovery
 
-`AppendStream` retries transient failures, including timeouts and lost responses,
-so delivery may produce duplicates. Configure retries through `AppendRetryOptions`;
+`AppendStream` retries temporary rejections and transient unknown outcomes,
+including timeouts and lost responses, so delivery may produce duplicates.
+Configure retries through `AppendRetryOptions`;
 a nil `Retry` uses defaults, while `MaxRetries: 0` in a non-nil option disables
-retries. Set `MaxRetries: 8, RejectedOnly: true` to keep the previous retry behavior.
+retries.
 
 Reports count logical input rows. If an unknown attempt is followed by a
 committed acknowledgement, those rows count once in `CommittedRows`, even if
