@@ -110,34 +110,42 @@ if errors.As(err, &scopeErr) && scopeErr.StatementDetails != nil {
 }
 ```
 
-## Browse the REST catalog
+## Manage the catalog
 
-List methods expose one explicit page. Iterators lazily request later pages and are the simpler choice for discovery:
+The declarative Catalog API reads complete definitions and replaces resources atomically. It requires a server with the declarative protocol; the old paginated catalog API is not supported.
 
 ```go
-for database, err := range client.IterateDatabases(ctx, scopedb.CatalogListOptions{
-	PageSize: 100,
-}) {
-	if err != nil {
-		return err
-	}
-	fmt.Println(database.Name)
+catalog := client.Catalog("databases", "scopedb", "schemas", "public", "tables", "events")
+snapshot, err := catalog.Get(ctx)
+if err != nil {
+    return err
 }
-
-for table, err := range client.IterateTables(
-	ctx,
-	"scopedb",
-	"public",
-	scopedb.CatalogListOptions{PageSize: 100},
-) {
-	if err != nil {
-		return err
-	}
-	fmt.Println(table.Name)
+var definition scopedb.CatalogTable
+if err := json.Unmarshal(snapshot.Definition, &definition); err != nil {
+    return err
 }
+retention := int32(30)
+definition.RetentionDays = &retention
+plan, err := catalog.Apply(ctx, definition, scopedb.CatalogOptions{DryRun: true})
+if err != nil {
+    return err
+}
+// Review plan.Before, plan.After, and plan.Destructive before authorizing this write.
+result, err := catalog.Apply(ctx, definition, scopedb.CatalogOptions{
+    IfMatch: plan.ETag,
+    AllowDestructive: plan.Destructive,
+})
+if err != nil {
+    return err
+}
+fmt.Println(result.ETag)
 ```
 
-Use `ListDatabases`, `ListSchemas`, or `ListTables` when the application owns page boundaries. Use `FetchDatabase`, `FetchSchema`, or `FetchTable` for a full resource.
+`Catalog()` selects the entire tenant. Path segments are unescaped names relative to `/v1`; the SDK escapes each segment. Select `databases`, a database, its `schemas`, a schema, its `tables` or `views`, or an individual table or view. `Get` returns raw JSON and an ETag. Decode it into the supplied `CatalogDocument`, `CatalogDatabase`, `CatalogSchema`, `CatalogTable`, or `CatalogView` types for programmatic editing; retain raw JSON for lossless export and apply across schema additions.
+
+`Apply` accepts these definitions or `json.RawMessage`. Omitted fields and objects are cleared, and omitted collections are empty. `Delete` removes one database, schema, table, or view using the same options; clear collections by applying an empty definition instead. `IfMatch` is optional, while potentially irreversible data loss requires `AllowDestructive`. Dry runs validate and roll back without requiring that authorization. Storage is a creation-only input omitted from exports, so keep the original definition when planning creation.
+
+Errors use `*scopedb.Error`, including the server `Code`, HTTP status, and request ID. Catalog writes are never automatically retried. If `Code` is `catalog_commit_outcome_unknown`, read the catalog and plan again before retrying; a lost response does not imply a rollback.
 
 ## Describe a table
 

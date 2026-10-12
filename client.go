@@ -104,7 +104,7 @@ func (c *Client) Close() {
 	c.http.Close()
 }
 
-// httpClient is a wrapper around the standard http.Client to decorate GET/POST requests.
+// httpClient applies authentication and compression using the configured HTTP client.
 type httpClient struct {
 	client        *http.Client
 	authorization string
@@ -183,6 +183,9 @@ func normalizeEndpoint(raw string) (*url.URL, error) {
 	}
 	if endpoint.Host == "" {
 		return nil, fmt.Errorf("endpoint host is required")
+	}
+	if endpoint.User != nil {
+		return nil, fmt.Errorf("endpoint must not contain user information; use APIKey instead")
 	}
 	if endpoint.RawQuery != "" || endpoint.Fragment != "" {
 		return nil, fmt.Errorf("endpoint must not contain a query or fragment")

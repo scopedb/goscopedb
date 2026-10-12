@@ -90,21 +90,6 @@ func TestTableAppendLifecycle(t *testing.T) {
 	require.Equal(t, table.Name, description.Name)
 	require.Len(t, description.Columns, 2)
 
-	found := false
-	for summary, iterateErr := range client.IterateTables(
-		ctx,
-		"scopedb",
-		"public",
-		scopedb.CatalogListOptions{PageSize: 1},
-	) {
-		require.NoError(t, iterateErr)
-		if summary.Name == table.Name {
-			found = true
-			break
-		}
-	}
-	require.True(t, found)
-
 	statement := client.Statement(fmt.Sprintf("FROM %s", table.Identifier()))
 	result, err := statement.Execute(ctx)
 	require.NoError(t, err)

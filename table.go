@@ -19,6 +19,7 @@ package scopedb
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 )
 
@@ -52,8 +53,16 @@ func (t *Table) Drop(ctx context.Context) error {
 }
 
 // Describe returns the complete REST catalog resource for this table.
-func (t *Table) Describe(ctx context.Context) (TableResource, error) {
-	return t.c.FetchTable(ctx, t.databaseName(), t.schemaName(), t.Name)
+func (t *Table) Describe(ctx context.Context) (CatalogTable, error) {
+	snapshot, err := t.c.Catalog("databases", t.databaseName(), "schemas", t.schemaName(), "tables", t.Name).Get(ctx)
+	if err != nil {
+		return CatalogTable{}, err
+	}
+	var table CatalogTable
+	if err := json.Unmarshal(snapshot.Definition, &table); err != nil {
+		return CatalogTable{}, newError(ErrorKindCatalogFailed, "invalid table definition", err)
+	}
+	return table, nil
 }
 
 // AppendNDJSON sends one caller-encoded NDJSON request of at most 8 MiB

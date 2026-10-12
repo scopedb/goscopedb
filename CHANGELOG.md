@@ -4,6 +4,24 @@ All significant changes to this project will be documented in this file.
 
 ## Unreleased
 
+### Breaking Changes
+
+- Replace paginated catalog list, fetch, iterator, and resource APIs with
+  `Client.Catalog(...).Get`, `Apply`, and `Delete`. These require the declarative
+  Catalog server protocol; there is no fallback to legacy pagination.
+  Decode complete definitions into the new `Catalog*` types or retain raw JSON.
+- `Table.Describe` returns `CatalogTable`, using `Distinct` and `RetentionDays`
+  instead of `DistinctOn` and `DataRetentionDays`; database and schema are supplied
+  by the selected resource path.
+
+- Endpoints must not contain URL user information; pass credentials through `Config.APIKey`.
+
+### New Features
+
+- Support catalog dry runs, ETags, destructive-change authorization, and before/after
+  results. Structured SDK errors retain the server error code and distinguish
+  unknown catalog commit outcomes without automatically retrying writes.
+
 ### Changed
 
 - `AppendStream` now retries temporary rejections and transient `unknown`
