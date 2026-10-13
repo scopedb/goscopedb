@@ -254,8 +254,6 @@ type statementResponse struct {
 	Status   StatementStatus   `json:"status"`
 	Created  time.Time         `json:"created_at"`
 
-	// Message is set when the statement was cancelled.
-	Message *string `json:"message"`
 	// Error is required when the statement failed.
 	Error *StatementErrorDetails `json:"error"`
 
@@ -338,9 +336,7 @@ func (c *Client) fetchStatementResult(ctx context.Context, id uuid.UUID) (*state
 	return checkStatementResponse(resp)
 }
 
-type statementCancelResponse = StatementCancelResult
-
-func (c *Client) cancelStatement(ctx context.Context, statementID uuid.UUID) (*statementCancelResponse, error) {
+func (c *Client) cancelStatement(ctx context.Context, statementID uuid.UUID) (*StatementCancelResult, error) {
 	req, err := c.resourceURL("statements", statementID.String(), "cancel")
 	if err != nil {
 		return nil, err

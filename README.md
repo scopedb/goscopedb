@@ -83,7 +83,7 @@ if err != nil {
 }
 ```
 
-Once a handle has a terminal status, `Status` returns the cached status without another request. Store `handle.ID()` and use `client.StatementHandle(id)` to resume the lifecycle in another process. `Cancel` returns the statement ID, creation time, status, and server message. If cancellation finds that a statement already finished or failed, `Wait` fetches the complete statement response needed for its result or structured failure details. A cancelled outcome uses the cancellation message directly.
+Once a handle has a terminal status, `Status` returns the cached status without another request. Store `handle.ID()` and use `client.StatementHandle(id)` to resume the lifecycle in another process. `Cancel` returns the statement ID, creation time, and status. If cancellation finds that a statement already finished or failed, `Wait` fetches the complete statement response needed for its result or structured failure details. `Wait` reports a cancelled outcome with the statement ID and a client-generated message.
 
 `Statement.ID` chooses the statement ID; otherwise ScopeDB generates one. `StatementHandle.ID()` returns the ID confirmed by ScopeDB. `MaxElapsed` limits server-side elapsed time, including queueing, and `MaxEstimated` limits the estimated execution duration. Both use `time.Duration`; zero omits the setting. The server defaults to one hour for elapsed time and no estimate limit. A context deadline limits local waiting independently:
 

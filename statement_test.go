@@ -266,8 +266,7 @@ func TestStatementHandleCancelResumesWithoutSnapshot(t *testing.T) {
 		writeTestJSON(t, w, `{
 			"statement_id":"`+statementID.String()+`",
 			"created_at":"2026-08-08T00:00:00Z",
-			"status":"cancelled",
-			"message":"statement is cancelled"
+			"status":"cancelled"
 		}`)
 	}))
 	defer server.Close()
@@ -279,13 +278,17 @@ func TestStatementHandleCancelResumesWithoutSnapshot(t *testing.T) {
 	require.Equal(t, statementID, result.StatementID)
 	require.Equal(t, time.Date(2026, 8, 8, 0, 0, 0, 0, time.UTC), result.CreatedAt)
 	require.Equal(t, StatementStatusCancelled, result.Status)
-	require.Equal(t, "statement is cancelled", result.Message)
 	require.Equal(t, StatementStatusCancelled, *handle.LastStatus())
 	require.Equal(t, int32(1), requests.Load())
 
 	again, err := handle.Cancel(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, result, again)
+
+	_, err = handle.Wait(context.Background())
+	require.ErrorContains(t, err, "cancelled")
+	require.ErrorContains(t, err, statementID.String())
+	require.NotErrorIs(t, err, context.Canceled)
 	require.Equal(t, int32(1), requests.Load(), "terminal cancel result must be cached")
 }
 
@@ -317,7 +320,6 @@ func TestStatementHandleCancelReturnsCompleteCachedTerminalResult(t *testing.T) 
 		StatementID: statementID,
 		CreatedAt:   time.Date(2026, 8, 8, 0, 0, 0, 0, time.UTC),
 		Status:      StatementStatusFinished,
-		Message:     "statement is finished",
 	}, result)
 	require.Equal(t, int32(1), requests.Load(), "cached terminal cancel must not make a request")
 }
@@ -335,8 +337,7 @@ func TestStatementHandleWaitFetchesResultAfterCancelReportsFinished(t *testing.T
 			writeTestJSON(t, w, `{
 				"statement_id":"`+statementID.String()+`",
 				"created_at":"2026-08-08T00:00:00Z",
-				"status":"finished",
-				"message":"statement already finished"
+				"status":"finished"
 			}`)
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/statements/"+statementID.String():
 			statusRequests.Add(1)
@@ -398,8 +399,7 @@ func TestStatementHandleWaitFetchesFailureAfterCancelReportsFailed(t *testing.T)
 			writeTestJSON(t, w, `{
 				"statement_id":"`+statementID.String()+`",
 				"created_at":"2026-08-08T00:00:00Z",
-				"status":"failed",
-				"message":"statement already failed"
+				"status":"failed"
 			}`)
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/statements/"+statementID.String():
 			request := statusRequests.Add(1)

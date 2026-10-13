@@ -214,13 +214,10 @@ func (h *StatementHandle) Wait(ctx context.Context) (*ResultSet, error) {
 				StatementDetails: failure,
 			}
 		case StatementStatusCancelled:
-			message := fmt.Sprintf("statement is %s", status)
-			if h.resp != nil && h.resp.Status == status && h.resp.Message != nil {
-				message = *h.resp.Message
-			} else if h.cancelResult != nil && h.cancelResult.Status == status {
-				message = h.cancelResult.Message
+			return nil, &Error{
+				Kind:    ErrorKindStatementFailed,
+				Message: fmt.Sprintf("statement %s was cancelled", h.id),
 			}
-			return nil, &Error{Kind: ErrorKindStatementFailed, Message: message}
 		case StatementStatusPending, StatementStatusRunning:
 			// Keep polling below.
 		default:
@@ -243,12 +240,11 @@ func (h *StatementHandle) Wait(ctx context.Context) (*ResultSet, error) {
 	}
 }
 
-// StatementCancelResult reports the server's complete cancellation outcome.
+// StatementCancelResult reports the outcome of a cancellation attempt.
 type StatementCancelResult struct {
 	StatementID uuid.UUID       `json:"statement_id"`
 	CreatedAt   time.Time       `json:"created_at"`
 	Status      StatementStatus `json:"status"`
-	Message     string          `json:"message"`
 }
 
 // Cancel cancels the statement if it is running or pending.
@@ -257,7 +253,11 @@ func (h *StatementHandle) Cancel(ctx context.Context) (StatementCancelResult, er
 		return *h.cancelResult, nil
 	}
 	if h.resp != nil && h.resp.Status.Terminated() {
-		result := h.cancelResultFromResponse()
+		result := StatementCancelResult{
+			StatementID: h.id,
+			CreatedAt:   h.resp.Created,
+			Status:      h.resp.Status,
+		}
 		h.cancelResult = &result
 		h.cancelResultNeedsFetch = false
 		return result, nil
@@ -275,21 +275,6 @@ func (h *StatementHandle) Cancel(ctx context.Context) (StatementCancelResult, er
 			result.Status == StatementStatusFailed
 	}
 	return result, nil
-}
-
-func (h *StatementHandle) cancelResultFromResponse() StatementCancelResult {
-	message := fmt.Sprintf("statement is %s", h.resp.Status)
-	if h.resp.Status == StatementStatusFailed {
-		message = h.resp.Error.Message
-	} else if h.resp.Message != nil && *h.resp.Message != "" {
-		message = *h.resp.Message
-	}
-	return StatementCancelResult{
-		StatementID: h.id,
-		CreatedAt:   h.resp.Created,
-		Status:      h.resp.Status,
-		Message:     message,
-	}
 }
 
 // StatementStatus is a string that represents the status of a statement.

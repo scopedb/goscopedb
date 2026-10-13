@@ -61,7 +61,7 @@ type Error struct {
 	cause error
 }
 
-// Error returns the server message unchanged when the error came from ScopeDB.
+// Error returns the human-readable error message.
 func (e *Error) Error() string {
 	return e.Message
 }
@@ -277,7 +277,7 @@ func validateFinishedResult(result *resultSet) error {
 	return nil
 }
 
-func checkStatementCancelResponse(resp *http.Response) (*statementCancelResponse, error) {
+func checkStatementCancelResponse(resp *http.Response) (*StatementCancelResult, error) {
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, responseMetadataError(
@@ -291,7 +291,7 @@ func checkStatementCancelResponse(resp *http.Response) (*statementCancelResponse
 		return nil, responseError(resp, data, ErrorKindUnexpected)
 	}
 
-	var stmtResp statementCancelResponse
+	var stmtResp StatementCancelResult
 	if err := json.Unmarshal(data, &stmtResp); err != nil {
 		return nil, responseMetadataError(
 			resp,
