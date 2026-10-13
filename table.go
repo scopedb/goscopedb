@@ -114,7 +114,7 @@ func quoteIdent(s string, r rune) string {
 			}
 
 			if c < 0x20 {
-				b.WriteString(fmt.Sprintf("\\x%02x", c))
+				_, _ = fmt.Fprintf(&b, "\\x%02x", c)
 				break
 			}
 
