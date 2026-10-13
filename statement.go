@@ -87,11 +87,9 @@ func (s *Statement) Execute(ctx context.Context) (*ResultSet, error) {
 
 // StatementHandle is a handle to a statement that has been submitted to ScopeDB.
 type StatementHandle struct {
-	c                      *Client
-	resp                   *statementResponse
-	cancelResult           *StatementCancelResult
-	cancelResultNeedsFetch bool
-	id                     uuid.UUID
+	c    *Client
+	resp *statementResponse
+	id   uuid.UUID
 }
 
 // StatementHandle creates a new StatementHandle with the given ID.
@@ -109,14 +107,6 @@ func (h *StatementHandle) ID() uuid.UUID {
 
 // LastStatus returns the latest locally cached status without making a request.
 func (h *StatementHandle) LastStatus() *StatementStatus {
-	if h.resp != nil && h.resp.Status.Terminated() {
-		status := h.resp.Status
-		return &status
-	}
-	if h.cancelResult != nil && h.cancelResult.Status.Terminated() {
-		status := h.cancelResult.Status
-		return &status
-	}
 	if h.resp != nil {
 		status := h.resp.Status
 		return &status
@@ -150,9 +140,6 @@ func (h *StatementHandle) Status(ctx context.Context) (StatementStatus, error) {
 	if h.resp != nil && h.resp.Status.Terminated() {
 		return h.resp.Status, nil
 	}
-	if h.cancelResult != nil && h.cancelResult.Status.Terminated() {
-		return h.cancelResult.Status, nil
-	}
 
 	resp, err := h.c.fetchStatementResult(ctx, h.id)
 	if err != nil {
@@ -173,26 +160,6 @@ func (h *StatementHandle) Wait(ctx context.Context) (*ResultSet, error) {
 		status, err := h.Status(ctx)
 		if err != nil {
 			return nil, err
-		}
-		if h.cancelResultNeedsFetch &&
-			(status == StatementStatusFinished || status == StatementStatusFailed) {
-			resp, err := h.c.fetchStatementResult(ctx, h.id)
-			if err != nil {
-				return nil, err
-			}
-			if !resp.Status.Terminated() {
-				return nil, &Error{
-					Kind: ErrorKindUnexpected,
-					Message: fmt.Sprintf(
-						"statement cancel reported %s but fetched status is %s",
-						status,
-						resp.Status,
-					),
-				}
-			}
-			h.resp = resp
-			h.cancelResultNeedsFetch = false
-			continue
 		}
 
 		switch status {
@@ -240,41 +207,21 @@ func (h *StatementHandle) Wait(ctx context.Context) (*ResultSet, error) {
 	}
 }
 
-// StatementCancelResult reports the outcome of a cancellation attempt.
-type StatementCancelResult struct {
-	StatementID uuid.UUID       `json:"statement_id"`
-	CreatedAt   time.Time       `json:"created_at"`
-	Status      StatementStatus `json:"status"`
-}
-
-// Cancel cancels the statement if it is running or pending.
-func (h *StatementHandle) Cancel(ctx context.Context) (StatementCancelResult, error) {
-	if h.cancelResult != nil {
-		return *h.cancelResult, nil
-	}
+// Cancel requests cancellation and returns the resulting status.
+// The full response is cached for Progress, ResultSet, and Wait. A cached
+// terminal status is returned without making another request.
+func (h *StatementHandle) Cancel(ctx context.Context) (StatementStatus, error) {
 	if h.resp != nil && h.resp.Status.Terminated() {
-		result := StatementCancelResult{
-			StatementID: h.id,
-			CreatedAt:   h.resp.Created,
-			Status:      h.resp.Status,
-		}
-		h.cancelResult = &result
-		h.cancelResultNeedsFetch = false
-		return result, nil
+		return h.resp.Status, nil
 	}
 
 	resp, err := h.c.cancelStatement(ctx, h.id)
 	if err != nil {
-		return StatementCancelResult{}, err
+		return "", err
 	}
 
-	result := *resp
-	if result.Status.Terminated() {
-		h.cancelResult = &result
-		h.cancelResultNeedsFetch = result.Status == StatementStatusFinished ||
-			result.Status == StatementStatusFailed
-	}
-	return result, nil
+	h.resp = resp
+	return h.resp.Status, nil
 }
 
 // StatementStatus is a string that represents the status of a statement.

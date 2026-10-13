@@ -325,7 +325,7 @@ func (c *Client) fetchStatementResult(ctx context.Context, id uuid.UUID) (*state
 	}
 
 	q := req.Query()
-	q.Add("format", string(resultFormatJSON))
+	q.Set("format", string(resultFormatJSON))
 	req.RawQuery = q.Encode()
 
 	resp, err := c.http.doGet(ctx, req)
@@ -336,18 +336,22 @@ func (c *Client) fetchStatementResult(ctx context.Context, id uuid.UUID) (*state
 	return checkStatementResponse(resp)
 }
 
-func (c *Client) cancelStatement(ctx context.Context, statementID uuid.UUID) (*StatementCancelResult, error) {
+func (c *Client) cancelStatement(ctx context.Context, statementID uuid.UUID) (*statementResponse, error) {
 	req, err := c.resourceURL("statements", statementID.String(), "cancel")
 	if err != nil {
 		return nil, err
 	}
+
+	q := req.Query()
+	q.Set("format", string(resultFormatJSON))
+	req.RawQuery = q.Encode()
 
 	resp, err := c.http.doPost(ctx, req, []byte{})
 	if err != nil {
 		return nil, err
 	}
 	defer sneakyBodyClose(resp.Body)
-	return checkStatementCancelResponse(resp)
+	return checkStatementResponse(resp)
 }
 
 type writeFormat string

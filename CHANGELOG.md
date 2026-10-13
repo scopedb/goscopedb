@@ -12,8 +12,10 @@ All significant changes to this project will be documented in this file.
 - Statement error codes use the `statement_` prefix. Prepare and execution
   failures share `StatementErrorCodeFailed`; row and scan limits are replaced
   by `StatementErrorCodeEstimateLimitExceeded`.
-- Removed `StatementCancelResult.Message`. Use `Status` and `StatementID` to
-  display cancellation outcomes.
+- `StatementHandle.Cancel` returns `StatementStatus` instead of
+  `StatementCancelResult` and caches the full response. Use `handle.ID()` for
+  identity and `Progress`, `ResultSet`, or `Wait` for the cancellation outcome;
+  finished results and failure details are available without another request.
 - Removed `Table.Drop`. Use an explicit `DROP TABLE` statement for SQL workflows.
 
 ### Bug Fixes
