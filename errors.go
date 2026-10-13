@@ -41,6 +41,8 @@ const (
 	ErrorKindConfigInvalid ErrorKind = "ConfigInvalid"
 	// ErrorKindStatementFailed indicates a failed or cancelled statement.
 	ErrorKindStatementFailed ErrorKind = "StatementFailed"
+	// ErrorKindCatalogFailed indicates a catalog request failure or unknown commit outcome.
+	ErrorKindCatalogFailed ErrorKind = "CatalogFailed"
 	// ErrorKindAppendRowsFailed indicates a rejected append or an unknown commit outcome.
 	ErrorKindAppendRowsFailed ErrorKind = "AppendRowsFailed"
 )
@@ -64,7 +66,9 @@ type WriteErrorDetails struct {
 
 // Error represents a ScopeDB client or API error.
 type Error struct {
-	Kind          ErrorKind
+	Kind ErrorKind
+	// Code is the server error code, when provided. Unknown codes are retained.
+	Code          string
 	Message       string
 	HTTPStatus    int
 	RequestID     string
@@ -118,6 +122,7 @@ func (e *Error) withWriteContext(ctx context.Context) *Error {
 }
 
 type apiErrorPayload struct {
+	Code               string           `json:"code"`
 	Message            string           `json:"message"`
 	RequestID          string           `json:"request_id"`
 	Retryable          *bool            `json:"retryable"`
@@ -162,6 +167,7 @@ func responseError(resp *http.Response, body []byte, kind ErrorKind) *Error {
 			resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500,
 	}
 	if parsed {
+		err.Code = payload.Code
 		if payload.RequestID != "" {
 			err.RequestID = payload.RequestID
 		}

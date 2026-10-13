@@ -106,6 +106,7 @@ func TestNewClientRejectsInvalidEndpoint(t *testing.T) {
 		"",
 		"localhost:6543",
 		"ftp://example.com",
+		"https://user:fixture-password@example.com",
 		"https://example.com/base?query=true",
 		"https://example.com/base#fragment",
 	} {

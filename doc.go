@@ -15,8 +15,8 @@
  */
 
 /*
-Package scopedb provides a Go client for ScopeQL statements, REST catalog
-discovery, and streaming writes.
+Package scopedb provides a Go client for ScopeQL statements, declarative catalog
+management, and streaming writes.
 
 Create and close one Client for the application's connection pool:
 
@@ -46,8 +46,15 @@ snapshot, an explicit remote status request, or a separate wait. ID and
 ExecTimeout are the only optional statement settings; omit ID to let ScopeDB
 generate it, and read the confirmed ID from StatementHandle.ID. Failed
 statements expose structured server error details on Error.StatementDetails.
-Catalog iterators lazily traverse REST pages. Table.Describe returns table
-metadata. For application writes, Table.AppendStream is the recommended path:
+Client.Catalog reads and replaces the complete tenant catalog. Its Database,
+Schema, Table, and View selectors provide typed Get, Apply, and Delete operations.
+Raw retains JSON definitions including fields unknown to the SDK. Apply supports
+dry runs, ETag preconditions, and authorization for destructive changes.
+Table.Apply initializes a complete table definition before writing; options are
+optional and potentially destructive changes are rejected by default.
+Table.Describe returns a CatalogTable definition.
+
+For application writes, Table.AppendStream is the recommended path:
 it accepts typed rows and adds bounded asynchronous batching that is safe for
 concurrent producers. Table.AppendStream and Table.AppendNDJSON use the
 client's configured compression, which defaults to zstd. Table.AppendNDJSON is

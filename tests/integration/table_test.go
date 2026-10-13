@@ -49,16 +49,14 @@ func TestTableDescribe(t *testing.T) {
 
 	description, err := tbl.Describe(ctx)
 	require.NoError(t, err)
-	require.Equal(t, "scopedb", description.Database)
-	require.Equal(t, "public", description.Schema)
 	require.Equal(t, tbl.Name, description.Name)
-	require.Equal(t, []scopedb.TableColumnSpec{
-		{Name: "i", DataType: scopedb.IntDataType},
-		{Name: "u", DataType: scopedb.UIntDataType},
-		{Name: "f", DataType: scopedb.FloatDataType},
-		{Name: "s", DataType: scopedb.StringDataType},
-		{Name: "b", DataType: scopedb.BooleanDataType},
-		{Name: "ts", DataType: scopedb.TimestampDataType},
-		{Name: "var", DataType: scopedb.AnyDataType},
+	require.Equal(t, []scopedb.CatalogColumn{
+		{Name: "i", DataType: scopedb.IntDataType, Indexes: []scopedb.CatalogColumnIndex{}},
+		{Name: "u", DataType: scopedb.UIntDataType, Indexes: []scopedb.CatalogColumnIndex{}},
+		{Name: "f", DataType: scopedb.FloatDataType, Indexes: []scopedb.CatalogColumnIndex{}},
+		{Name: "s", DataType: scopedb.StringDataType, Indexes: []scopedb.CatalogColumnIndex{}},
+		{Name: "b", DataType: scopedb.BooleanDataType, Indexes: []scopedb.CatalogColumnIndex{}},
+		{Name: "ts", DataType: scopedb.TimestampDataType, Indexes: []scopedb.CatalogColumnIndex{}},
+		{Name: "var", DataType: scopedb.AnyDataType, Indexes: []scopedb.CatalogColumnIndex{}},
 	}, description.Columns)
 }

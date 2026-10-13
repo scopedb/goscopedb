@@ -4,6 +4,29 @@ All significant changes to this project will be documented in this file.
 
 ## Unreleased
 
+### Breaking Changes
+
+- Replace paginated catalog list, fetch, iterator, and resource APIs with
+  `Client.Catalog()` and typed database, schema, table, and view selectors. These require the declarative
+  Catalog server protocol under `/v1/catalog`; there is no fallback to legacy pagination.
+  Select the whole tenant or an individual database, schema, table, or view;
+  manage child collections through their parent definition.
+  `Get`, `Apply`, and `Delete` return typed definitions and before/after states.
+  Use `Raw()` for lossless JSON export and apply across schema additions.
+- `Table.Describe` returns `CatalogTable`, using `Distinct` and `RetentionDays`
+  instead of `DistinctOn` and `DataRetentionDays`; database and schema are supplied
+  by the selected resource path.
+
+- Endpoints must not contain URL user information; pass credentials through `Config.APIKey`.
+
+### New Features
+
+- Initialize tables through `Table.Apply` and use the same handle for writes.
+  Catalog `Apply` and `Delete` accept optional options and reject potentially
+  destructive changes by default. Support dry runs, ETags, destructive-change
+  authorization, and before/after results. Structured SDK errors retain the server error code and distinguish
+  unknown catalog commit outcomes without automatically retrying writes.
+
 ### Changed
 
 - Table append and transform-ingest requests now have a configurable

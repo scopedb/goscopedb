@@ -30,16 +30,15 @@ func TestTableDescribeUsesDefaultLocation(t *testing.T) {
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, http.MethodGet, r.Method)
-		require.Equal(t, "/v1/databases/scopedb/schemas/public/tables/events", r.URL.Path)
+		require.Equal(t, "/v1/catalog/databases/scopedb/schemas/public/tables/events", r.URL.Path)
+		w.Header().Set("ETag", `"1"`)
 		writeTestJSON(t, w, `{
-			"database":"scopedb",
-			"schema":"public",
-			"name":"events",
+									"name":"events",
 			"columns":[{"name":"message","data_type":"string","comment":null}],
 			"partition_by":[],
 			"cluster_by":[],
-			"distinct_on":{"on":[],"by":[]},
-			"data_retention_days":null,
+			"distinct":{"on":[],"by":[]},
+			"retention_days":null,
 			"comment":"application events"
 		}`)
 	}))
@@ -48,10 +47,8 @@ func TestTableDescribeUsesDefaultLocation(t *testing.T) {
 	client := newTestClient(t, server.URL)
 	description, err := client.Table("events").Describe(context.Background())
 	require.NoError(t, err)
-	require.Equal(t, "scopedb", description.Database)
-	require.Equal(t, "public", description.Schema)
 	require.Equal(t, "events", description.Name)
-	require.Equal(t, []TableColumnSpec{{
+	require.Equal(t, []CatalogColumn{{
 		Name:     "message",
 		DataType: StringDataType,
 	}}, description.Columns)

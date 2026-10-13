@@ -114,50 +114,86 @@ if errors.As(err, &scopeErr) && scopeErr.StatementDetails != nil {
 }
 ```
 
-## Browse the REST catalog
+## Initialize a table
 
-List methods expose one explicit page. Iterators lazily request later pages and are the simpler choice for discovery:
-
-```go
-for database, err := range client.IterateDatabases(ctx, scopedb.CatalogListOptions{
-	PageSize: 100,
-}) {
-	if err != nil {
-		return err
-	}
-	fmt.Println(database.Name)
-}
-
-for table, err := range client.IterateTables(
-	ctx,
-	"scopedb",
-	"public",
-	scopedb.CatalogListOptions{PageSize: 100},
-) {
-	if err != nil {
-		return err
-	}
-	fmt.Println(table.Name)
-}
-```
-
-Use `ListDatabases`, `ListSchemas`, or `ListTables` when the application owns page boundaries. Use `FetchDatabase`, `FetchSchema`, or `FetchTable` for a full resource.
-
-## Describe a table
-
-The table helper defaults to database `scopedb` and schema `public`. Set both explicitly when the destination is application-configured:
+At application startup, apply the complete expected definition and start writing after it succeeds. `Table` defaults to database `scopedb` and schema `public`; set its `Database` and `Schema` fields to use another location. The parent database and schema must exist.
 
 ```go
 table := client.Table("events")
-table.Database = "scopedb"
-table.Schema = "public"
-
-description, err := table.Describe(ctx)
-if err != nil {
-	return err
+definition := &scopedb.CatalogTable{
+    Name: table.Name,
+    Columns: []scopedb.CatalogColumn{
+        {Name: "id", DataType: scopedb.IntDataType},
+        {Name: "message", DataType: scopedb.StringDataType},
+    },
 }
-fmt.Println(description.Columns)
+if _, err := table.Apply(ctx, definition); err != nil {
+    return err
+}
+
+_, err := table.AppendNDJSON(ctx, []byte("{\"id\":1,\"message\":\"service started\"}\n"))
+if err != nil {
+    return err
+}
 ```
+
+The default call applies immediately and rejects changes that may lose data. Applying the same definition again preserves existing rows. This is complete replacement: omitted fields and objects are cleared. If an older application version omits a physical column added by a newer version, its startup apply fails rather than deleting that column. Use `table.Describe(ctx)` to read the current `CatalogTable` definition.
+
+Pass one `CatalogOptions` value when you need a dry run, an ETag precondition, or explicit authorization for destructive changes. The same optional options are accepted by Catalog `Apply` and `Delete`.
+
+## Manage the catalog
+
+The declarative Catalog API reads complete definitions and replaces resources atomically. It requires a server with the declarative protocol; the old paginated catalog API is not supported.
+
+```go
+catalog := client.Catalog().Table("scopedb", "public", "events")
+snapshot, err := catalog.Get(ctx)
+if err != nil {
+    return err
+}
+definition := snapshot.Definition
+retention := int32(30)
+definition.RetentionDays = &retention
+plan, err := catalog.Apply(ctx, definition, scopedb.CatalogOptions{DryRun: true})
+if err != nil {
+    return err
+}
+// Review plan.Before, plan.After, and plan.Destructive before authorizing this write.
+result, err := catalog.Apply(ctx, definition, scopedb.CatalogOptions{
+    IfMatch: plan.ETag,
+    AllowDestructive: plan.Destructive,
+})
+if err != nil {
+    return err
+}
+fmt.Println(result.ETag)
+```
+
+`client.Catalog()` selects the entire tenant. Use `Database(name)`, `Schema(database, schema)`, `Table(database, schema, table)`, or `View(database, schema, view)` to select an individual resource. Pass names directly; the SDK escapes each name for the HTTP path. Each resource includes its complete subtree.
+
+`Get` returns a `CatalogSnapshot[T]` with a typed definition and an ETag. `Apply` accepts the same definition type and returns `CatalogResult[T]` with typed `Before` and `After` values. These definitions are pointers: `Before` is nil when creating a resource, and `After` is nil when deleting it.
+
+Omitted fields and objects are cleared, and omitted collections are empty. `Delete` removes one database, schema, table, or view using the same options; clear the tenant by applying `&scopedb.CatalogDocument{}`, or clear children by editing their parent definition. `IfMatch` is optional, while potentially irreversible data loss requires `AllowDestructive`. Dry runs validate and roll back without requiring that authorization. Storage is a creation-only input omitted from exports, so keep the original definition when planning creation.
+
+For export and apply workflows that must preserve fields unknown to this SDK, select `Raw()`. Definitions and before/after states are then `json.RawMessage`; absent states are JSON `null`:
+
+```go
+catalog := client.Catalog().Raw()
+snapshot, err := catalog.Get(ctx)
+if err != nil {
+    return err
+}
+// Retain snapshot.Definition as raw JSON when saving or editing it.
+plan, err := catalog.Apply(ctx, snapshot.Definition, scopedb.CatalogOptions{DryRun: true})
+if err != nil {
+    return err
+}
+fmt.Println(string(plan.After))
+```
+
+`Raw()` is also available on each resource selector. Typed and raw resources share the same HTTP behavior, options, and errors.
+
+Errors use `*scopedb.Error`, including the server `Code`, HTTP status, and request ID. Catalog writes are never automatically retried. If `Code` is `catalog_commit_outcome_unknown`, read the catalog and plan again before retrying; a lost response does not imply a rollback.
 
 ## Streaming writes
 
