@@ -19,7 +19,6 @@ package scopedb
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -72,30 +71,22 @@ func TestStatementSubmitSendsOnlySupportedConfiguration(t *testing.T) {
 
 	providedID := uuid.MustParse("01989a4e-4ee2-7e63-87a5-65ac3b5161dc")
 	tests := []struct {
-		name        string
-		statementID *uuid.UUID
-		execTimeout string
-		wantBody    string
+		name         string
+		statementID  *uuid.UUID
+		maxElapsed   time.Duration
+		maxEstimated time.Duration
+		wantBody     string
 	}{
 		{
 			name:     "default",
 			wantBody: `{"statement":"FROM events","format":"json"}`,
 		},
 		{
-			name:        "execution timeout",
-			execTimeout: "1h",
-			wantBody:    `{"statement":"FROM events","exec_timeout":"1h","format":"json"}`,
-		},
-		{
-			name:        "provided statement ID",
-			statementID: &providedID,
-			wantBody:    `{"statement_id":"01989a4e-4ee2-7e63-87a5-65ac3b5161dc","statement":"FROM events","format":"json"}`,
-		},
-		{
-			name:        "provided statement ID and execution timeout",
-			statementID: &providedID,
-			execTimeout: "1h",
-			wantBody:    `{"statement_id":"01989a4e-4ee2-7e63-87a5-65ac3b5161dc","statement":"FROM events","exec_timeout":"1h","format":"json"}`,
+			name:         "configured",
+			statementID:  &providedID,
+			maxElapsed:   time.Minute,
+			maxEstimated: 30 * time.Second,
+			wantBody:     `{"statement_id":"01989a4e-4ee2-7e63-87a5-65ac3b5161dc","statement":"FROM events","max_elapsed_seconds":60,"max_estimated_seconds":30,"format":"json"}`,
 		},
 	}
 	for _, test := range tests {
@@ -123,12 +114,33 @@ func TestStatementSubmitSendsOnlySupportedConfiguration(t *testing.T) {
 			client := newTestClient(t, server.URL)
 			statement := client.Statement("FROM events")
 			statement.ID = test.statementID
-			statement.ExecTimeout = test.execTimeout
+			statement.MaxElapsed = test.maxElapsed
+			statement.MaxEstimated = test.maxEstimated
 			handle, err := statement.Submit(context.Background())
 			require.NoError(t, err)
 			require.Equal(t, responseID, handle.ID())
 		})
 	}
+}
+
+func TestStatementHTTPError(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("X-Request-ID", "statement-request")
+		w.WriteHeader(http.StatusBadRequest)
+		writeTestJSON(t, w, `{"code":"invalid_request","message":"invalid statement request"}`)
+	}))
+	defer server.Close()
+
+	client := newTestClient(t, server.URL)
+	_, err := client.Statement("SELECT 1").Submit(t.Context())
+	var failure *Error
+	require.ErrorAs(t, err, &failure)
+	require.Equal(t, "invalid_request", failure.Code)
+	require.Equal(t, "invalid statement request", failure.Message)
+	require.Equal(t, http.StatusBadRequest, failure.HTTPStatus)
+	require.Equal(t, "statement-request", failure.RequestID)
 }
 
 func TestStatementHandleStatusFetchesOnceAndCachesTerminalStatus(t *testing.T) {
@@ -219,35 +231,10 @@ func TestStatementHandleWaitReturnsStatementFailure(t *testing.T) {
 			"status":"failed",
 			"created_at":"2026-08-08T00:00:00Z",
 			"progress":{},
-			"message":"invalid ScopeQL"
-		}`)
-	}))
-	defer server.Close()
-
-	client := newTestClient(t, server.URL)
-	_, err := client.StatementHandle(statementID).Wait(context.Background())
-	require.Error(t, err)
-	var scopeDBError *Error
-	require.True(t, errors.As(err, &scopeDBError))
-	require.Equal(t, ErrorKindStatementFailed, scopeDBError.Kind)
-	require.Equal(t, "invalid ScopeQL", scopeDBError.Message)
-}
-
-func TestStatementHandleWaitPreservesStructuredStatementFailure(t *testing.T) {
-	t.Parallel()
-
-	statementID := uuid.New()
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		writeTestJSON(t, w, `{
-			"statement_id":"`+statementID.String()+`",
-			"status":"failed",
-			"created_at":"2026-08-08T00:00:00Z",
-			"progress":{},
-			"message":"outer server message",
 			"error":{
-				"code":"row_limit_exceeded",
+				"code":"statement_estimate_limit_exceeded",
 				"message":"structured server message",
-				"details":{"total_rows":42,"max_total_rows":0}
+				"details":{"estimated_seconds":42,"max_estimated_seconds":30}
 			}
 		}`)
 	}))
@@ -258,11 +245,12 @@ func TestStatementHandleWaitPreservesStructuredStatementFailure(t *testing.T) {
 	var scopeDBError *Error
 	require.ErrorAs(t, err, &scopeDBError)
 	require.Equal(t, ErrorKindStatementFailed, scopeDBError.Kind)
-	require.Equal(t, "outer server message", scopeDBError.Message)
+	require.Equal(t, "structured server message", scopeDBError.Message)
+	require.Equal(t, "statement_estimate_limit_exceeded", scopeDBError.Code)
 	require.Equal(t, &StatementErrorDetails{
-		Code:    StatementErrorCodeRowLimitExceeded,
+		Code:    StatementErrorCodeEstimateLimitExceeded,
 		Message: "structured server message",
-		Details: json.RawMessage(`{"total_rows":42,"max_total_rows":0}`),
+		Details: json.RawMessage(`{"estimated_seconds":42,"max_estimated_seconds":30}`),
 	}, scopeDBError.StatementDetails)
 }
 
@@ -429,11 +417,10 @@ func TestStatementHandleWaitFetchesFailureAfterCancelReportsFailed(t *testing.T)
 				"status":"failed",
 				"created_at":"2026-08-08T00:00:00Z",
 				"progress":{"scanned_rows":12,"skipped_rows":3},
-				"message":"row limit reached",
 				"error":{
-					"code":"row_limit_exceeded",
-					"message":"total rows exceeds limit",
-					"details":{"total_rows":12,"max_total_rows":10}
+					"code":"statement_estimate_limit_exceeded",
+					"message":"estimated duration exceeds limit",
+					"details":{"estimated_seconds":12,"max_estimated_seconds":10}
 				}
 			}`)
 		default:
@@ -466,11 +453,11 @@ func TestStatementHandleWaitFetchesFailureAfterCancelReportsFailed(t *testing.T)
 	var scopeDBError *Error
 	require.ErrorAs(t, err, &scopeDBError)
 	require.Equal(t, ErrorKindStatementFailed, scopeDBError.Kind)
-	require.Equal(t, "row limit reached", scopeDBError.Message)
+	require.Equal(t, "estimated duration exceeds limit", scopeDBError.Message)
 	require.Equal(t, &StatementErrorDetails{
-		Code:    StatementErrorCodeRowLimitExceeded,
-		Message: "total rows exceeds limit",
-		Details: json.RawMessage(`{"total_rows":12,"max_total_rows":10}`),
+		Code:    StatementErrorCodeEstimateLimitExceeded,
+		Message: "estimated duration exceeds limit",
+		Details: json.RawMessage(`{"estimated_seconds":12,"max_estimated_seconds":10}`),
 	}, scopeDBError.StatementDetails)
 	require.Equal(t, int32(2), statusRequests.Load(), "Wait must fetch the complete failure once")
 	require.Equal(t, int64(12), handle.Progress().ScannedRows)
@@ -517,13 +504,10 @@ func TestStatementStatusRejectsMalformedStructuredFailures(t *testing.T) {
 	t.Parallel()
 
 	tests := map[string]string{
-		"non-object error":           `[]`,
-		"missing code":               `{"message":"failed"}`,
-		"missing message":            `{"code":"execute_error"}`,
-		"missing limit details":      `{"code":"row_limit_exceeded","message":"failed"}`,
-		"non-object limit details":   `{"code":"row_limit_exceeded","message":"failed","details":[]}`,
-		"missing limit detail field": `{"code":"row_limit_exceeded","message":"failed","details":{"total_rows":1}}`,
-		"invalid limit detail field": `{"code":"scan_limit_exceeded","message":"failed","details":{"scanned_uncompressed_bytes":1,"max_scanned_uncompressed_bytes":-1}}`,
+		"missing error":    `null`,
+		"non-object error": `[]`,
+		"missing code":     `{"message":"failed"}`,
+		"missing message":  `{"code":"statement_failed"}`,
 	}
 	for name, statementError := range tests {
 		name, statementError := name, statementError
@@ -537,7 +521,6 @@ func TestStatementStatusRejectsMalformedStructuredFailures(t *testing.T) {
 					"status":"failed",
 					"created_at":"2026-08-08T00:00:00Z",
 					"progress":{},
-					"message":"failed",
 					"error":`+statementError+`
 				}`)
 			}))

@@ -35,13 +35,12 @@ type Statement struct {
 	//
 	// When nil, ScopeDB generates the statement ID.
 	ID *uuid.UUID
-	// ExecTimeout is the maximum time allowed for statement execution.
-	//
-	// If the total execution time exceeds this value, the statement is failed
-	// as timed out.
-	//
-	// Values use duration strings such as "1h".
-	ExecTimeout string
+	// MaxElapsed limits the server-side elapsed time, including queueing.
+	// Zero uses the server default of one hour.
+	MaxElapsed time.Duration
+	// MaxEstimated limits the estimated total execution duration.
+	// Zero leaves the estimate unrestricted.
+	MaxEstimated time.Duration
 }
 
 // Statement creates a new statement with the given ScopeQL statement.
@@ -56,11 +55,15 @@ func (c *Client) Query(ctx context.Context, scopeql string) (*ResultSet, error) 
 
 // Submit submits the statement to ScopeDB for execution.
 func (s *Statement) Submit(ctx context.Context) (*StatementHandle, error) {
+	if s.MaxElapsed < 0 || s.MaxEstimated < 0 {
+		return nil, newError(ErrorKindConfigInvalid, "statement limits must not be negative", nil)
+	}
 	resp, err := s.c.submitStatement(ctx, &statementRequest{
-		StatementID: s.ID,
-		Statement:   s.stmt,
-		ExecTimeout: s.ExecTimeout,
-		Format:      resultFormatJSON,
+		StatementID:         s.ID,
+		Statement:           s.stmt,
+		MaxElapsedSeconds:   s.MaxElapsed.Seconds(),
+		MaxEstimatedSeconds: s.MaxEstimated.Seconds(),
+		Format:              resultFormatJSON,
 	})
 	if err != nil {
 		return nil, err
@@ -202,18 +205,22 @@ func (h *StatementHandle) Wait(ctx context.Context) (*ResultSet, error) {
 				Kind:    ErrorKindUnexpected,
 				Message: "finished statement response has no result set",
 			}
-		case StatementStatusFailed, StatementStatusCancelled:
+		case StatementStatusFailed:
+			failure := h.resp.Error
+			return nil, &Error{
+				Kind:             ErrorKindStatementFailed,
+				Code:             string(failure.Code),
+				Message:          failure.Message,
+				StatementDetails: failure,
+			}
+		case StatementStatusCancelled:
 			message := fmt.Sprintf("statement is %s", status)
 			if h.resp != nil && h.resp.Status == status && h.resp.Message != nil {
 				message = *h.resp.Message
 			} else if h.cancelResult != nil && h.cancelResult.Status == status {
 				message = h.cancelResult.Message
 			}
-			failure := &Error{Kind: ErrorKindStatementFailed, Message: message}
-			if h.resp != nil && h.resp.Status == status {
-				failure.StatementDetails = h.resp.Error
-			}
-			return nil, failure
+			return nil, &Error{Kind: ErrorKindStatementFailed, Message: message}
 		case StatementStatusPending, StatementStatusRunning:
 			// Keep polling below.
 		default:
@@ -272,7 +279,9 @@ func (h *StatementHandle) Cancel(ctx context.Context) (StatementCancelResult, er
 
 func (h *StatementHandle) cancelResultFromResponse() StatementCancelResult {
 	message := fmt.Sprintf("statement is %s", h.resp.Status)
-	if h.resp.Message != nil && *h.resp.Message != "" {
+	if h.resp.Status == StatementStatusFailed {
+		message = h.resp.Error.Message
+	} else if h.resp.Message != nil && *h.resp.Message != "" {
 		message = *h.resp.Message
 	}
 	return StatementCancelResult{
@@ -304,20 +313,16 @@ const (
 type StatementErrorCode string
 
 const (
-	// StatementErrorCodePrepareError indicates that statement preparation failed.
-	StatementErrorCodePrepareError StatementErrorCode = "prepare_error"
-	// StatementErrorCodeExecuteError indicates that statement execution failed.
-	StatementErrorCodeExecuteError StatementErrorCode = "execute_error"
+	// StatementErrorCodeFailed indicates that statement preparation or execution failed.
+	StatementErrorCodeFailed StatementErrorCode = "statement_failed"
 	// StatementErrorCodePendingTimeout indicates that the statement timed out before execution.
-	StatementErrorCodePendingTimeout StatementErrorCode = "pending_timeout"
+	StatementErrorCodePendingTimeout StatementErrorCode = "statement_pending_timeout"
 	// StatementErrorCodeExecutionTimeout indicates that the statement exceeded its execution timeout.
-	StatementErrorCodeExecutionTimeout StatementErrorCode = "execution_timeout"
+	StatementErrorCodeExecutionTimeout StatementErrorCode = "statement_execution_timeout"
+	// StatementErrorCodeEstimateLimitExceeded indicates that the estimated duration reached its limit.
+	StatementErrorCodeEstimateLimitExceeded StatementErrorCode = "statement_estimate_limit_exceeded"
 	// StatementErrorCodeHeartbeatLost indicates that the statement worker stopped reporting progress.
-	StatementErrorCodeHeartbeatLost StatementErrorCode = "heartbeat_lost"
-	// StatementErrorCodeRowLimitExceeded indicates that the statement exceeded a server-enforced row limit.
-	StatementErrorCodeRowLimitExceeded StatementErrorCode = "row_limit_exceeded"
-	// StatementErrorCodeScanLimitExceeded indicates that the statement exceeded a server-enforced scan limit.
-	StatementErrorCodeScanLimitExceeded StatementErrorCode = "scan_limit_exceeded"
+	StatementErrorCodeHeartbeatLost StatementErrorCode = "statement_heartbeat_lost"
 )
 
 // StatementErrorDetails contains the structured failure returned for a failed

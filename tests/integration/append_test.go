@@ -43,7 +43,8 @@ func TestTableAppendLifecycle(t *testing.T) {
 	`, table.Identifier())).Execute(ctx)
 	require.NoError(t, err)
 	defer func() {
-		require.NoError(t, table.Drop(context.Background()))
+		_, err := client.Statement(fmt.Sprintf("DROP TABLE %s", table.Identifier())).Execute(context.Background())
+		require.NoError(t, err)
 	}()
 
 	direct, err := table.AppendNDJSON(ctx, []byte(
@@ -84,26 +85,6 @@ func TestTableAppendLifecycle(t *testing.T) {
 	require.Equal(t, scopedb.AppendDeliveryOK, report.Outcome)
 	require.Equal(t, uint64(streamedRows), report.AcceptedRows)
 	require.Equal(t, uint64(streamedRows), report.CommittedRows)
-
-	description, err := table.Describe(ctx)
-	require.NoError(t, err)
-	require.Equal(t, table.Name, description.Name)
-	require.Len(t, description.Columns, 2)
-
-	found := false
-	for summary, iterateErr := range client.IterateTables(
-		ctx,
-		"scopedb",
-		"public",
-		scopedb.CatalogListOptions{PageSize: 1},
-	) {
-		require.NoError(t, iterateErr)
-		if summary.Name == table.Name {
-			found = true
-			break
-		}
-	}
-	require.True(t, found)
 
 	statement := client.Statement(fmt.Sprintf("FROM %s", table.Identifier()))
 	result, err := statement.Execute(ctx)

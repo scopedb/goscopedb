@@ -42,15 +42,6 @@ func (c *Client) Table(tableName string) *Table {
 	}
 }
 
-// Drop drops the table from ScopeDB.
-//
-// This method issues a DROP TABLE statement to ScopeDB and blocks until done.
-func (t *Table) Drop(ctx context.Context) error {
-	s := t.c.Statement(fmt.Sprintf(`DROP TABLE %s`, t.Identifier()))
-	_, err := s.Execute(ctx)
-	return err
-}
-
 // Describe returns the complete REST catalog resource for this table.
 func (t *Table) Describe(ctx context.Context) (TableResource, error) {
 	return t.c.FetchTable(ctx, t.databaseName(), t.schemaName(), t.Name)

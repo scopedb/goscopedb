@@ -241,10 +241,11 @@ type resultFormat string
 const resultFormatJSON resultFormat = "json"
 
 type statementRequest struct {
-	StatementID *uuid.UUID   `json:"statement_id,omitempty"`
-	Statement   string       `json:"statement"`
-	ExecTimeout string       `json:"exec_timeout,omitempty"`
-	Format      resultFormat `json:"format"`
+	StatementID         *uuid.UUID   `json:"statement_id,omitempty"`
+	Statement           string       `json:"statement"`
+	MaxElapsedSeconds   float64      `json:"max_elapsed_seconds,omitempty"`
+	MaxEstimatedSeconds float64      `json:"max_estimated_seconds,omitempty"`
+	Format              resultFormat `json:"format"`
 }
 
 type statementResponse struct {
@@ -253,9 +254,9 @@ type statementResponse struct {
 	Status   StatementStatus   `json:"status"`
 	Created  time.Time         `json:"created_at"`
 
-	// Message is set when the statement was failed or canceled.
+	// Message is set when the statement was cancelled.
 	Message *string `json:"message"`
-	// Error is set when the statement failed with structured details.
+	// Error is required when the statement failed.
 	Error *StatementErrorDetails `json:"error"`
 
 	// ResultSet is set when the statement was successfully finished.

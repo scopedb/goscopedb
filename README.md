@@ -85,13 +85,14 @@ if err != nil {
 
 Once a handle has a terminal status, `Status` returns the cached status without another request. Store `handle.ID()` and use `client.StatementHandle(id)` to resume the lifecycle in another process. `Cancel` returns the statement ID, creation time, status, and server message. If cancellation finds that a statement already finished or failed, `Wait` fetches the complete statement response needed for its result or structured failure details. A cancelled outcome uses the cancellation message directly.
 
-`Statement.ID` and `Statement.ExecTimeout` are the only optional statement settings. Provide an ID when the application needs to choose the statement ID; otherwise ScopeDB generates one. `StatementHandle.ID()` always returns the ID confirmed by ScopeDB:
+`Statement.ID` chooses the statement ID; otherwise ScopeDB generates one. `StatementHandle.ID()` returns the ID confirmed by ScopeDB. `MaxElapsed` limits server-side elapsed time, including queueing, and `MaxEstimated` limits the estimated execution duration. Both use `time.Duration`; zero omits the setting. The server defaults to one hour for elapsed time and no estimate limit. A context deadline limits local waiting independently:
 
 ```go
 statement := client.Statement("FROM events")
 statementID := uuid.New()
 statement.ID = &statementID // Optional.
-statement.ExecTimeout = "30s"
+statement.MaxElapsed = 30 * time.Second
+statement.MaxEstimated = 10 * time.Second
 handle, err := statement.Submit(ctx)
 if err != nil {
 	return err
@@ -99,7 +100,9 @@ if err != nil {
 fmt.Println("statement ID:", handle.ID())
 ```
 
-When `Wait` or `Execute` returns a `*scopedb.Error` with kind `ErrorKindStatementFailed`, `StatementDetails` preserves the server's structured error code, message, and code-specific JSON details. The outer error message remains the server's top-level statement message:
+Statement requests use the ScopeDB 0.6 protocol. Replace `ExecTimeout` duration strings with `MaxElapsed`. The server upgrade clears statement history and results, so handles saved before the upgrade cannot be resumed.
+
+When `Wait` or `Execute` returns a `*scopedb.Error` with kind `ErrorKindStatementFailed`, `Message` and `Code` expose the server's failure reason. `StatementDetails` also preserves the code-specific JSON details. HTTP errors expose their server code through the same `Code` field:
 
 ```go
 var scopeErr *scopedb.Error

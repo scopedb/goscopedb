@@ -44,7 +44,8 @@ func TestTableDescribe(t *testing.T) {
 	`, tbl.Identifier())).Execute(ctx)
 	require.NoError(t, err)
 	defer func() {
-		require.NoError(t, tbl.Drop(ctx))
+		_, err := c.Statement(fmt.Sprintf("DROP TABLE %s", tbl.Identifier())).Execute(ctx)
+		require.NoError(t, err)
 	}()
 
 	description, err := tbl.Describe(ctx)

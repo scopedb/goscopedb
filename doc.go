@@ -42,10 +42,11 @@ Query waits for a statement result, which can be converted to keyed objects:
 	fmt.Println(rows)
 
 Use Statement.Submit when an application needs the statement ID, a local status
-snapshot, an explicit remote status request, or a separate wait. ID and
-ExecTimeout are the only optional statement settings; omit ID to let ScopeDB
-generate it, and read the confirmed ID from StatementHandle.ID. Failed
-statements expose structured server error details on Error.StatementDetails.
+snapshot, an explicit remote status request, or a separate wait. Omit ID to
+let ScopeDB generate it, and read the confirmed ID from StatementHandle.ID.
+MaxElapsed and MaxEstimated set server-side duration limits. Statement requests
+use the ScopeDB 0.6 protocol. Failed statements expose the server message and
+code on Error, with structured details on Error.StatementDetails.
 Catalog iterators lazily traverse REST pages. Table.Describe returns table
 metadata. For application writes, Table.AppendStream is the recommended path:
 it accepts typed rows and adds bounded asynchronous batching that is safe for

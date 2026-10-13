@@ -42,7 +42,8 @@ func TestIngestStream(t *testing.T) {
 	`, tbl.Identifier())).Execute(ctx)
 	require.NoError(t, err)
 	defer func() {
-		require.NoError(t, tbl.Drop(ctx))
+		_, err := c.Statement(fmt.Sprintf("DROP TABLE %s", tbl.Identifier())).Execute(ctx)
+		require.NoError(t, err)
 	}()
 
 	stream, err := c.IngestStream(fmt.Sprintf(`
