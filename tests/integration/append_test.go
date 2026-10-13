@@ -35,12 +35,14 @@ func TestTableAppendLifecycle(t *testing.T) {
 	defer cancel()
 
 	table := client.Table(RandomName(t))
-	_, err := client.Statement(fmt.Sprintf(`
-		CREATE TABLE %s (
-			id int,
-			source string,
-		)
-	`, table.Identifier())).Execute(ctx)
+	definition := &scopedb.CatalogTable{
+		Name: table.Name,
+		Columns: []scopedb.CatalogColumn{
+			{Name: "id", DataType: scopedb.IntDataType},
+			{Name: "source", DataType: scopedb.StringDataType},
+		},
+	}
+	_, err := table.Apply(ctx, definition)
 	require.NoError(t, err)
 	defer func() {
 		require.NoError(t, table.Drop(context.Background()))
@@ -84,6 +86,9 @@ func TestTableAppendLifecycle(t *testing.T) {
 	require.Equal(t, scopedb.AppendDeliveryOK, report.Outcome)
 	require.Equal(t, uint64(streamedRows), report.AcceptedRows)
 	require.Equal(t, uint64(streamedRows), report.CommittedRows)
+
+	_, err = table.Apply(ctx, definition)
+	require.NoError(t, err)
 
 	description, err := table.Describe(ctx)
 	require.NoError(t, err)

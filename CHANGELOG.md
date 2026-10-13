@@ -21,8 +21,10 @@ All significant changes to this project will be documented in this file.
 
 ### New Features
 
-- Support catalog dry runs, ETags, destructive-change authorization, and before/after
-  results. Structured SDK errors retain the server error code and distinguish
+- Initialize tables through `Table.Apply` and use the same handle for writes.
+  Catalog `Apply` and `Delete` accept optional options and reject potentially
+  destructive changes by default. Support dry runs, ETags, destructive-change
+  authorization, and before/after results. Structured SDK errors retain the server error code and distinguish
   unknown catalog commit outcomes without automatically retrying writes.
 
 ### Changed

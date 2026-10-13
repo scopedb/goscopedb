@@ -38,8 +38,10 @@ func (c *Catalog) Get(ctx context.Context) (CatalogSnapshot[*CatalogDocument], e
 }
 
 // Apply replaces the complete tenant catalog. An empty document clears the tenant.
-func (c *Catalog) Apply(ctx context.Context, definition *CatalogDocument, options CatalogOptions) (CatalogResult[*CatalogDocument], error) {
-	return c.resource.Apply(ctx, definition, options)
+// Options may be omitted; by default, changes apply without an ETag precondition
+// and potentially destructive changes are rejected.
+func (c *Catalog) Apply(ctx context.Context, definition *CatalogDocument, options ...CatalogOptions) (CatalogResult[*CatalogDocument], error) {
+	return c.resource.Apply(ctx, definition, options...)
 }
 
 // Raw selects the tenant catalog as JSON, preserving fields unknown to this SDK.
@@ -74,6 +76,7 @@ type CatalogSnapshot[T any] struct {
 }
 
 // CatalogOptions controls preview, concurrent updates, and data-loss authorization.
+// Apply and Delete accept zero or one options value.
 type CatalogOptions struct {
 	DryRun           bool
 	AllowDestructive bool

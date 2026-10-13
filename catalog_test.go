@@ -71,7 +71,8 @@ func TestCatalogWorkflow(t *testing.T) {
 			writeJSONValue(t, w, CatalogResult[*CatalogTable]{Before: &updated, Destructive: true})
 		case 5:
 			require.Equal(t, http.MethodPut, r.Method)
-			require.Equal(t, `"9"`, r.Header.Get("If-Match"))
+			require.Empty(t, r.Header.Get("If-Match"))
+			require.Empty(t, r.URL.RawQuery)
 			writeJSONValue(t, w, CatalogResult[*CatalogTable]{After: original})
 		default:
 			t.Errorf("unexpected request %d", calls)
@@ -98,7 +99,9 @@ func TestCatalogWorkflow(t *testing.T) {
 	require.True(t, deleted.Destructive)
 	require.Equal(t, &updated, deleted.Before)
 	require.Nil(t, deleted.After)
-	created, err := resource.Apply(t.Context(), original, CatalogOptions{IfMatch: deleted.ETag})
+	table := client.Table(original.Name)
+	table.Database = "db"
+	created, err := table.Apply(t.Context(), original)
 	require.NoError(t, err)
 	require.Nil(t, created.Before)
 	require.Equal(t, original, created.After)
@@ -183,8 +186,10 @@ func TestCatalogFailureOutcomes(t *testing.T) {
 			defer client.Close()
 			if tc.get {
 				_, err = client.Catalog().Get(context.Background())
+			} else if tc.dryRun {
+				_, err = client.Catalog().Apply(context.Background(), &CatalogDocument{}, CatalogOptions{DryRun: true})
 			} else {
-				_, err = client.Catalog().Apply(context.Background(), &CatalogDocument{}, CatalogOptions{DryRun: tc.dryRun})
+				_, err = client.Catalog().Apply(context.Background(), &CatalogDocument{})
 			}
 			var failure *Error
 			require.ErrorAs(t, err, &failure)

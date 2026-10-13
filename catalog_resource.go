@@ -59,23 +59,32 @@ func (c *CatalogResource[T]) Get(ctx context.Context) (CatalogSnapshot[T], error
 }
 
 // Apply replaces the resource with definition. Omitted fields and objects are
-// cleared. DryRun performs validation and rolls back all changes.
+// cleared. With no options, changes apply without an ETag precondition and
+// potentially destructive changes are rejected. DryRun validates and rolls back.
 // Catalog writes are never automatically retried.
-func (c *CatalogResource[T]) Apply(ctx context.Context, definition T, options CatalogOptions) (CatalogResult[T], error) {
+func (c *CatalogResource[T]) Apply(ctx context.Context, definition T, options ...CatalogOptions) (CatalogResult[T], error) {
 	data, err := json.Marshal(definition)
 	if err != nil {
 		return CatalogResult[T]{}, newError(ErrorKindConfigInvalid, "invalid catalog definition", err)
 	}
-	return c.mutate(ctx, http.MethodPut, data, options)
+	return c.mutate(ctx, http.MethodPut, data, options...)
 }
 
 // Delete removes a single database, schema, table, or view.
-func (c *CatalogResource[T]) Delete(ctx context.Context, options CatalogOptions) (CatalogResult[T], error) {
-	return c.mutate(ctx, http.MethodDelete, nil, options)
+// With no options, potentially destructive changes are rejected.
+func (c *CatalogResource[T]) Delete(ctx context.Context, options ...CatalogOptions) (CatalogResult[T], error) {
+	return c.mutate(ctx, http.MethodDelete, nil, options...)
 }
 
-func (c *CatalogResource[T]) mutate(ctx context.Context, method string, data []byte, options CatalogOptions) (CatalogResult[T], error) {
-	data, resp, err := c.request(ctx, method, data, options)
+func (c *CatalogResource[T]) mutate(ctx context.Context, method string, data []byte, options ...CatalogOptions) (CatalogResult[T], error) {
+	if len(options) > 1 {
+		return CatalogResult[T]{}, newError(ErrorKindConfigInvalid, "expected at most one CatalogOptions value", nil)
+	}
+	var controls CatalogOptions
+	if len(options) == 1 {
+		controls = options[0]
+	}
+	data, resp, err := c.request(ctx, method, data, controls)
 	if err != nil {
 		return CatalogResult[T]{}, err
 	}
@@ -84,7 +93,7 @@ func (c *CatalogResource[T]) mutate(ctx context.Context, method string, data []b
 	raw.ETag = resp.Header.Get("ETag")
 	if err != nil || len(raw.Before) == 0 || len(raw.After) == 0 || raw.ETag == "" {
 		failure := responseMetadataError(resp, ErrorKindCatalogFailed, "invalid catalog response", err)
-		if !options.DryRun {
+		if !controls.DryRun {
 			failure.Code = "catalog_commit_outcome_unknown"
 		}
 		return CatalogResult[T]{}, failure
@@ -95,7 +104,7 @@ func (c *CatalogResource[T]) mutate(ctx context.Context, method string, data []b
 	var result CatalogResult[T]
 	if err := json.Unmarshal(data, &result); err != nil {
 		failure := responseMetadataError(resp, ErrorKindCatalogFailed, "invalid catalog definition", err)
-		if !options.DryRun {
+		if !controls.DryRun {
 			failure.Code = "catalog_commit_outcome_unknown"
 		}
 		return CatalogResult[T]{}, failure

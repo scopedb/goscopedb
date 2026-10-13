@@ -110,6 +110,33 @@ if errors.As(err, &scopeErr) && scopeErr.StatementDetails != nil {
 }
 ```
 
+## Initialize a table
+
+At application startup, apply the complete expected definition and start writing after it succeeds. `Table` defaults to database `scopedb` and schema `public`; set its `Database` and `Schema` fields to use another location. The parent database and schema must exist.
+
+```go
+table := client.Table("events")
+definition := &scopedb.CatalogTable{
+    Name: table.Name,
+    Columns: []scopedb.CatalogColumn{
+        {Name: "id", DataType: scopedb.IntDataType},
+        {Name: "message", DataType: scopedb.StringDataType},
+    },
+}
+if _, err := table.Apply(ctx, definition); err != nil {
+    return err
+}
+
+_, err := table.AppendNDJSON(ctx, []byte("{\"id\":1,\"message\":\"service started\"}\n"))
+if err != nil {
+    return err
+}
+```
+
+The default call applies immediately and rejects changes that may lose data. Applying the same definition again preserves existing rows. This is complete replacement: omitted fields and objects are cleared. If an older application version omits a physical column added by a newer version, its startup apply fails rather than deleting that column. Use `table.Describe(ctx)` to read the current `CatalogTable` definition.
+
+Pass one `CatalogOptions` value when you need a dry run, an ETag precondition, or explicit authorization for destructive changes. The same optional options are accepted by Catalog `Apply` and `Delete`.
+
 ## Manage the catalog
 
 The declarative Catalog API reads complete definitions and replaces resources atomically. It requires a server with the declarative protocol; the old paginated catalog API is not supported.
@@ -163,22 +190,6 @@ fmt.Println(string(plan.After))
 `Raw()` is also available on each resource selector. Typed and raw resources share the same HTTP behavior, options, and errors.
 
 Errors use `*scopedb.Error`, including the server `Code`, HTTP status, and request ID. Catalog writes are never automatically retried. If `Code` is `catalog_commit_outcome_unknown`, read the catalog and plan again before retrying; a lost response does not imply a rollback.
-
-## Describe a table
-
-The table helper defaults to database `scopedb` and schema `public`. Set both explicitly when the destination is application-configured:
-
-```go
-table := client.Table("events")
-table.Database = "scopedb"
-table.Schema = "public"
-
-description, err := table.Describe(ctx)
-if err != nil {
-	return err
-}
-fmt.Println(description.Columns)
-```
 
 ## Streaming writes
 

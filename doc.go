@@ -50,6 +50,8 @@ Client.Catalog reads and replaces the complete tenant catalog. Its Database,
 Schema, Table, and View selectors provide typed Get, Apply, and Delete operations.
 Raw retains JSON definitions including fields unknown to the SDK. Apply supports
 dry runs, ETag preconditions, and authorization for destructive changes.
+Table.Apply initializes a complete table definition before writing; options are
+optional and potentially destructive changes are rejected by default.
 Table.Describe returns a CatalogTable definition.
 
 For application writes, Table.AppendStream is the recommended path:
