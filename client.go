@@ -241,10 +241,11 @@ type resultFormat string
 const resultFormatJSON resultFormat = "json"
 
 type statementRequest struct {
-	StatementID *uuid.UUID   `json:"statement_id,omitempty"`
-	Statement   string       `json:"statement"`
-	ExecTimeout string       `json:"exec_timeout,omitempty"`
-	Format      resultFormat `json:"format"`
+	StatementID         *uuid.UUID   `json:"statement_id,omitempty"`
+	Statement           string       `json:"statement"`
+	MaxElapsedSeconds   float64      `json:"max_elapsed_seconds,omitempty"`
+	MaxEstimatedSeconds float64      `json:"max_estimated_seconds,omitempty"`
+	Format              resultFormat `json:"format"`
 }
 
 type statementResponse struct {
@@ -253,9 +254,7 @@ type statementResponse struct {
 	Status   StatementStatus   `json:"status"`
 	Created  time.Time         `json:"created_at"`
 
-	// Message is set when the statement was failed or canceled.
-	Message *string `json:"message"`
-	// Error is set when the statement failed with structured details.
+	// Error is required when the statement failed.
 	Error *StatementErrorDetails `json:"error"`
 
 	// ResultSet is set when the statement was successfully finished.
@@ -326,7 +325,7 @@ func (c *Client) fetchStatementResult(ctx context.Context, id uuid.UUID) (*state
 	}
 
 	q := req.Query()
-	q.Add("format", string(resultFormatJSON))
+	q.Set("format", string(resultFormatJSON))
 	req.RawQuery = q.Encode()
 
 	resp, err := c.http.doGet(ctx, req)
@@ -337,20 +336,22 @@ func (c *Client) fetchStatementResult(ctx context.Context, id uuid.UUID) (*state
 	return checkStatementResponse(resp)
 }
 
-type statementCancelResponse = StatementCancelResult
-
-func (c *Client) cancelStatement(ctx context.Context, statementID uuid.UUID) (*statementCancelResponse, error) {
+func (c *Client) cancelStatement(ctx context.Context, statementID uuid.UUID) (*statementResponse, error) {
 	req, err := c.resourceURL("statements", statementID.String(), "cancel")
 	if err != nil {
 		return nil, err
 	}
+
+	q := req.Query()
+	q.Set("format", string(resultFormatJSON))
+	req.RawQuery = q.Encode()
 
 	resp, err := c.http.doPost(ctx, req, []byte{})
 	if err != nil {
 		return nil, err
 	}
 	defer sneakyBodyClose(resp.Body)
-	return checkStatementCancelResponse(resp)
+	return checkStatementResponse(resp)
 }
 
 type writeFormat string

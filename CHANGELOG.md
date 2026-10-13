@@ -4,6 +4,26 @@ All significant changes to this project will be documented in this file.
 
 ## Unreleased
 
+### Breaking Changes
+
+- Statement requests target ScopeDB 0.6. Replace `Statement.ExecTimeout` with
+  `Statement.MaxElapsed`, using `time.Duration`; `MaxEstimated` sets an optional
+  estimate limit. Server upgrades clear saved statement history and results.
+- Statement error codes use the `statement_` prefix. Prepare and execution
+  failures share `StatementErrorCodeFailed`; row and scan limits are replaced
+  by `StatementErrorCodeEstimateLimitExceeded`.
+- `StatementHandle.Cancel` returns `StatementStatus` instead of
+  `StatementCancelResult` and caches the full response. Use `handle.ID()` for
+  identity and `Progress`, `ResultSet`, or `Wait` for the cancellation outcome;
+  finished results and failure details are available without another request.
+- Removed `Table.Drop`. Use an explicit `DROP TABLE` statement for SQL workflows.
+
+### Bug Fixes
+
+- Statement failures preserve the server's error message and code, including
+  failures discovered during cancellation. HTTP errors expose their server code
+  through `Error.Code`.
+
 ### Changed
 
 - `AppendStream` now retries temporary rejections and transient `unknown`
