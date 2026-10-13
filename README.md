@@ -29,6 +29,10 @@ defer client.Close()
 
 `NewClient` validates the endpoint and returns an error for invalid configuration. Set `Config.HTTPClient` when the application needs to own HTTP timeouts, proxies, TLS, or connection pooling. `Client.Close` closes idle connections only for the HTTP client created by the SDK; it never closes a caller-provided client.
 
+Every table append and transform-ingest HTTP request has a client timeout of 30 seconds by default. Its budget starts after local encoding, compression, and request preparation and covers one HTTP attempt through reading the complete response body. Set `Config.WriteTimeout` to a positive `time.Duration` to change it; zero uses the default. Streams inherit this timeout unless `AttemptTimeout` is explicitly set. A shorter caller context deadline or HTTP-client timeout still applies. Admission, retry backoff, and an entire `Flush`/`Shutdown` barrier are outside this budget.
+
+Client timeouts after an HTTP attempt begins preserve the existing `*scopedb.Error` kind and cause and add `WriteDetails` with `Reason: scopedb.WriteErrorReasonTimeout` and `Outcome: scopedb.AppendStateUnknown`; `Error.Retryable` is false. In-flight caller cancellation uses `WriteErrorReasonCancelled`; cancellation before sending preserves the original context error. These fields remain available on subsequent errors returned by the stream. A timeout does not roll back a write: reconcile a client-interrupted write before replaying it. A server HTTP 408 is still a server response; an explicitly rejected append follows the existing safe retry policy. Append streams retain their existing at-least-once retry policy for other transient unknown outcomes; those retries may duplicate committed rows.
+
 Request bodies, including direct `AppendNDJSON` requests and `AppendStream` batches, use zstd compression by default. Set `Config.Compression` to `CompressionGzip` when gzip is required. Append limits are based on the uncompressed NDJSON body.
 
 ## ScopeQL documentation

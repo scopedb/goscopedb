@@ -39,7 +39,7 @@ const (
 	defaultAppendMaxRetries           = 8
 	defaultAppendInitialBackoff       = 100 * time.Millisecond
 	defaultAppendMaxBackoff           = 5 * time.Second
-	defaultAppendAttemptTimeout       = 30 * time.Second
+	defaultAppendAttemptTimeout       = defaultWriteTimeout
 	defaultAppendRetryElapsedTime     = 5 * time.Minute
 )
 
@@ -139,6 +139,7 @@ func (o AppendDeliveryOutcome) String() string {
 // AppendRetryOptions configures retries of an exact encoded batch for temporary
 // rejections and transient unknown outcomes. A nil Retry uses the defaults;
 // a non-nil option with MaxRetries=0 disables retries.
+// Client timeouts and cancellations are never retried.
 type AppendRetryOptions struct {
 	MaxRetries int
 	// Zero durations use defaults: 100 ms initial, 5 s maximum backoff, 5 min
@@ -165,7 +166,7 @@ type AppendStreamOptions struct {
 	// MaxConcurrentBatches defaults to four, cannot exceed 1024, and may be set
 	// to one for serial request submission.
 	MaxConcurrentBatches int
-	// AttemptTimeout bounds each HTTP attempt. It defaults to 30 seconds.
+	// AttemptTimeout bounds each HTTP attempt. Zero uses Config.WriteTimeout.
 	// A timeout leaves that batch's commit outcome unknown.
 	AttemptTimeout time.Duration
 }
@@ -263,6 +264,9 @@ func (t *Table) AppendStream(options AppendStreamOptions) (*AppendStream, error)
 	config, err := normalizeAppendStreamOptions(options)
 	if err != nil {
 		return nil, err
+	}
+	if options.AttemptTimeout == 0 {
+		config.attemptTimeout = t.c.writeTimeout
 	}
 
 	stream := &AppendStream{
@@ -1017,19 +1021,14 @@ retryLoop:
 			s.shared.counters.retries++
 			s.shared.mu.Unlock()
 		}
-		ctx := deliveryCtx
-		cancel := func() {}
-		if s.config.attemptTimeout > 0 {
-			ctx, cancel = context.WithTimeout(ctx, s.config.attemptTimeout)
-		}
-		result, err = s.client.appendNDJSON(
-			ctx,
+		result, err = s.client.appendNDJSONWithTimeout(
+			deliveryCtx,
 			s.database,
 			s.schema,
 			s.table,
 			batch.payload,
+			s.config.attemptTimeout,
 		)
-		cancel()
 		if err == nil {
 			if result.AppendState != AppendStateCommitted || result.NumRowsInserted != int64(batch.rows) {
 				err = unknownAppendStreamError(fmt.Sprintf(
@@ -1096,7 +1095,7 @@ func (s *AppendStream) isRetryableAppend(err error) bool {
 		return true
 	}
 	var e *Error
-	if !errors.As(err, &e) || e.AppendDetails == nil || e.AppendDetails.AppendState != AppendStateUnknown {
+	if !errors.As(err, &e) || e.WriteDetails != nil || e.AppendDetails == nil || e.AppendDetails.AppendState != AppendStateUnknown {
 		return false
 	}
 	// Authentication, schema, and other permanent HTTP errors must not spin.
@@ -1128,6 +1127,7 @@ func unknownAppendStreamError(message string, cause error) error {
 	// the outcome across all attempts, including an earlier lost response.
 	var last *Error
 	if errors.As(cause, &last) {
+		result.WriteDetails = last.WriteDetails
 		result.HTTPStatus = last.HTTPStatus
 		result.RequestID = last.RequestID
 		result.RetryAfter = last.RetryAfter

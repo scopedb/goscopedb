@@ -31,7 +31,6 @@ const (
 	defaultIngestMaxBatchRows     = 200_000
 	defaultIngestFlushInterval    = time.Second
 	defaultIngestMaxBufferedBytes = 64 * 1024 * 1024
-	defaultIngestAttemptTimeout   = 30 * time.Second
 	ingestCommandCapacity         = 1024
 	maxIngestBodyBytes            = 16 * 1024 * 1024
 	maxIngestRows                 = 200_000
@@ -51,8 +50,8 @@ type IngestStreamOptions struct {
 	// MaxBufferedBytes bounds serialized rows that have been admitted but have
 	// not finished their remote request.
 	MaxBufferedBytes int
-	// AttemptTimeout bounds each transform-ingest request. It defaults to 30
-	// seconds. A timeout can leave the remote commit outcome unknown.
+	// AttemptTimeout bounds each transform-ingest request. Zero uses
+	// Config.WriteTimeout. A timeout can leave the remote commit outcome unknown.
 	AttemptTimeout time.Duration
 }
 
@@ -270,7 +269,7 @@ func normalizeIngestStreamOptions(
 		options.MaxBufferedBytes = defaultIngestMaxBufferedBytes
 	}
 	if options.AttemptTimeout == 0 {
-		options.AttemptTimeout = defaultIngestAttemptTimeout
+		options.AttemptTimeout = client.writeTimeout
 	}
 
 	switch {
@@ -492,18 +491,13 @@ func (s *ingestStreamInner) run() {
 			body.Write(record.payload)
 		}
 
-		attemptCtx, cancelAttempt := context.WithTimeout(
-			context.Background(),
-			s.config.attemptTimeout,
-		)
-		response, err := s.config.client.ingest(attemptCtx, &ingestRequest{
+		response, err := s.config.client.ingestWithTimeout(context.Background(), &ingestRequest{
 			Data: ingestData{
 				Format: writeFormatJSON,
 				Rows:   body.String(),
 			},
 			Statement: s.config.statement,
-		})
-		cancelAttempt()
+		}, s.config.attemptTimeout)
 		if err == nil && response.NumRowsInserted < 0 {
 			err = newError(
 				ErrorKindUnexpected,

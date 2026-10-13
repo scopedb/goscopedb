@@ -6,9 +6,18 @@ All significant changes to this project will be documented in this file.
 
 ### Changed
 
+- Table append and transform-ingest requests now have a configurable
+  `Config.WriteTimeout`, defaulting to 30 seconds including response-body reads.
+  Streams inherit it unless `AttemptTimeout` is explicitly set. Timeout outcomes
+  remain unknown and are never automatically retried.
+- The write timeout starts after local encoding, compression, and request
+  preparation. Client interruptions expose `Error.WriteDetails` with a `timeout`
+  or `cancelled` reason and an `unknown` outcome while preserving existing kinds,
+  causes, and HTTP diagnostics.
 - `AppendStream` now retries temporary rejections and transient `unknown`
-  outcomes, providing at-least-once delivery that may insert duplicate rows.
-  Direct `AppendNDJSON` remains a single attempt.
+  outcomes other than client timeouts or cancellations, providing at-least-once
+  delivery that may insert duplicate rows. Direct `AppendNDJSON` remains a
+  single attempt.
 - `AppendStream` now targets 4 MiB per batch by default; the maximum
   configurable target and uncompressed request limit remain 8 MiB.
 - Streaming write byte budgets now preserve FIFO waiter order so newer or

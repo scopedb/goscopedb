@@ -17,7 +17,9 @@
 package scopedb
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -43,6 +45,23 @@ const (
 	ErrorKindAppendRowsFailed ErrorKind = "AppendRowsFailed"
 )
 
+// WriteErrorReason identifies why an in-flight write was interrupted.
+type WriteErrorReason string
+
+const (
+	// WriteErrorReasonTimeout means a client or transport deadline expired.
+	WriteErrorReasonTimeout WriteErrorReason = "timeout"
+	// WriteErrorReasonCancelled means the caller cancelled an in-flight write.
+	WriteErrorReasonCancelled WriteErrorReason = "cancelled"
+)
+
+// WriteErrorDetails describes an interrupted write. An unknown outcome may have
+// committed and must not be automatically replayed.
+type WriteErrorDetails struct {
+	Reason  WriteErrorReason `json:"reason"`
+	Outcome AppendState      `json:"outcome"`
+}
+
 // Error represents a ScopeDB client or API error.
 type Error struct {
 	Kind          ErrorKind
@@ -52,6 +71,9 @@ type Error struct {
 	RetryAfter    time.Duration
 	Retryable     bool
 	AppendDetails *AppendErrorDetails
+	// WriteDetails identifies a client timeout or cancellation after sending began.
+	// Existing error kinds, causes, and HTTP diagnostics remain available.
+	WriteDetails *WriteErrorDetails
 	// StatementDetails contains the structured server failure for a failed
 	// statement, when available.
 	StatementDetails *StatementErrorDetails
@@ -71,6 +93,28 @@ func (e *Error) Unwrap() error {
 
 func newError(kind ErrorKind, message string, cause error) *Error {
 	return &Error{Kind: kind, Message: message, cause: cause}
+}
+
+func writeErrorDetails(cause error) *WriteErrorDetails {
+	var timeoutErr interface{ Timeout() bool }
+	var reason WriteErrorReason
+	switch {
+	case errors.Is(cause, context.DeadlineExceeded) ||
+		(errors.As(cause, &timeoutErr) && timeoutErr.Timeout()):
+		reason = WriteErrorReasonTimeout
+	case errors.Is(cause, context.Canceled):
+		reason = WriteErrorReasonCancelled
+	default:
+		return nil
+	}
+	return &WriteErrorDetails{Reason: reason, Outcome: AppendStateUnknown}
+}
+
+func (e *Error) withWriteContext(ctx context.Context) *Error {
+	if err := ctx.Err(); err != nil {
+		e.WriteDetails = writeErrorDetails(err)
+	}
+	return e
 }
 
 type apiErrorPayload struct {
@@ -386,11 +430,11 @@ func checkStatementCancelResponse(resp *http.Response) (*statementCancelResponse
 	return &stmtResp, nil
 }
 
-func checkIngestResponse(resp *http.Response) (*ingestResponse, error) {
+func checkIngestResponse(ctx context.Context, resp *http.Response) (*ingestResponse, error) {
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
 		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-			return nil, unknownIngestCommitOutcomeError(resp, err)
+			return nil, unknownIngestCommitOutcomeError(resp, err).withWriteContext(ctx)
 		}
 		readErr := responseMetadataError(
 			resp,
@@ -399,7 +443,8 @@ func checkIngestResponse(resp *http.Response) (*ingestResponse, error) {
 			err,
 		)
 		readErr.Retryable = false
-		return nil, readErr
+		readErr.WriteDetails = writeErrorDetails(err)
+		return nil, readErr.withWriteContext(ctx)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		httpErr := responseError(resp, data, ErrorKindUnexpected)
@@ -435,20 +480,18 @@ func checkIngestResponse(resp *http.Response) (*ingestResponse, error) {
 }
 
 func unknownIngestCommitOutcomeError(resp *http.Response, cause error) *Error {
+	var err *Error
 	if resp == nil {
-		return newError(
+		err = newError(
 			ErrorKindUnexpected,
 			ingestCommitOutcomeUnknownMessage,
 			cause,
 		)
+	} else {
+		err = responseMetadataError(resp, ErrorKindUnexpected, ingestCommitOutcomeUnknownMessage, cause)
 	}
-	err := responseMetadataError(
-		resp,
-		ErrorKindUnexpected,
-		ingestCommitOutcomeUnknownMessage,
-		cause,
-	)
 	err.Retryable = false
+	err.WriteDetails = writeErrorDetails(cause)
 	return err
 }
 

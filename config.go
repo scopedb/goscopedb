@@ -16,7 +16,10 @@
 
 package scopedb
 
-import "net/http"
+import (
+	"net/http"
+	"time"
+)
 
 // Compression defines the compression used for request bodies.
 type Compression string
@@ -43,6 +46,12 @@ type Config struct {
 	// The default is CompressionZstd. Set this to CompressionGzip to talk to
 	// older deployments that do not support zstd yet.
 	Compression Compression `json:"compression"`
+	// WriteTimeout bounds each table append or transform-ingest request,
+	// including reading its response body. Zero defaults to 30 seconds.
+	// The budget starts after local encoding, compression, and request preparation.
+	// Stream AttemptTimeout settings override this default. A timeout leaves
+	// the commit outcome unknown; it does not roll back the write.
+	WriteTimeout time.Duration `json:"write_timeout"`
 	// HTTPClient is the HTTP client used to send requests.
 	//
 	// When nil, the SDK creates and owns an independent HTTP client. A supplied
