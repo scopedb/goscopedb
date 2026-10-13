@@ -40,16 +40,16 @@ func run(ctx context.Context) error {
 	}
 	defer client.Close()
 
-	snapshot, err := client.Catalog("databases", exampleutil.Database(), "schemas", exampleutil.Schema(), "tables").Get(ctx)
+	snapshot, err := client.Catalog("databases", exampleutil.Database(), "schemas", exampleutil.Schema()).Get(ctx)
 	if err != nil {
 		return err
 	}
-	var tables scopedb.CatalogTables
-	if err := json.Unmarshal(snapshot.Definition, &tables); err != nil {
+	var schema scopedb.CatalogSchema
+	if err := json.Unmarshal(snapshot.Definition, &schema); err != nil {
 		return err
 	}
 	fmt.Printf("tables in %s.%s (version %s):\n", exampleutil.Database(), exampleutil.Schema(), snapshot.ETag)
-	for _, table := range tables.Tables {
+	for _, table := range schema.Tables {
 		fmt.Printf(" - %s (%d columns)\n", table.Name, len(table.Columns))
 	}
 	return nil

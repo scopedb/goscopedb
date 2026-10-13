@@ -30,7 +30,7 @@ func TestTableDescribeUsesDefaultLocation(t *testing.T) {
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, http.MethodGet, r.Method)
-		require.Equal(t, "/v1/databases/scopedb/schemas/public/tables/events", r.URL.Path)
+		require.Equal(t, "/v1/catalog/databases/scopedb/schemas/public/tables/events", r.URL.Path)
 		w.Header().Set("ETag", `"1"`)
 		writeTestJSON(t, w, `{
 									"name":"events",

@@ -23,21 +23,6 @@ type CatalogDocument struct {
 	Databases []CatalogDatabase `json:"databases,omitempty"`
 }
 
-// CatalogSchemas defines the schema collection of a database.
-type CatalogSchemas struct {
-	Schemas []CatalogSchema `json:"schemas,omitempty"`
-}
-
-// CatalogTables defines the table collection of a schema.
-type CatalogTables struct {
-	Tables []CatalogTable `json:"tables,omitempty"`
-}
-
-// CatalogViews defines the view collection of a schema.
-type CatalogViews struct {
-	Views []CatalogView `json:"views,omitempty"`
-}
-
 // CatalogDatabase defines a database and its schemas.
 type CatalogDatabase struct {
 	Name    string          `json:"name"`

@@ -22,7 +22,6 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
-	"slices"
 	"strings"
 )
 
@@ -33,15 +32,12 @@ type Catalog struct {
 	resource []string
 }
 
-// Catalog selects a resource by its unescaped HTTP path segments, relative to /v1.
-// With no segments it selects the complete tenant catalog (/v1/databases).
+// Catalog selects a resource by its unescaped HTTP path segments, relative to /v1/catalog.
+// With no segments it selects the complete tenant catalog (/v1/catalog).
 // For example: Catalog("databases", "analytics", "schemas", "public", "tables", "events").
 // Requires a server implementing the declarative catalog protocol; legacy pagination is not supported.
 func (c *Client) Catalog(resource ...string) *Catalog {
-	if len(resource) == 0 {
-		resource = []string{"databases"}
-	}
-	return &Catalog{client: c, resource: slices.Clone(resource)}
+	return &Catalog{client: c, resource: append([]string{"catalog"}, resource...)}
 }
 
 // CatalogSnapshot contains a complete resource definition and its opaque version.
@@ -94,7 +90,7 @@ func (c *Catalog) Apply(ctx context.Context, definition any, options CatalogOpti
 }
 
 // Delete removes a single database, schema, table, or view.
-// To clear a collection, Apply its empty definition instead.
+// To clear the tenant, Apply an empty CatalogDocument instead.
 func (c *Catalog) Delete(ctx context.Context, options CatalogOptions) (CatalogResult, error) {
 	return c.mutate(ctx, http.MethodDelete, nil, options)
 }

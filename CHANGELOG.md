@@ -8,7 +8,9 @@ All significant changes to this project will be documented in this file.
 
 - Replace paginated catalog list, fetch, iterator, and resource APIs with
   `Client.Catalog(...).Get`, `Apply`, and `Delete`. These require the declarative
-  Catalog server protocol; there is no fallback to legacy pagination.
+  Catalog server protocol under `/v1/catalog`; there is no fallback to legacy pagination.
+  Select the whole tenant or an individual database, schema, table, or view;
+  manage child collections through their parent definition.
   Decode complete definitions into the new `Catalog*` types or retain raw JSON.
 - `Table.Describe` returns `CatalogTable`, using `Distinct` and `RetentionDays`
   instead of `DistinctOn` and `DataRetentionDays`; database and schema are supplied

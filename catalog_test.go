@@ -39,7 +39,7 @@ func TestCatalogWorkflow(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls++
 		require.Equal(t, "Bearer secret", r.Header.Get("Authorization"))
-		require.Equal(t, "/proxy/v1/databases/db/schemas/public/tables/events.a%2Fb", r.URL.EscapedPath())
+		require.Equal(t, "/proxy/v1/catalog/databases/db/schemas/public/tables/events.a%2Fb", r.URL.EscapedPath())
 		w.Header().Set("ETag", `"7"`)
 		switch calls {
 		case 1:
