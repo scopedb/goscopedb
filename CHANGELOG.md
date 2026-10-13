@@ -7,11 +7,12 @@ All significant changes to this project will be documented in this file.
 ### Breaking Changes
 
 - Replace paginated catalog list, fetch, iterator, and resource APIs with
-  `Client.Catalog(...).Get`, `Apply`, and `Delete`. These require the declarative
+  `Client.Catalog()` and typed database, schema, table, and view selectors. These require the declarative
   Catalog server protocol under `/v1/catalog`; there is no fallback to legacy pagination.
   Select the whole tenant or an individual database, schema, table, or view;
   manage child collections through their parent definition.
-  Decode complete definitions into the new `Catalog*` types or retain raw JSON.
+  `Get`, `Apply`, and `Delete` return typed definitions and before/after states.
+  Use `Raw()` for lossless JSON export and apply across schema additions.
 - `Table.Describe` returns `CatalogTable`, using `Distinct` and `RetentionDays`
   instead of `DistinctOn` and `DataRetentionDays`; database and schema are supplied
   by the selected resource path.

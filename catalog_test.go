@@ -33,8 +33,11 @@ import (
 func TestCatalogWorkflow(t *testing.T) {
 	t.Parallel()
 	calls := 0
-	table := CatalogTable{Name: "events.a/b", Columns: []CatalogColumn{{Name: "message", DataType: StringDataType, Indexes: []CatalogColumnIndex{{Type: "search"}}}}}
-	expected, err := json.Marshal(table)
+	original := &CatalogTable{Name: "events.a/b", Columns: []CatalogColumn{{Name: "message", DataType: StringDataType, Indexes: []CatalogColumnIndex{{Type: "search"}}}}}
+	updated := *original
+	comment := "edited"
+	updated.Comment = &comment
+	expected, err := json.Marshal(&updated)
 	require.NoError(t, err)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls++
@@ -44,7 +47,7 @@ func TestCatalogWorkflow(t *testing.T) {
 		switch calls {
 		case 1:
 			require.Equal(t, http.MethodGet, r.Method)
-			writeJSONValue(t, w, table)
+			writeJSONValue(t, w, original)
 		case 2, 3:
 			require.Equal(t, http.MethodPut, r.Method)
 			require.Equal(t, "application/json", r.Header.Get("Content-Type"))
@@ -57,15 +60,19 @@ func TestCatalogWorkflow(t *testing.T) {
 				require.Empty(t, r.URL.Query().Get("allow_destructive"))
 			} else {
 				require.Empty(t, r.URL.Query().Get("dry_run"))
-				require.Equal(t, "true", r.URL.Query().Get("allow_destructive"))
 				w.Header().Set("ETag", `"8"`)
 			}
-			writeJSONValue(t, w, CatalogResult{Before: expected, After: expected})
+			writeJSONValue(t, w, CatalogResult[*CatalogTable]{Before: original, After: &updated})
 		case 4:
 			require.Equal(t, http.MethodDelete, r.Method)
 			require.Equal(t, `"8"`, r.Header.Get("If-Match"))
 			require.Equal(t, "true", r.URL.Query().Get("allow_destructive"))
-			writeJSONValue(t, w, CatalogResult{Before: expected, After: json.RawMessage(`null`), Destructive: true})
+			w.Header().Set("ETag", `"9"`)
+			writeJSONValue(t, w, CatalogResult[*CatalogTable]{Before: &updated, Destructive: true})
+		case 5:
+			require.Equal(t, http.MethodPut, r.Method)
+			require.Equal(t, `"9"`, r.Header.Get("If-Match"))
+			writeJSONValue(t, w, CatalogResult[*CatalogTable]{After: original})
 		default:
 			t.Errorf("unexpected request %d", calls)
 		}
@@ -74,21 +81,65 @@ func TestCatalogWorkflow(t *testing.T) {
 	client, err := NewClient(Config{Endpoint: server.URL + "/proxy", APIKey: "secret"})
 	require.NoError(t, err)
 	defer client.Close()
-	resource := client.Catalog("databases", "db", "schemas", "public", "tables", table.Name)
-	snapshot, err := resource.Get(context.Background())
+	resource := client.Catalog().Table("db", "public", original.Name)
+	snapshot, err := resource.Get(t.Context())
 	require.NoError(t, err)
-	var exported CatalogTable
-	require.NoError(t, json.Unmarshal(snapshot.Definition, &exported))
-	require.Equal(t, table, exported)
-	plan, err := resource.Apply(context.Background(), table, CatalogOptions{DryRun: true, IfMatch: snapshot.ETag})
+	require.Equal(t, original, snapshot.Definition)
+	snapshot.Definition.Comment = &comment
+	plan, err := resource.Apply(t.Context(), snapshot.Definition, CatalogOptions{DryRun: true, IfMatch: snapshot.ETag})
 	require.NoError(t, err)
-	result, err := resource.Apply(context.Background(), snapshot.Definition, CatalogOptions{IfMatch: plan.ETag, AllowDestructive: true})
+	require.Equal(t, original, plan.Before)
+	require.Equal(t, &updated, plan.After)
+	result, err := resource.Apply(t.Context(), snapshot.Definition, CatalogOptions{IfMatch: plan.ETag})
 	require.NoError(t, err)
-	deleted, err := resource.Delete(context.Background(), CatalogOptions{IfMatch: result.ETag, AllowDestructive: true})
+	require.Equal(t, &updated, result.After)
+	deleted, err := resource.Delete(t.Context(), CatalogOptions{IfMatch: result.ETag, AllowDestructive: true})
 	require.NoError(t, err)
 	require.True(t, deleted.Destructive)
-	require.JSONEq(t, "null", string(deleted.After))
-	require.Equal(t, 4, calls)
+	require.Equal(t, &updated, deleted.Before)
+	require.Nil(t, deleted.After)
+	created, err := resource.Apply(t.Context(), original, CatalogOptions{IfMatch: deleted.ETag})
+	require.NoError(t, err)
+	require.Nil(t, created.Before)
+	require.Equal(t, original, created.After)
+	require.Equal(t, 5, calls)
+}
+
+func TestCatalogRawRoundTrip(t *testing.T) {
+	t.Parallel()
+	definition := `{"name":"events","columns":[{"name":"value","data_type":"future_type"}],"future":{"precise":9007199254740993}}`
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		require.Equal(t, "/v1/catalog/databases/db/schemas/public/tables/events", r.URL.Path)
+		w.Header().Set("ETag", `"3"`)
+		if r.Method == http.MethodGet {
+			_, err := io.WriteString(w, definition)
+			require.NoError(t, err)
+			return
+		}
+		require.Equal(t, http.MethodPut, r.Method)
+		require.Equal(t, `"3"`, r.Header.Get("If-Match"))
+		data, err := io.ReadAll(r.Body)
+		require.NoError(t, err)
+		require.Equal(t, definition, string(data))
+		_, err = io.WriteString(w, `{"before":`+definition+`,"after":`+definition+`,"destructive":false}`)
+		require.NoError(t, err)
+	}))
+	defer server.Close()
+	client, err := NewClient(Config{Endpoint: server.URL})
+	require.NoError(t, err)
+	defer client.Close()
+	resource := client.Catalog().Table("db", "public", "events").Raw()
+	snapshot, err := resource.Get(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, definition, string(snapshot.Definition))
+	result, err := resource.Apply(t.Context(), snapshot.Definition, CatalogOptions{IfMatch: snapshot.ETag})
+	require.NoError(t, err)
+	require.Equal(t, definition, string(result.Before))
+	require.Equal(t, definition, string(result.After))
+	require.Equal(t, snapshot.ETag, result.ETag)
+	require.Equal(t, 2, calls)
 }
 
 func TestCatalogFailureOutcomes(t *testing.T) {
@@ -96,6 +147,7 @@ func TestCatalogFailureOutcomes(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		dryRun  bool
+		get     bool
 		status  int
 		body    string
 		cause   error
@@ -109,6 +161,9 @@ func TestCatalogFailureOutcomes(t *testing.T) {
 		{name: "body", status: 200, partial: true, cause: io.ErrUnexpectedEOF, code: "catalog_commit_outcome_unknown"},
 		{name: "invalid", status: 200, body: `{}`, code: "catalog_commit_outcome_unknown"},
 		{name: "preview", dryRun: true, cause: context.DeadlineExceeded},
+		{name: "typed_read", get: true, status: 200, body: `{"databases":"invalid"}`},
+		{name: "typed_preview", dryRun: true, status: 200, body: `{"before":null,"after":{"databases":"invalid"}}`},
+		{name: "typed_write", status: 200, body: `{"before":null,"after":{"databases":"invalid"}}`, code: "catalog_commit_outcome_unknown"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -126,7 +181,11 @@ func TestCatalogFailureOutcomes(t *testing.T) {
 			})}})
 			require.NoError(t, err)
 			defer client.Close()
-			_, err = client.Catalog().Apply(context.Background(), CatalogDocument{}, CatalogOptions{DryRun: tc.dryRun})
+			if tc.get {
+				_, err = client.Catalog().Get(context.Background())
+			} else {
+				_, err = client.Catalog().Apply(context.Background(), &CatalogDocument{}, CatalogOptions{DryRun: tc.dryRun})
+			}
 			var failure *Error
 			require.ErrorAs(t, err, &failure)
 			require.Equal(t, ErrorKindCatalogFailed, failure.Kind)

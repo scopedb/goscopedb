@@ -115,15 +115,12 @@ if errors.As(err, &scopeErr) && scopeErr.StatementDetails != nil {
 The declarative Catalog API reads complete definitions and replaces resources atomically. It requires a server with the declarative protocol; the old paginated catalog API is not supported.
 
 ```go
-catalog := client.Catalog("databases", "scopedb", "schemas", "public", "tables", "events")
+catalog := client.Catalog().Table("scopedb", "public", "events")
 snapshot, err := catalog.Get(ctx)
 if err != nil {
     return err
 }
-var definition scopedb.CatalogTable
-if err := json.Unmarshal(snapshot.Definition, &definition); err != nil {
-    return err
-}
+definition := snapshot.Definition
 retention := int32(30)
 definition.RetentionDays = &retention
 plan, err := catalog.Apply(ctx, definition, scopedb.CatalogOptions{DryRun: true})
@@ -141,9 +138,29 @@ if err != nil {
 fmt.Println(result.ETag)
 ```
 
-`Catalog()` selects the entire tenant. Path segments are unescaped names relative to `/v1/catalog`; the SDK escapes each segment. Select a database, schema, table, or view. Each resource includes its complete subtree; intermediate collection endpoints are not provided. `Get` returns raw JSON and an ETag. Decode it into the supplied `CatalogDocument`, `CatalogDatabase`, `CatalogSchema`, `CatalogTable`, or `CatalogView` types for programmatic editing; retain raw JSON for lossless export and apply across schema additions.
+`client.Catalog()` selects the entire tenant. Use `Database(name)`, `Schema(database, schema)`, `Table(database, schema, table)`, or `View(database, schema, view)` to select an individual resource. Pass names directly; the SDK escapes each name for the HTTP path. Each resource includes its complete subtree.
 
-`Apply` accepts these definitions or `json.RawMessage`. Omitted fields and objects are cleared, and omitted collections are empty. `Delete` removes one database, schema, table, or view using the same options; clear the tenant by applying an empty `CatalogDocument`, or clear children by editing their parent definition. `IfMatch` is optional, while potentially irreversible data loss requires `AllowDestructive`. Dry runs validate and roll back without requiring that authorization. Storage is a creation-only input omitted from exports, so keep the original definition when planning creation.
+`Get` returns a `CatalogSnapshot[T]` with a typed definition and an ETag. `Apply` accepts the same definition type and returns `CatalogResult[T]` with typed `Before` and `After` values. These definitions are pointers: `Before` is nil when creating a resource, and `After` is nil when deleting it.
+
+Omitted fields and objects are cleared, and omitted collections are empty. `Delete` removes one database, schema, table, or view using the same options; clear the tenant by applying `&scopedb.CatalogDocument{}`, or clear children by editing their parent definition. `IfMatch` is optional, while potentially irreversible data loss requires `AllowDestructive`. Dry runs validate and roll back without requiring that authorization. Storage is a creation-only input omitted from exports, so keep the original definition when planning creation.
+
+For export and apply workflows that must preserve fields unknown to this SDK, select `Raw()`. Definitions and before/after states are then `json.RawMessage`; absent states are JSON `null`:
+
+```go
+catalog := client.Catalog().Raw()
+snapshot, err := catalog.Get(ctx)
+if err != nil {
+    return err
+}
+// Retain snapshot.Definition as raw JSON when saving or editing it.
+plan, err := catalog.Apply(ctx, snapshot.Definition, scopedb.CatalogOptions{DryRun: true})
+if err != nil {
+    return err
+}
+fmt.Println(string(plan.After))
+```
+
+`Raw()` is also available on each resource selector. Typed and raw resources share the same HTTP behavior, options, and errors.
 
 Errors use `*scopedb.Error`, including the server `Code`, HTTP status, and request ID. Catalog writes are never automatically retried. If `Code` is `catalog_commit_outcome_unknown`, read the catalog and plan again before retrying; a lost response does not imply a rollback.
 

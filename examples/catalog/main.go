@@ -19,11 +19,9 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log"
 
-	scopedb "github.com/scopedb/goscopedb"
 	"github.com/scopedb/goscopedb/examples/internal/exampleutil"
 )
 
@@ -40,16 +38,12 @@ func run(ctx context.Context) error {
 	}
 	defer client.Close()
 
-	snapshot, err := client.Catalog("databases", exampleutil.Database(), "schemas", exampleutil.Schema()).Get(ctx)
+	snapshot, err := client.Catalog().Schema(exampleutil.Database(), exampleutil.Schema()).Get(ctx)
 	if err != nil {
 		return err
 	}
-	var schema scopedb.CatalogSchema
-	if err := json.Unmarshal(snapshot.Definition, &schema); err != nil {
-		return err
-	}
 	fmt.Printf("tables in %s.%s (version %s):\n", exampleutil.Database(), exampleutil.Schema(), snapshot.ETag)
-	for _, table := range schema.Tables {
+	for _, table := range snapshot.Definition.Tables {
 		fmt.Printf(" - %s (%d columns)\n", table.Name, len(table.Columns))
 	}
 	return nil
