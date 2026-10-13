@@ -36,9 +36,12 @@ import (
 
 // Client provides access to ScopeDB APIs.
 type Client struct {
-	endpoint *url.URL
-	http     *httpClient
+	endpoint     *url.URL
+	http         *httpClient
+	writeTimeout time.Duration
 }
+
+const defaultWriteTimeout = 30 * time.Second
 
 // NewClient creates a new ScopeDB client with the given configuration.
 func NewClient(config Config) (*Client, error) {
@@ -59,6 +62,13 @@ func NewClient(config Config) (*Client, error) {
 			nil,
 		)
 	}
+	writeTimeout := config.WriteTimeout
+	if writeTimeout < 0 {
+		return nil, newError(ErrorKindConfigInvalid, "write timeout must not be negative", nil)
+	}
+	if writeTimeout == 0 {
+		writeTimeout = defaultWriteTimeout
+	}
 
 	standardClient := config.HTTPClient
 	owned := false
@@ -69,7 +79,8 @@ func NewClient(config Config) (*Client, error) {
 	}
 
 	return &Client{
-		endpoint: endpoint,
+		endpoint:     endpoint,
+		writeTimeout: writeTimeout,
 		http: &httpClient{
 			client:        standardClient,
 			authorization: bearerAuthorization(config),
@@ -123,6 +134,14 @@ func (c *httpClient) doGet(ctx context.Context, u *url.URL) (*http.Response, err
 
 // doPost sends a POST request to the ScopeDB server.
 func (c *httpClient) doPost(ctx context.Context, u *url.URL, body []byte) (*http.Response, error) {
+	req, err := c.newPostRequest(ctx, u, body)
+	if err != nil {
+		return nil, err
+	}
+	return c.do(req)
+}
+
+func (c *httpClient) newPostRequest(ctx context.Context, u *url.URL, body []byte) (*http.Request, error) {
 	uncompressedContentLength := len(body)
 
 	compressedBody, compression, err := compressRequestBody(body, c.compression)
@@ -137,7 +156,7 @@ func (c *httpClient) doPost(ctx context.Context, u *url.URL, body []byte) (*http
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Content-Encoding", string(compression))
 	req.Header.Set("X-ScopeDB-Uncompressed-Content-Length", strconv.Itoa(uncompressedContentLength))
-	return c.do(req)
+	return req, nil
 }
 
 func (c *httpClient) do(req *http.Request) (*http.Response, error) {
@@ -375,7 +394,14 @@ type ingestResponse struct {
 }
 
 func (c *Client) ingest(ctx context.Context, request *ingestRequest) (*ingestResponse, error) {
-	req, err := c.resourceURL("ingest")
+	return c.ingestWithTimeout(ctx, request, c.writeTimeout)
+}
+
+func (c *Client) ingestWithTimeout(ctx context.Context, request *ingestRequest, timeout time.Duration) (*ingestResponse, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	u, err := c.resourceURL("ingest")
 	if err != nil {
 		return nil, err
 	}
@@ -384,14 +410,20 @@ func (c *Client) ingest(ctx context.Context, request *ingestRequest) (*ingestRes
 	if err != nil {
 		return nil, err
 	}
+	req, err := c.http.newPostRequest(ctx, u, body)
+	if err != nil {
+		return nil, err
+	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 
-	resp, err := c.http.doPost(ctx, req, body)
+	resp, err := c.http.do(req.WithContext(ctx))
 	if err != nil {
-		return nil, unknownIngestCommitOutcomeError(nil, err)
+		return nil, unknownIngestCommitOutcomeError(nil, err).withWriteContext(ctx)
 	}
 	defer sneakyBodyClose(resp.Body)
-	return checkIngestResponse(resp)
+	return checkIngestResponse(ctx, resp)
 }

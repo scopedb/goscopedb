@@ -60,7 +60,7 @@ func TestAppendAtLeastOnceLostAcknowledgement(t *testing.T) {
 	require.Zero(t, report.UnknownRows)
 }
 
-func TestAppendRetryTimeoutThenCommit(t *testing.T) {
+func TestAppendClientTimeoutIsNotReplayed(t *testing.T) {
 	var calls atomic.Int64
 	client, err := NewClient(Config{
 		Endpoint: "https://example.com", Compression: CompressionGzip,
@@ -78,9 +78,17 @@ func TestAppendRetryTimeoutThenCommit(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, stream.Send(context.Background(), map[string]int{"id": 1}))
 	report, err := stream.Shutdown(context.Background())
-	require.NoError(t, err)
-	require.Equal(t, uint64(1), report.CommittedRows)
-	require.GreaterOrEqual(t, report.Retries, uint64(1))
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	var scopeErr *Error
+	require.ErrorAs(t, err, &scopeErr)
+	require.Equal(t, &WriteErrorDetails{
+		Reason: WriteErrorReasonTimeout, Outcome: AppendStateUnknown,
+	}, scopeErr.WriteDetails)
+	require.False(t, scopeErr.Retryable)
+	require.EqualValues(t, 1, calls.Load())
+	require.Equal(t, uint64(1), report.UnknownRows)
+	require.Zero(t, report.CommittedRows)
+	require.Zero(t, report.Retries)
 }
 
 func TestAppendOutageBackpressureAndRecovery(t *testing.T) {

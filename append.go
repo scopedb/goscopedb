@@ -31,7 +31,8 @@ const (
 	maxAppendRows      = 200_000
 )
 
-// AppendState describes the commit outcome of a table append request.
+// AppendState describes a write's commit outcome. Table append responses and
+// client-side interruption details use these values.
 type AppendState string
 
 const (
@@ -75,15 +76,16 @@ func (c *Client) appendNDJSON(
 	table string,
 	ndjson []byte,
 ) (AppendRowsResult, error) {
-	return c.appendNDJSONRequest(ctx, database, schema, table, ndjson)
+	return c.appendNDJSONWithTimeout(ctx, database, schema, table, ndjson, c.writeTimeout)
 }
 
-func (c *Client) appendNDJSONRequest(
+func (c *Client) appendNDJSONWithTimeout(
 	ctx context.Context,
 	database string,
 	schema string,
 	table string,
 	ndjson []byte,
+	timeout time.Duration,
 ) (AppendRowsResult, error) {
 	if err := ctx.Err(); err != nil {
 		return AppendRowsResult{}, err
@@ -130,16 +132,21 @@ func (c *Client) appendNDJSONRequest(
 	}
 	req.Header.Set("Content-Type", "application/x-ndjson")
 	req.Header.Set("Content-Encoding", string(contentEncoding))
+	if err := ctx.Err(); err != nil {
+		return AppendRowsResult{}, err
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 
-	resp, err := c.http.do(req)
+	resp, err := c.http.do(req.WithContext(ctx))
 	if err != nil {
-		return AppendRowsResult{}, appendUnknownError(err.Error(), err, nil)
+		return AppendRowsResult{}, appendUnknownError(err.Error(), err, nil).withWriteContext(ctx)
 	}
 	defer sneakyBodyClose(resp.Body)
 
 	responseBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return AppendRowsResult{}, appendUnknownError(err.Error(), err, resp)
+		return AppendRowsResult{}, appendUnknownError(err.Error(), err, resp).withWriteContext(ctx)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		apiErr := responseError(resp, responseBody, ErrorKindAppendRowsFailed)
@@ -222,7 +229,8 @@ func appendUnknownError(message string, cause error, resp *http.Response) *Error
 			AppendState: AppendStateUnknown,
 			RowErrors:   []AppendRowError{},
 		},
-		cause: cause,
+		WriteDetails: writeErrorDetails(cause),
+		cause:        cause,
 	}
 	if resp != nil {
 		err.HTTPStatus = resp.StatusCode
