@@ -25,8 +25,6 @@ import (
 	"net/http"
 	"strconv"
 	"time"
-
-	"github.com/google/uuid"
 )
 
 const ingestCommitOutcomeUnknownMessage = "ingest commit outcome is unknown; the request may have committed, so replay is not known to be safe"
@@ -218,94 +216,6 @@ func parseRetryAfter(value string, now time.Time) time.Duration {
 		}
 	}
 	return 0
-}
-
-func checkStatementResponse(resp *http.Response, cancel bool) (*statementResponse, error) {
-	data, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, responseMetadataError(
-			resp,
-			ErrorKindUnexpected,
-			"failed to read statement response",
-			err,
-		)
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, responseError(resp, data, ErrorKindUnexpected)
-	}
-
-	var stmtResp statementResponse
-	if err := json.Unmarshal(data, &stmtResp); err != nil {
-		return nil, responseMetadataError(
-			resp,
-			ErrorKindUnexpected,
-			"failed to decode statement response",
-			err,
-		)
-	}
-	if stmtResp.Status == "" {
-		return nil, responseMetadataError(
-			resp,
-			ErrorKindUnexpected,
-			"statement response is missing status",
-			nil,
-		)
-	}
-	// TODO(legacy): Remove recognition of ScopeDB 0.5 cancellation envelopes.
-	adaptLegacyCancel(&stmtResp, data, cancel)
-	if err := validateStatementResponse(&stmtResp); err != nil {
-		return nil, responseMetadataError(
-			resp,
-			ErrorKindUnexpected,
-			"invalid statement response: "+err.Error(),
-			err,
-		)
-	}
-	return &stmtResp, nil
-}
-
-func validateStatementResponse(resp *statementResponse) error {
-	if resp.ID == uuid.Nil {
-		return fmt.Errorf("statement_id is missing")
-	}
-	if resp.Created.IsZero() {
-		return fmt.Errorf("created_at is missing")
-	}
-	switch resp.Status {
-	case StatementStatusPending,
-		StatementStatusRunning,
-		StatementStatusCancelled:
-		return nil
-	case StatementStatusFailed:
-		if resp.Error == nil {
-			// TODO(legacy): ScopeDB 0.5 may supply only a top-level failure message.
-			if resp.Message != nil && *resp.Message != "" {
-				return nil
-			}
-			return fmt.Errorf("failed statement has no error")
-		}
-		return validateStatementError(resp.Error)
-	case StatementStatusFinished:
-		// TODO(legacy): ScopeDB 0.5 cancellation requires a result fetch.
-		if resp.legacyIncomplete {
-			return nil
-		}
-		return validateFinishedResult(resp.ResultSet)
-	default:
-		return fmt.Errorf("unknown status %q", resp.Status)
-	}
-}
-
-func validateStatementError(statementError *StatementErrorDetails) error {
-	if statementError.Code == "" {
-		return fmt.Errorf("failed statement error has no code")
-	}
-	if statementError.Message == "" {
-		return fmt.Errorf("failed statement error has no message")
-	}
-
-	// TODO(legacy): Remove validation of retired row and scan limit errors with 0.5 support.
-	return validateLegacyStatementError(statementError)
 }
 
 func validateFinishedResult(result *resultSet) error {

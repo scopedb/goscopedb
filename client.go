@@ -259,31 +259,6 @@ type resultFormat string
 
 const resultFormatJSON resultFormat = "json"
 
-type statementRequest struct {
-	StatementID         *uuid.UUID `json:"statement_id,omitempty"`
-	Statement           string     `json:"statement"`
-	MaxElapsedSeconds   float64    `json:"max_elapsed_seconds,omitempty"`
-	MaxEstimatedSeconds float64    `json:"max_estimated_seconds,omitempty"`
-	// TODO(legacy): Remove with Statement.ExecTimeout.
-	ExecTimeout string       `json:"exec_timeout,omitempty"`
-	Format      resultFormat `json:"format"`
-}
-
-type statementResponse struct {
-	ID       uuid.UUID         `json:"statement_id"`
-	Progress StatementProgress `json:"progress"`
-	Status   StatementStatus   `json:"status"`
-	Created  time.Time         `json:"created_at"`
-
-	// TODO(legacy): Remove after ScopeDB 0.5 response support ends.
-	legacyStatementResponse
-	// Error is set when the statement failed with structured details.
-	Error *StatementErrorDetails `json:"error"`
-
-	// ResultSet is set when the statement was successfully finished.
-	ResultSet *resultSet `json:"result_set"`
-}
-
 type resultSet struct {
 	Metadata *resultSetMetadata `json:"metadata"`
 	Format   resultFormat       `json:"format"`

@@ -395,6 +395,11 @@ func TestStatementHandleWaitFetchesResultAfterCancelReportsFinished(t *testing.T
 	require.NoError(t, err)
 	require.Equal(t, StatementStatusFinished, status)
 	require.Equal(t, int32(1), statusRequests.Load())
+	again, err := handle.Cancel(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, cancelResult, again, "fetching results must preserve the cancellation outcome")
+	require.Equal(t, int32(1), cancelRequests.Load())
+	require.Equal(t, int32(1), statusRequests.Load())
 }
 
 func TestStatementHandleWaitFetchesFailureAfterCancelReportsFailed(t *testing.T) {
@@ -479,6 +484,11 @@ func TestStatementHandleWaitFetchesFailureAfterCancelReportsFailed(t *testing.T)
 	status, err = handle.Status(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, StatementStatusFailed, status)
+	require.Equal(t, int32(2), statusRequests.Load())
+	again, err := handle.Cancel(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, cancelResult, again, "fetching failure details must preserve the cancellation outcome")
+	require.Equal(t, int32(1), cancelRequests.Load())
 	require.Equal(t, int32(2), statusRequests.Load())
 }
 

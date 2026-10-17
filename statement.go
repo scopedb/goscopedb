@@ -62,18 +62,8 @@ func (c *Client) Query(ctx context.Context, scopeql string) (*ResultSet, error) 
 
 // Submit submits the statement to ScopeDB for execution.
 func (s *Statement) Submit(ctx context.Context) (*StatementHandle, error) {
-	if s.MaxElapsed < 0 || s.MaxEstimated < 0 {
-		return nil, newError(ErrorKindConfigInvalid, "statement limits must not be negative", nil)
-	}
-	request := &statementRequest{
-		StatementID:         s.ID,
-		Statement:           s.stmt,
-		MaxElapsedSeconds:   s.MaxElapsed.Seconds(),
-		MaxEstimatedSeconds: s.MaxEstimated.Seconds(),
-		Format:              resultFormatJSON,
-	}
-	// TODO(legacy): Remove the deprecated timeout adapter with ExecTimeout.
-	if err := applyLegacyTimeout(s, request); err != nil {
+	request, err := s.request()
+	if err != nil {
 		return nil, err
 	}
 	resp, err := s.c.submitStatement(ctx, request)
@@ -169,15 +159,11 @@ func (h *StatementHandle) Wait(ctx context.Context) (*ResultSet, error) {
 	delay := 5 * time.Millisecond
 	maxDelay := time.Second
 	for {
-		_, err := h.Status(ctx)
+		response, err := h.resultResponse(ctx)
 		if err != nil {
 			return nil, err
 		}
-		// TODO(legacy): Remove the result fetch for ScopeDB 0.5 cancellation responses.
-		if err := h.fetchLegacyResult(ctx); err != nil {
-			return nil, err
-		}
-		status := h.resp.Status
+		status := response.Status
 
 		switch status {
 		case StatementStatusFinished:
@@ -190,16 +176,7 @@ func (h *StatementHandle) Wait(ctx context.Context) (*ResultSet, error) {
 				Message: "finished statement response has no result set",
 			}
 		case StatementStatusFailed, StatementStatusCancelled:
-			if details := h.resp.Error; details != nil {
-				return nil, &Error{
-					Kind:             ErrorKindStatementFailed,
-					Code:             string(details.Code),
-					Message:          details.Message,
-					StatementDetails: details,
-				}
-			}
-			// TODO(legacy): Remove the top-level message fallback with ScopeDB 0.5 support.
-			return nil, &Error{Kind: ErrorKindStatementFailed, Message: legacyStatementMessage(h.resp)}
+			return nil, response.failure()
 		case StatementStatusPending, StatementStatusRunning:
 			// Keep polling below.
 		default:
@@ -220,23 +197,6 @@ func (h *StatementHandle) Wait(ctx context.Context) (*ResultSet, error) {
 			delay = min(delay*2, maxDelay)
 		}
 	}
-}
-
-// Cancel cancels the statement if it is running or pending.
-func (h *StatementHandle) Cancel(ctx context.Context) (StatementCancelResult, error) {
-	if h.resp != nil && h.resp.Status.Terminated() {
-		return h.cancelResultFromResponse(), nil
-	}
-	resp, err := h.c.cancelStatement(ctx, h.id)
-	if err != nil {
-		return StatementCancelResult{}, err
-	}
-	// TODO(legacy): ScopeDB 0.5 cancellation responses omit progress.
-	if resp.legacyIncomplete && h.resp != nil {
-		resp.Progress = h.resp.Progress
-	}
-	h.resp = resp
-	return h.cancelResultFromResponse(), nil
 }
 
 // StatementStatus is a string that represents the status of a statement.

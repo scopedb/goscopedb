@@ -16,28 +16,62 @@
 
 package scopedb
 
-// TODO(legacy): Remove these adapters after ScopeDB 0.5 and the deprecated Go API are retired.
+// TODO(legacy): Keep dual-version statement wire handling here. Retire the 0.5 branches
+// and deprecated Go API together after ScopeDB 0.5 support ends.
 
 import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"time"
 
 	"github.com/google/uuid"
 )
 
-type legacyStatementResponse struct {
-	Message          *string `json:"message"`
-	legacyIncomplete bool
+type statementRequest struct {
+	StatementID         *uuid.UUID `json:"statement_id,omitempty"`
+	Statement           string     `json:"statement"`
+	MaxElapsedSeconds   float64    `json:"max_elapsed_seconds,omitempty"`
+	MaxEstimatedSeconds float64    `json:"max_estimated_seconds,omitempty"`
+	// TODO(legacy): Remove with Statement.ExecTimeout.
+	ExecTimeout string       `json:"exec_timeout,omitempty"`
+	Format      resultFormat `json:"format"`
 }
 
-func applyLegacyTimeout(statement *Statement, request *statementRequest) error {
-	if statement.ExecTimeout != "" && statement.MaxElapsed != 0 {
-		return newError(ErrorKindConfigInvalid, "ExecTimeout and MaxElapsed cannot be specified together", nil)
+type statementResponse struct {
+	ID       uuid.UUID         `json:"statement_id"`
+	Progress StatementProgress `json:"progress"`
+	Status   StatementStatus   `json:"status"`
+	Created  time.Time         `json:"created_at"`
+
+	Message          *string `json:"message"`
+	legacyIncomplete bool
+	cancelResult     *StatementCancelResult
+	// Error is set when the statement failed with structured details.
+	Error *StatementErrorDetails `json:"error"`
+
+	// ResultSet is set when the statement was successfully finished.
+	ResultSet *resultSet `json:"result_set"`
+}
+
+func (s *Statement) request() (*statementRequest, error) {
+	if s.MaxElapsed < 0 || s.MaxEstimated < 0 {
+		return nil, newError(ErrorKindConfigInvalid, "statement limits must not be negative", nil)
 	}
-	request.ExecTimeout = statement.ExecTimeout
-	return nil
+	request := &statementRequest{
+		StatementID:         s.ID,
+		Statement:           s.stmt,
+		MaxElapsedSeconds:   s.MaxElapsed.Seconds(),
+		MaxEstimatedSeconds: s.MaxEstimated.Seconds(),
+		Format:              resultFormatJSON,
+	}
+	if s.ExecTimeout != "" && s.MaxElapsed != 0 {
+		return nil, newError(ErrorKindConfigInvalid, "ExecTimeout and MaxElapsed cannot be specified together", nil)
+	}
+	request.ExecTimeout = s.ExecTimeout
+	return request, nil
 }
 
 func adaptLegacyCancel(response *statementResponse, data []byte, cancel bool) {
@@ -52,19 +86,35 @@ func adaptLegacyCancel(response *statementResponse, data []byte, cancel bool) {
 	}
 }
 
-func (h *StatementHandle) fetchLegacyResult(ctx context.Context) error {
+func (h *StatementHandle) resultResponse(ctx context.Context) (*statementResponse, error) {
+	if _, err := h.Status(ctx); err != nil {
+		return nil, err
+	}
 	if !h.resp.legacyIncomplete || (h.resp.Status != StatementStatusFinished && h.resp.Status != StatementStatusFailed) {
-		return nil
+		return h.resp, nil
 	}
 	response, err := h.c.fetchStatementResult(ctx, h.id)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if !response.Status.Terminated() {
-		return newError(ErrorKindUnexpected, fmt.Sprintf("statement cancel reported %s but fetched status is %s", h.resp.Status, response.Status), nil)
+		return nil, newError(ErrorKindUnexpected, fmt.Sprintf("statement cancel reported %s but fetched status is %s", h.resp.Status, response.Status), nil)
 	}
+	response.cancelResult = h.resp.cancelResult
 	h.resp = response
-	return nil
+	return response, nil
+}
+
+func (r *statementResponse) failure() *Error {
+	if details := r.Error; details != nil {
+		return &Error{
+			Kind:             ErrorKindStatementFailed,
+			Code:             string(details.Code),
+			Message:          details.Message,
+			StatementDetails: details,
+		}
+	}
+	return &Error{Kind: ErrorKindStatementFailed, Message: legacyStatementMessage(r)}
 }
 
 func legacyStatementMessage(response *statementResponse) string {
@@ -82,17 +132,36 @@ type StatementCancelResult struct {
 	Message     string          `json:"message"`
 }
 
-func (h *StatementHandle) cancelResultFromResponse() StatementCancelResult {
+// Cancel cancels the statement if it is running or pending.
+func (h *StatementHandle) Cancel(ctx context.Context) (StatementCancelResult, error) {
+	if h.resp == nil || !h.resp.Status.Terminated() {
+		resp, err := h.c.cancelStatement(ctx, h.id)
+		if err != nil {
+			return StatementCancelResult{}, err
+		}
+		// TODO(legacy): ScopeDB 0.5 cancellation responses omit progress.
+		if resp.legacyIncomplete && h.resp != nil {
+			resp.Progress = h.resp.Progress
+		}
+		h.resp = resp
+	}
+	if h.resp.cancelResult != nil {
+		return *h.resp.cancelResult, nil
+	}
 	message := legacyStatementMessage(h.resp)
 	if h.resp.Error != nil {
 		message = h.resp.Error.Message
 	}
-	return StatementCancelResult{
+	result := StatementCancelResult{
 		StatementID: h.id,
 		CreatedAt:   h.resp.Created,
 		Status:      h.resp.Status,
 		Message:     message,
 	}
+	if h.resp.Status.Terminated() {
+		h.resp.cancelResult = &result
+	}
+	return result, nil
 }
 
 const (
@@ -142,4 +211,92 @@ func validateStatementLimitDetails(details json.RawMessage, fields ...string) er
 		}
 	}
 	return nil
+}
+
+func checkStatementResponse(resp *http.Response, cancel bool) (*statementResponse, error) {
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, responseMetadataError(
+			resp,
+			ErrorKindUnexpected,
+			"failed to read statement response",
+			err,
+		)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, responseError(resp, data, ErrorKindUnexpected)
+	}
+
+	var stmtResp statementResponse
+	if err := json.Unmarshal(data, &stmtResp); err != nil {
+		return nil, responseMetadataError(
+			resp,
+			ErrorKindUnexpected,
+			"failed to decode statement response",
+			err,
+		)
+	}
+	if stmtResp.Status == "" {
+		return nil, responseMetadataError(
+			resp,
+			ErrorKindUnexpected,
+			"statement response is missing status",
+			nil,
+		)
+	}
+	// TODO(legacy): Remove recognition of ScopeDB 0.5 cancellation envelopes.
+	adaptLegacyCancel(&stmtResp, data, cancel)
+	if err := validateStatementResponse(&stmtResp); err != nil {
+		return nil, responseMetadataError(
+			resp,
+			ErrorKindUnexpected,
+			"invalid statement response: "+err.Error(),
+			err,
+		)
+	}
+	return &stmtResp, nil
+}
+
+func validateStatementResponse(resp *statementResponse) error {
+	if resp.ID == uuid.Nil {
+		return fmt.Errorf("statement_id is missing")
+	}
+	if resp.Created.IsZero() {
+		return fmt.Errorf("created_at is missing")
+	}
+	switch resp.Status {
+	case StatementStatusPending,
+		StatementStatusRunning,
+		StatementStatusCancelled:
+		return nil
+	case StatementStatusFailed:
+		if resp.Error == nil {
+			// TODO(legacy): ScopeDB 0.5 may supply only a top-level failure message.
+			if resp.Message != nil && *resp.Message != "" {
+				return nil
+			}
+			return fmt.Errorf("failed statement has no error")
+		}
+		return validateStatementError(resp.Error)
+	case StatementStatusFinished:
+		// TODO(legacy): ScopeDB 0.5 cancellation requires a result fetch.
+		if resp.legacyIncomplete {
+			return nil
+		}
+		return validateFinishedResult(resp.ResultSet)
+	default:
+		return fmt.Errorf("unknown status %q", resp.Status)
+	}
+}
+
+func validateStatementError(statementError *StatementErrorDetails) error {
+	if statementError.Code == "" {
+		return fmt.Errorf("failed statement error has no code")
+	}
+	if statementError.Message == "" {
+		return fmt.Errorf("failed statement error has no message")
+	}
+
+	// TODO(legacy): Remove validation of retired row and scan limit errors with 0.5 support.
+	return validateLegacyStatementError(statementError)
 }
