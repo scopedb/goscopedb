@@ -20,8 +20,8 @@ import (
 	"context"
 	"testing"
 
-	"github.com/gkampitakis/go-snaps/snaps"
 	"github.com/google/uuid"
+	scopedb "github.com/scopedb/goscopedb"
 	"github.com/stretchr/testify/require"
 )
 
@@ -34,8 +34,10 @@ func TestStatusStatementFail(t *testing.T) {
 	id, err := uuid.Parse("c8fe71d6-3695-11f0-85b3-063c3400fda9")
 	require.NoError(t, err)
 	_, err = c.StatementHandle(id).Status(ctx)
-	require.Error(t, err)
-	snaps.MatchSnapshot(t, err.Error())
+	var failure *scopedb.Error
+	require.ErrorAs(t, err, &failure)
+	require.Equal(t, 404, failure.HTTPStatus)
+	require.Contains(t, failure.Message, id.String())
 }
 
 func TestSubmitStatementFail(t *testing.T) {
@@ -45,6 +47,10 @@ func TestSubmitStatementFail(t *testing.T) {
 	ctx := context.Background()
 
 	_, err := c.Statement("SELECT UNKNOWN_FUNCTION()").Execute(ctx)
-	require.Error(t, err)
-	snaps.MatchSnapshot(t, err.Error())
+	var failure *scopedb.Error
+	require.ErrorAs(t, err, &failure)
+	require.Equal(t, scopedb.ErrorKindStatementFailed, failure.Kind)
+	require.Contains(t, failure.Message, "function not found: unknown_function()")
+	require.NotEmpty(t, failure.Code)
+	require.Equal(t, string(failure.StatementDetails.Code), failure.Code)
 }

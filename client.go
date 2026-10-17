@@ -260,8 +260,11 @@ type resultFormat string
 const resultFormatJSON resultFormat = "json"
 
 type statementRequest struct {
-	StatementID *uuid.UUID   `json:"statement_id,omitempty"`
-	Statement   string       `json:"statement"`
+	StatementID         *uuid.UUID `json:"statement_id,omitempty"`
+	Statement           string     `json:"statement"`
+	MaxElapsedSeconds   float64    `json:"max_elapsed_seconds,omitempty"`
+	MaxEstimatedSeconds float64    `json:"max_estimated_seconds,omitempty"`
+	// TODO(legacy): Remove with Statement.ExecTimeout.
 	ExecTimeout string       `json:"exec_timeout,omitempty"`
 	Format      resultFormat `json:"format"`
 }
@@ -272,8 +275,8 @@ type statementResponse struct {
 	Status   StatementStatus   `json:"status"`
 	Created  time.Time         `json:"created_at"`
 
-	// Message is set when the statement was failed or canceled.
-	Message *string `json:"message"`
+	// TODO(legacy): Remove after ScopeDB 0.5 response support ends.
+	legacyStatementResponse
 	// Error is set when the statement failed with structured details.
 	Error *StatementErrorDetails `json:"error"`
 
@@ -335,7 +338,7 @@ func (c *Client) submitStatement(ctx context.Context, request *statementRequest)
 		return nil, err
 	}
 	defer sneakyBodyClose(resp.Body)
-	return checkStatementResponse(resp)
+	return checkStatementResponse(resp, false)
 }
 
 func (c *Client) fetchStatementResult(ctx context.Context, id uuid.UUID) (*statementResponse, error) {
@@ -353,23 +356,25 @@ func (c *Client) fetchStatementResult(ctx context.Context, id uuid.UUID) (*state
 		return nil, err
 	}
 	defer sneakyBodyClose(resp.Body)
-	return checkStatementResponse(resp)
+	return checkStatementResponse(resp, false)
 }
 
-type statementCancelResponse = StatementCancelResult
-
-func (c *Client) cancelStatement(ctx context.Context, statementID uuid.UUID) (*statementCancelResponse, error) {
+func (c *Client) cancelStatement(ctx context.Context, statementID uuid.UUID) (*statementResponse, error) {
 	req, err := c.resourceURL("statements", statementID.String(), "cancel")
 	if err != nil {
 		return nil, err
 	}
+
+	query := req.Query()
+	query.Set("format", string(resultFormatJSON))
+	req.RawQuery = query.Encode()
 
 	resp, err := c.http.doPost(ctx, req, []byte{})
 	if err != nil {
 		return nil, err
 	}
 	defer sneakyBodyClose(resp.Body)
-	return checkStatementCancelResponse(resp)
+	return checkStatementResponse(resp, true)
 }
 
 type writeFormat string

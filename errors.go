@@ -64,6 +64,8 @@ type WriteErrorDetails struct {
 
 // Error represents a ScopeDB client or API error.
 type Error struct {
+	// Code preserves the server error code, including unknown values.
+	Code          string
 	Kind          ErrorKind
 	Message       string
 	HTTPStatus    int
@@ -118,6 +120,7 @@ func (e *Error) withWriteContext(ctx context.Context) *Error {
 }
 
 type apiErrorPayload struct {
+	Code               string           `json:"code"`
 	Message            string           `json:"message"`
 	RequestID          string           `json:"request_id"`
 	Retryable          *bool            `json:"retryable"`
@@ -162,6 +165,7 @@ func responseError(resp *http.Response, body []byte, kind ErrorKind) *Error {
 			resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500,
 	}
 	if parsed {
+		err.Code = payload.Code
 		if payload.RequestID != "" {
 			err.RequestID = payload.RequestID
 		}
@@ -216,7 +220,7 @@ func parseRetryAfter(value string, now time.Time) time.Duration {
 	return 0
 }
 
-func checkStatementResponse(resp *http.Response) (*statementResponse, error) {
+func checkStatementResponse(resp *http.Response, cancel bool) (*statementResponse, error) {
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, responseMetadataError(
@@ -247,6 +251,8 @@ func checkStatementResponse(resp *http.Response) (*statementResponse, error) {
 			nil,
 		)
 	}
+	// TODO(legacy): Remove recognition of ScopeDB 0.5 cancellation envelopes.
+	adaptLegacyCancel(&stmtResp, data, cancel)
 	if err := validateStatementResponse(&stmtResp); err != nil {
 		return nil, responseMetadataError(
 			resp,
@@ -272,11 +278,18 @@ func validateStatementResponse(resp *statementResponse) error {
 		return nil
 	case StatementStatusFailed:
 		if resp.Error == nil {
-			// Older servers returned only the top-level message.
-			return nil
+			// TODO(legacy): ScopeDB 0.5 may supply only a top-level failure message.
+			if resp.Message != nil && *resp.Message != "" {
+				return nil
+			}
+			return fmt.Errorf("failed statement has no error")
 		}
 		return validateStatementError(resp.Error)
 	case StatementStatusFinished:
+		// TODO(legacy): ScopeDB 0.5 cancellation requires a result fetch.
+		if resp.legacyIncomplete {
+			return nil
+		}
 		return validateFinishedResult(resp.ResultSet)
 	default:
 		return fmt.Errorf("unknown status %q", resp.Status)
@@ -291,50 +304,8 @@ func validateStatementError(statementError *StatementErrorDetails) error {
 		return fmt.Errorf("failed statement error has no message")
 	}
 
-	switch statementError.Code {
-	case StatementErrorCodeRowLimitExceeded:
-		return validateStatementLimitDetails(
-			statementError.Details,
-			"total_rows",
-			"max_total_rows",
-		)
-	case StatementErrorCodeScanLimitExceeded:
-		return validateStatementLimitDetails(
-			statementError.Details,
-			"scanned_uncompressed_bytes",
-			"max_scanned_uncompressed_bytes",
-		)
-	case StatementErrorCodePrepareError,
-		StatementErrorCodeExecuteError,
-		StatementErrorCodePendingTimeout,
-		StatementErrorCodeExecutionTimeout,
-		StatementErrorCodeHeartbeatLost:
-		return nil
-	default:
-		return nil
-	}
-}
-
-func validateStatementLimitDetails(details json.RawMessage, fields ...string) error {
-	if len(details) == 0 {
-		return fmt.Errorf("failed statement error has no details")
-	}
-
-	var object map[string]json.RawMessage
-	if err := json.Unmarshal(details, &object); err != nil || object == nil {
-		return fmt.Errorf("failed statement error details must be an object")
-	}
-	for _, field := range fields {
-		raw, ok := object[field]
-		if !ok {
-			return fmt.Errorf("failed statement error details has no %s", field)
-		}
-		var value *uint64
-		if err := json.Unmarshal(raw, &value); err != nil || value == nil {
-			return fmt.Errorf("failed statement error detail %s must be an unsigned integer", field)
-		}
-	}
-	return nil
+	// TODO(legacy): Remove validation of retired row and scan limit errors with 0.5 support.
+	return validateLegacyStatementError(statementError)
 }
 
 func validateFinishedResult(result *resultSet) error {
@@ -364,70 +335,6 @@ func validateFinishedResult(result *resultSet) error {
 	}
 
 	return nil
-}
-
-func checkStatementCancelResponse(resp *http.Response) (*statementCancelResponse, error) {
-	data, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, responseMetadataError(
-			resp,
-			ErrorKindUnexpected,
-			"failed to read statement cancel response",
-			err,
-		)
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, responseError(resp, data, ErrorKindUnexpected)
-	}
-
-	var stmtResp statementCancelResponse
-	if err := json.Unmarshal(data, &stmtResp); err != nil {
-		return nil, responseMetadataError(
-			resp,
-			ErrorKindUnexpected,
-			"failed to decode statement cancel response",
-			err,
-		)
-	}
-	if stmtResp.Status == "" {
-		return nil, responseMetadataError(
-			resp,
-			ErrorKindUnexpected,
-			"statement cancel response is missing status",
-			nil,
-		)
-	}
-	if stmtResp.StatementID == uuid.Nil {
-		return nil, responseMetadataError(
-			resp,
-			ErrorKindUnexpected,
-			"statement cancel response is missing statement_id",
-			nil,
-		)
-	}
-	if stmtResp.CreatedAt.IsZero() {
-		return nil, responseMetadataError(
-			resp,
-			ErrorKindUnexpected,
-			"statement cancel response is missing created_at",
-			nil,
-		)
-	}
-	switch stmtResp.Status {
-	case StatementStatusPending,
-		StatementStatusRunning,
-		StatementStatusFinished,
-		StatementStatusFailed,
-		StatementStatusCancelled:
-	default:
-		return nil, responseMetadataError(
-			resp,
-			ErrorKindUnexpected,
-			fmt.Sprintf("statement cancel response has unknown status %q", stmtResp.Status),
-			nil,
-		)
-	}
-	return &stmtResp, nil
 }
 
 func checkIngestResponse(ctx context.Context, resp *http.Response) (*ingestResponse, error) {

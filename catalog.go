@@ -16,6 +16,8 @@
 
 package scopedb
 
+// TODO(legacy): Retire paginated catalog methods when the legacy catalog API is retired.
+
 import (
 	"bytes"
 	"context"

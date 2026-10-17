@@ -4,6 +4,12 @@ All significant changes to this project will be documented in this file.
 
 ## Unreleased
 
+### Compatibility
+
+- Support ScopeDB 0.5.28 and 0.6 legacy HTTP endpoints without replacing existing catalog, table, or cancellation APIs.
+- Add `Statement.MaxElapsed` and `MaxEstimated`; retain `ExecTimeout` as a deprecated option.
+- Preserve structured failure messages and expose server codes through `Error.Code`. Accept both cancellation response formats and cache complete results when supplied.
+
 ### Changed
 
 - Table append and transform-ingest requests now have a configurable

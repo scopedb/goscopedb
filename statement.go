@@ -35,6 +35,12 @@ type Statement struct {
 	//
 	// When nil, ScopeDB generates the statement ID.
 	ID *uuid.UUID
+	// MaxElapsed limits server-side elapsed time, including queueing. Zero uses the server default.
+	MaxElapsed time.Duration
+	// MaxEstimated limits estimated execution time. Zero leaves the estimate unrestricted.
+	MaxEstimated time.Duration
+	// TODO(legacy): Remove ExecTimeout after callers migrate to MaxElapsed.
+	// Deprecated: Use MaxElapsed.
 	// ExecTimeout is the maximum time allowed for statement execution.
 	//
 	// If the total execution time exceeds this value, the statement is failed
@@ -56,12 +62,21 @@ func (c *Client) Query(ctx context.Context, scopeql string) (*ResultSet, error) 
 
 // Submit submits the statement to ScopeDB for execution.
 func (s *Statement) Submit(ctx context.Context) (*StatementHandle, error) {
-	resp, err := s.c.submitStatement(ctx, &statementRequest{
-		StatementID: s.ID,
-		Statement:   s.stmt,
-		ExecTimeout: s.ExecTimeout,
-		Format:      resultFormatJSON,
-	})
+	if s.MaxElapsed < 0 || s.MaxEstimated < 0 {
+		return nil, newError(ErrorKindConfigInvalid, "statement limits must not be negative", nil)
+	}
+	request := &statementRequest{
+		StatementID:         s.ID,
+		Statement:           s.stmt,
+		MaxElapsedSeconds:   s.MaxElapsed.Seconds(),
+		MaxEstimatedSeconds: s.MaxEstimated.Seconds(),
+		Format:              resultFormatJSON,
+	}
+	// TODO(legacy): Remove the deprecated timeout adapter with ExecTimeout.
+	if err := applyLegacyTimeout(s, request); err != nil {
+		return nil, err
+	}
+	resp, err := s.c.submitStatement(ctx, request)
 	if err != nil {
 		return nil, err
 	}
@@ -84,11 +99,9 @@ func (s *Statement) Execute(ctx context.Context) (*ResultSet, error) {
 
 // StatementHandle is a handle to a statement that has been submitted to ScopeDB.
 type StatementHandle struct {
-	c                      *Client
-	resp                   *statementResponse
-	cancelResult           *StatementCancelResult
-	cancelResultNeedsFetch bool
-	id                     uuid.UUID
+	c    *Client
+	resp *statementResponse
+	id   uuid.UUID
 }
 
 // StatementHandle creates a new StatementHandle with the given ID.
@@ -106,14 +119,6 @@ func (h *StatementHandle) ID() uuid.UUID {
 
 // LastStatus returns the latest locally cached status without making a request.
 func (h *StatementHandle) LastStatus() *StatementStatus {
-	if h.resp != nil && h.resp.Status.Terminated() {
-		status := h.resp.Status
-		return &status
-	}
-	if h.cancelResult != nil && h.cancelResult.Status.Terminated() {
-		status := h.cancelResult.Status
-		return &status
-	}
 	if h.resp != nil {
 		status := h.resp.Status
 		return &status
@@ -147,9 +152,6 @@ func (h *StatementHandle) Status(ctx context.Context) (StatementStatus, error) {
 	if h.resp != nil && h.resp.Status.Terminated() {
 		return h.resp.Status, nil
 	}
-	if h.cancelResult != nil && h.cancelResult.Status.Terminated() {
-		return h.cancelResult.Status, nil
-	}
 
 	resp, err := h.c.fetchStatementResult(ctx, h.id)
 	if err != nil {
@@ -167,30 +169,15 @@ func (h *StatementHandle) Wait(ctx context.Context) (*ResultSet, error) {
 	delay := 5 * time.Millisecond
 	maxDelay := time.Second
 	for {
-		status, err := h.Status(ctx)
+		_, err := h.Status(ctx)
 		if err != nil {
 			return nil, err
 		}
-		if h.cancelResultNeedsFetch &&
-			(status == StatementStatusFinished || status == StatementStatusFailed) {
-			resp, err := h.c.fetchStatementResult(ctx, h.id)
-			if err != nil {
-				return nil, err
-			}
-			if !resp.Status.Terminated() {
-				return nil, &Error{
-					Kind: ErrorKindUnexpected,
-					Message: fmt.Sprintf(
-						"statement cancel reported %s but fetched status is %s",
-						status,
-						resp.Status,
-					),
-				}
-			}
-			h.resp = resp
-			h.cancelResultNeedsFetch = false
-			continue
+		// TODO(legacy): Remove the result fetch for ScopeDB 0.5 cancellation responses.
+		if err := h.fetchLegacyResult(ctx); err != nil {
+			return nil, err
 		}
+		status := h.resp.Status
 
 		switch status {
 		case StatementStatusFinished:
@@ -203,17 +190,16 @@ func (h *StatementHandle) Wait(ctx context.Context) (*ResultSet, error) {
 				Message: "finished statement response has no result set",
 			}
 		case StatementStatusFailed, StatementStatusCancelled:
-			message := fmt.Sprintf("statement is %s", status)
-			if h.resp != nil && h.resp.Status == status && h.resp.Message != nil {
-				message = *h.resp.Message
-			} else if h.cancelResult != nil && h.cancelResult.Status == status {
-				message = h.cancelResult.Message
+			if details := h.resp.Error; details != nil {
+				return nil, &Error{
+					Kind:             ErrorKindStatementFailed,
+					Code:             string(details.Code),
+					Message:          details.Message,
+					StatementDetails: details,
+				}
 			}
-			failure := &Error{Kind: ErrorKindStatementFailed, Message: message}
-			if h.resp != nil && h.resp.Status == status {
-				failure.StatementDetails = h.resp.Error
-			}
-			return nil, failure
+			// TODO(legacy): Remove the top-level message fallback with ScopeDB 0.5 support.
+			return nil, &Error{Kind: ErrorKindStatementFailed, Message: legacyStatementMessage(h.resp)}
 		case StatementStatusPending, StatementStatusRunning:
 			// Keep polling below.
 		default:
@@ -236,51 +222,21 @@ func (h *StatementHandle) Wait(ctx context.Context) (*ResultSet, error) {
 	}
 }
 
-// StatementCancelResult reports the server's complete cancellation outcome.
-type StatementCancelResult struct {
-	StatementID uuid.UUID       `json:"statement_id"`
-	CreatedAt   time.Time       `json:"created_at"`
-	Status      StatementStatus `json:"status"`
-	Message     string          `json:"message"`
-}
-
 // Cancel cancels the statement if it is running or pending.
 func (h *StatementHandle) Cancel(ctx context.Context) (StatementCancelResult, error) {
-	if h.cancelResult != nil {
-		return *h.cancelResult, nil
-	}
 	if h.resp != nil && h.resp.Status.Terminated() {
-		result := h.cancelResultFromResponse()
-		h.cancelResult = &result
-		h.cancelResultNeedsFetch = false
-		return result, nil
+		return h.cancelResultFromResponse(), nil
 	}
-
 	resp, err := h.c.cancelStatement(ctx, h.id)
 	if err != nil {
 		return StatementCancelResult{}, err
 	}
-
-	result := *resp
-	if result.Status.Terminated() {
-		h.cancelResult = &result
-		h.cancelResultNeedsFetch = result.Status == StatementStatusFinished ||
-			result.Status == StatementStatusFailed
+	// TODO(legacy): ScopeDB 0.5 cancellation responses omit progress.
+	if resp.legacyIncomplete && h.resp != nil {
+		resp.Progress = h.resp.Progress
 	}
-	return result, nil
-}
-
-func (h *StatementHandle) cancelResultFromResponse() StatementCancelResult {
-	message := fmt.Sprintf("statement is %s", h.resp.Status)
-	if h.resp.Message != nil && *h.resp.Message != "" {
-		message = *h.resp.Message
-	}
-	return StatementCancelResult{
-		StatementID: h.id,
-		CreatedAt:   h.resp.Created,
-		Status:      h.resp.Status,
-		Message:     message,
-	}
+	h.resp = resp
+	return h.cancelResultFromResponse(), nil
 }
 
 // StatementStatus is a string that represents the status of a statement.
@@ -304,20 +260,10 @@ const (
 type StatementErrorCode string
 
 const (
-	// StatementErrorCodePrepareError indicates that statement preparation failed.
-	StatementErrorCodePrepareError StatementErrorCode = "prepare_error"
-	// StatementErrorCodeExecuteError indicates that statement execution failed.
-	StatementErrorCodeExecuteError StatementErrorCode = "execute_error"
-	// StatementErrorCodePendingTimeout indicates that the statement timed out before execution.
-	StatementErrorCodePendingTimeout StatementErrorCode = "pending_timeout"
-	// StatementErrorCodeExecutionTimeout indicates that the statement exceeded its execution timeout.
-	StatementErrorCodeExecutionTimeout StatementErrorCode = "execution_timeout"
-	// StatementErrorCodeHeartbeatLost indicates that the statement worker stopped reporting progress.
-	StatementErrorCodeHeartbeatLost StatementErrorCode = "heartbeat_lost"
-	// StatementErrorCodeRowLimitExceeded indicates that the statement exceeded a server-enforced row limit.
-	StatementErrorCodeRowLimitExceeded StatementErrorCode = "row_limit_exceeded"
-	// StatementErrorCodeScanLimitExceeded indicates that the statement exceeded a server-enforced scan limit.
-	StatementErrorCodeScanLimitExceeded StatementErrorCode = "scan_limit_exceeded"
+	// StatementErrorCodeFailed indicates statement preparation or execution failure.
+	StatementErrorCodeFailed StatementErrorCode = "statement_failed"
+	// StatementErrorCodeEstimateLimitExceeded indicates the estimate exceeded its limit.
+	StatementErrorCodeEstimateLimitExceeded StatementErrorCode = "statement_estimate_limit_exceeded"
 )
 
 // StatementErrorDetails contains the structured failure returned for a failed

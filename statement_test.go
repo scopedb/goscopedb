@@ -258,7 +258,7 @@ func TestStatementHandleWaitPreservesStructuredStatementFailure(t *testing.T) {
 	var scopeDBError *Error
 	require.ErrorAs(t, err, &scopeDBError)
 	require.Equal(t, ErrorKindStatementFailed, scopeDBError.Kind)
-	require.Equal(t, "outer server message", scopeDBError.Message)
+	require.Equal(t, "structured server message", scopeDBError.Message)
 	require.Equal(t, &StatementErrorDetails{
 		Code:    StatementErrorCodeRowLimitExceeded,
 		Message: "structured server message",
@@ -466,7 +466,7 @@ func TestStatementHandleWaitFetchesFailureAfterCancelReportsFailed(t *testing.T)
 	var scopeDBError *Error
 	require.ErrorAs(t, err, &scopeDBError)
 	require.Equal(t, ErrorKindStatementFailed, scopeDBError.Kind)
-	require.Equal(t, "row limit reached", scopeDBError.Message)
+	require.Equal(t, "total rows exceeds limit", scopeDBError.Message)
 	require.Equal(t, &StatementErrorDetails{
 		Code:    StatementErrorCodeRowLimitExceeded,
 		Message: "total rows exceeds limit",

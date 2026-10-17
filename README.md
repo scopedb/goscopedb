@@ -87,15 +87,15 @@ if err != nil {
 }
 ```
 
-Once a handle has a terminal status, `Status` returns the cached status without another request. Store `handle.ID()` and use `client.StatementHandle(id)` to resume the lifecycle in another process. `Cancel` returns the statement ID, creation time, status, and server message. If cancellation finds that a statement already finished or failed, `Wait` fetches the complete statement response needed for its result or structured failure details. A cancelled outcome uses the cancellation message directly.
+Once a handle has a terminal status, `Status` returns the cached status without another request. Store `handle.ID()` and use `client.StatementHandle(id)` to resume the lifecycle in another process. `Cancel` returns the statement ID, creation time, status, and server message. ScopeDB 0.6 cancellation responses include results and failure details, which the handle caches. ScopeDB 0.5 returns a shorter response; `Wait` fetches any missing result or failure details. A cancelled outcome uses the server message when available.
 
-`Statement.ID` and `Statement.ExecTimeout` are the only optional statement settings. Provide an ID when the application needs to choose the statement ID; otherwise ScopeDB generates one. `StatementHandle.ID()` always returns the ID confirmed by ScopeDB:
+`Statement.MaxElapsed` limits elapsed time including queueing, and `MaxEstimated` limits estimated execution duration. Both use `time.Duration`; zero uses the server default. `ExecTimeout` remains supported but is deprecated and cannot be combined with `MaxElapsed`. Provide an ID when the application needs to choose the statement ID; otherwise ScopeDB generates one. `StatementHandle.ID()` always returns the ID confirmed by ScopeDB:
 
 ```go
 statement := client.Statement("FROM events")
 statementID := uuid.New()
 statement.ID = &statementID // Optional.
-statement.ExecTimeout = "30s"
+statement.MaxElapsed = 30 * time.Second
 handle, err := statement.Submit(ctx)
 if err != nil {
 	return err
@@ -103,7 +103,7 @@ if err != nil {
 fmt.Println("statement ID:", handle.ID())
 ```
 
-When `Wait` or `Execute` returns a `*scopedb.Error` with kind `ErrorKindStatementFailed`, `StatementDetails` preserves the server's structured error code, message, and code-specific JSON details. The outer error message remains the server's top-level statement message:
+When `Wait` or `Execute` returns a `*scopedb.Error` with kind `ErrorKindStatementFailed`, `StatementDetails` preserves the server's structured error code, message, and code-specific JSON details. `Error.Message` uses the structured message when available, falling back to the legacy top-level message. `Error.Code` preserves the server code; codes may differ between server versions and unknown values are retained:
 
 ```go
 var scopeErr *scopedb.Error
@@ -113,6 +113,20 @@ if errors.As(err, &scopeErr) && scopeErr.StatementDetails != nil {
 	fmt.Println("details:", string(scopeErr.StatementDetails.Details))
 }
 ```
+
+The SDK supports ScopeDB 0.5.28 and ScopeDB 0.6 deployments with the legacy HTTP adapters. Catalog reads and table appends use the legacy routes; statement responses accept both protocols.
+
+## Upgrade to ScopeDB 0.6
+
+The SDK transition uses two releases:
+
+1. Deploy this compatibility release while the server is on ScopeDB 0.5.28. Keep using the existing catalog, statement, and write APIs.
+2. Upgrade the server to ScopeDB 0.6 with the legacy HTTP adapters. The same SDK continues to work through the upgrade.
+3. Adopt the subsequent SDK feature release to use ScopeDB 0.6 APIs such as the declarative catalog. Those APIs are outside this compatibility release.
+
+Complete catalog pagination before switching server versions, or restart it after the upgrade; legacy cursor ordering can differ between versions.
+
+The compatibility release preserves server error codes without mapping them between versions. Use `StatementDetails.Message` or `Error.Message` for failure reasons, and account for the documented code changes when branching on server errors.
 
 ## Browse the REST catalog
 

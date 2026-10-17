@@ -105,6 +105,7 @@ func (c *Client) appendNDJSONWithTimeout(
 		))
 	}
 
+	// TODO(legacy): Switch paths when the legacy rows endpoint is retired.
 	u, err := c.resourceURL(
 		"databases",
 		database,
