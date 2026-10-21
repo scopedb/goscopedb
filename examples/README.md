@@ -4,10 +4,10 @@ Run these examples from the repository root. They use only the public SDK API.
 
 ## Query and catalog examples
 
-| Example | Shows | Run |
-| --- | --- | --- |
-| [`statement`](statement) | Run a query and read its results | `go run ./examples/statement` |
-| [`catalog`](catalog) | List databases, schemas, and tables, and inspect table metadata | `go run ./examples/catalog` |
+| Example                  | Shows                                                           | Run                           |
+| ------------------------ | --------------------------------------------------------------- | ----------------------------- |
+| [`statement`](statement) | Run a query and read its results                                | `go run ./examples/statement` |
+| [`catalog`](catalog)     | List databases, schemas, and tables, and inspect table metadata | `go run ./examples/catalog`   |
 
 The shared helper reads:
 
@@ -44,12 +44,12 @@ The write examples use these columns:
 
 Start with `append_stream` to write Go structs. The SDK encodes and batches the rows for you.
 
-| Example | Choose it when | Run |
-| --- | --- | --- |
-| [`append_stream`](append_stream) | Write Go structs with an append stream | `go run ./examples/append_stream` |
-| [`bulk_append`](patterns/bulk_append) | Write a large collection of rows | `go run ./examples/patterns/bulk_append` |
-| [`telemetry`](patterns/telemetry) | Write logs or events with `TrySend` and continue after write errors | `go run ./examples/patterns/telemetry` |
-| [`append_ndjson`](append_ndjson) | Write data that is already encoded as NDJSON | `go run ./examples/append_ndjson` |
+| Example                               | Choose it when                                                      | Run                                      |
+| ------------------------------------- | ------------------------------------------------------------------- | ---------------------------------------- |
+| [`append_stream`](append_stream)      | Write Go structs with an append stream                              | `go run ./examples/append_stream`        |
+| [`bulk_append`](patterns/bulk_append) | Write a large collection of rows                                    | `go run ./examples/patterns/bulk_append` |
+| [`telemetry`](patterns/telemetry)     | Write logs or events with `TrySend` and continue after write errors | `go run ./examples/patterns/telemetry`   |
+| [`append_ndjson`](append_ndjson)      | Write data that is already encoded as NDJSON                        | `go run ./examples/append_ndjson`        |
 
 ## Using an append stream
 
