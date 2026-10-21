@@ -29,7 +29,7 @@ defer client.Close()
 
 `NewClient` validates the endpoint and returns an error for invalid configuration. Set `Config.HTTPClient` when the application needs to own HTTP timeouts, proxies, TLS, or connection pooling. `Client.Close` closes idle connections only for the HTTP client created by the SDK; it never closes a caller-provided client.
 
-Every table append and transform-ingest HTTP request has a client timeout of 30 seconds by default. Its budget starts after local encoding, compression, and request preparation and covers one HTTP attempt through reading the complete response body. Set `Config.WriteTimeout` to a positive `time.Duration` to change it; zero uses the default. Streams inherit this timeout unless `AttemptTimeout` is explicitly set. A shorter caller context deadline or HTTP-client timeout still applies. Admission, retry backoff, and an entire `Flush`/`Shutdown` barrier are outside this budget.
+Every table append HTTP request has a client timeout of 30 seconds by default. Its budget starts after local encoding, compression, and request preparation and covers one HTTP attempt through reading the complete response body. Set `Config.WriteTimeout` to a positive `time.Duration` to change it; zero uses the default. Streams inherit this timeout unless `AttemptTimeout` is explicitly set. A shorter caller context deadline or HTTP-client timeout still applies. Admission, retry backoff, and an entire `Flush`/`Shutdown` barrier are outside this budget.
 
 Client timeouts after an HTTP attempt begins preserve the existing `*scopedb.Error` kind and cause and add `WriteDetails` with `Reason: scopedb.WriteErrorReasonTimeout` and `Outcome: scopedb.AppendStateUnknown`; `Error.Retryable` is false. In-flight caller cancellation uses `WriteErrorReasonCancelled`; cancellation before sending preserves the original context error. These fields remain available on subsequent errors returned by the stream. A timeout does not roll back a write: reconcile a client-interrupted write before replaying it. A server HTTP 408 is still a server response; an explicitly rejected append follows the existing safe retry policy. Append streams retain their existing at-least-once retry policy for other transient unknown outcomes; those retries may duplicate committed rows.
 
@@ -255,9 +255,18 @@ One request supports up to 8 MiB of uncompressed NDJSON and 200,000 rows.
 
 See the examples for [streaming writes](examples/append_stream), [file imports](examples/patterns/bulk_append), [telemetry](examples/patterns/telemetry), and [NDJSON](examples/append_ndjson).
 
-## Advanced: transform before writing
+## Migrate from IngestStream
 
-Use `Client.IngestStream` only when source JSON specifically needs a server-side ScopeQL transformation before it can match the destination table. For normal typed events, shape the row in the producer and use `Table.AppendStream`. See the guarded [`ingest_transform`](examples/ingest_transform) example for the advanced path.
+`Client.IngestStream`, `IngestStream`, `IngestStreamOptions`, and `IngestResult` have been removed. Select the destination with `client.Table(name)` and use `Table.AppendStream` for Go values or `Table.AppendNDJSON` for an existing NDJSON payload. Append requires ScopeDB 0.5.6 or later.
+
+Append accepts rows matching the destination columns, not a ScopeQL statement. Move field renaming, type conversion, filtering, and routing into the producer before calling `Send`. The [`append_transform`](examples/append_transform) example maps a source `ts` field to `occurred_at`. For transformations that must run in ScopeQL, append the original event into an `object` column in a staging table, then execute a separate `FROM ... SELECT ... INSERT INTO ...` statement. Staging and transformation are separate commits; track processed batches before retrying the transformation.
+
+Review these behavior changes when migrating:
+
+- Append batches allow up to 8 MiB of uncompressed NDJSON and 200,000 rows. Reduce an old ingest batch-byte target above 8 MiB.
+- `Flush` and `Shutdown` return an `AppendDeliveryReport` for activity since the previous report. Read `CommittedRows` instead of `IngestResult.NumRowsInserted`, and check `Outcome` when using the continue policy.
+- Append streams send up to four batches concurrently by default. Set `MaxConcurrentBatches: 1` when the producer needs sequential requests; queries still require `ORDER BY` for ordered results.
+- Append streams may retry transient unknown outcomes, which can duplicate rows. To preserve the old stream's no-replay behavior, set `Retry: &scopedb.AppendRetryOptions{MaxRetries: 0}`. Client timeouts and cancellations are never retried. Direct `AppendNDJSON` makes one attempt.
 
 ## Structured errors
 

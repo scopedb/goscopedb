@@ -29,8 +29,6 @@ import (
 	"github.com/google/uuid"
 )
 
-const ingestCommitOutcomeUnknownMessage = "ingest commit outcome is unknown; the request may have committed, so replay is not known to be safe"
-
 // ErrorKind identifies the operation-level category of a ScopeDB error.
 type ErrorKind string
 
@@ -428,71 +426,6 @@ func checkStatementCancelResponse(resp *http.Response) (*statementCancelResponse
 		)
 	}
 	return &stmtResp, nil
-}
-
-func checkIngestResponse(ctx context.Context, resp *http.Response) (*ingestResponse, error) {
-	data, err := io.ReadAll(resp.Body)
-	if err != nil {
-		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-			return nil, unknownIngestCommitOutcomeError(resp, err).withWriteContext(ctx)
-		}
-		readErr := responseMetadataError(
-			resp,
-			ErrorKindUnexpected,
-			"failed to read ingest response",
-			err,
-		)
-		readErr.Retryable = false
-		readErr.WriteDetails = writeErrorDetails(err)
-		return nil, readErr.withWriteContext(ctx)
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		httpErr := responseError(resp, data, ErrorKindUnexpected)
-		httpErr.Retryable = false
-		return nil, httpErr
-	}
-
-	var wireResponse *struct {
-		NumRowsInserted *int `json:"num_rows_inserted"`
-	}
-	if err := json.Unmarshal(data, &wireResponse); err != nil {
-		return nil, unknownIngestCommitOutcomeError(resp, err)
-	}
-	if wireResponse == nil {
-		return nil, unknownIngestCommitOutcomeError(
-			resp,
-			fmt.Errorf("ingest response body is null"),
-		)
-	}
-	if wireResponse.NumRowsInserted == nil {
-		return nil, unknownIngestCommitOutcomeError(
-			resp,
-			fmt.Errorf("ingest response is missing num_rows_inserted"),
-		)
-	}
-	if *wireResponse.NumRowsInserted < 0 {
-		return nil, unknownIngestCommitOutcomeError(
-			resp,
-			fmt.Errorf("ingest response reported negative num_rows_inserted"),
-		)
-	}
-	return &ingestResponse{NumRowsInserted: *wireResponse.NumRowsInserted}, nil
-}
-
-func unknownIngestCommitOutcomeError(resp *http.Response, cause error) *Error {
-	var err *Error
-	if resp == nil {
-		err = newError(
-			ErrorKindUnexpected,
-			ingestCommitOutcomeUnknownMessage,
-			cause,
-		)
-	} else {
-		err = responseMetadataError(resp, ErrorKindUnexpected, ingestCommitOutcomeUnknownMessage, cause)
-	}
-	err.Retryable = false
-	err.WriteDetails = writeErrorDetails(cause)
-	return err
 }
 
 // sneakyBodyClose closes the body and ignores the error.

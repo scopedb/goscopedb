@@ -62,12 +62,6 @@ rows in the delivery report and failure details in Stats().LastFailure.
 Stream Send methods confirm local admission only. Flush and Shutdown wait for
 the accepted prefix. AppendStream reports rejected and unknown outcomes.
 
-Client.IngestStream is an advanced path for source JSON that specifically needs
-a server-side ScopeQL transformation before it matches the destination table.
-An IngestStream error can follow a remote commit, so callers must reconcile
-before replaying the same records. A nonzero ingest result returned with an
-error covers only earlier confirmed batches, not a safe replay offset.
-
 ScopeQL is documented separately in the [quickstart], [query guide], and
 [language reference].
 

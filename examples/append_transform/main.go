@@ -14,9 +14,7 @@
  * limitations under the License.
  */
 
-// Package main demonstrates the advanced IngestStream path for source JSON
-// that needs a server-side ScopeQL transformation before it matches a table.
-// Most applications should use Table.AppendStream.
+// Package main demonstrates shaping source events before appending them.
 package main
 
 import (
@@ -46,20 +44,9 @@ func run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	statement := fmt.Sprintf(`
-		SELECT
-			$0["id"]::int,
-			$0["event_id"]::string,
-			$0["ts"]::timestamp,
-			$0["name"]::string,
-			$0["attributes"]::object
-		INSERT INTO %s (id, event_id, occurred_at, name, attributes)
-	`, table.Identifier())
-	stream, err := client.IngestStream(statement, scopedb.IngestStreamOptions{
-		TargetBatchBytes: 4 * 1024 * 1024,
-		MaxBatchRows:     10_000,
-		FlushInterval:    time.Second,
-		MaxBufferedBytes: 32 * 1024 * 1024,
+	stream, err := table.AppendStream(scopedb.AppendStreamOptions{
+		MaxConcurrentBatches: 1,
+		Retry:                &scopedb.AppendRetryOptions{MaxRetries: 0},
 	})
 	if err != nil {
 		return err
@@ -67,12 +54,19 @@ func run(ctx context.Context) error {
 
 	now := time.Now().UTC()
 	for id := 1; id <= 2; id++ {
-		row := map[string]any{
+		source := map[string]any{
 			"id":         id,
 			"event_id":   fmt.Sprintf("go-transform-%d-%d", now.UnixNano(), id),
 			"ts":         now.Format(time.RFC3339Nano),
 			"name":       "example.transform",
 			"attributes": map[string]any{"source": "go"},
+		}
+		row := map[string]any{
+			"id":          source["id"],
+			"event_id":    source["event_id"],
+			"occurred_at": source["ts"],
+			"name":        source["name"],
+			"attributes":  source["attributes"],
 		}
 		// Send confirms local admission only; Shutdown is the commit barrier.
 		if err := stream.Send(ctx, row); err != nil {
@@ -85,6 +79,6 @@ func run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("inserted %d transformed rows into %s\n", result.NumRowsInserted, table.Identifier())
+	fmt.Printf("inserted %d transformed rows into %s\n", result.CommittedRows, table.Identifier())
 	return nil
 }

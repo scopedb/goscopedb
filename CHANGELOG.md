@@ -4,9 +4,17 @@ All significant changes to this project will be documented in this file.
 
 ## Unreleased
 
+### Breaking Changes
+
+- Removed `Client.IngestStream`, `IngestStream`, `IngestStreamOptions`, and `IngestResult`.
+  Use `Table.AppendStream` or `Table.AppendNDJSON`, shaping rows in the producer
+  or appending raw events for a separate ScopeQL transformation. See the
+  [migration guide](README.md#migrate-from-ingeststream) for batch limits,
+  delivery reports, concurrency, and retry differences.
+
 ### Changed
 
-- Table append and transform-ingest requests now have a configurable
+- Table append requests now have a configurable
   `Config.WriteTimeout`, defaulting to 30 seconds including response-body reads.
   Streams inherit it unless `AttemptTimeout` is explicitly set. Timeout outcomes
   remain unknown and are never automatically retried.
