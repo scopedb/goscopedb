@@ -18,9 +18,9 @@ The shared helper reads:
 
 ScopeQL is documented in the [quickstart], [query guide], and [language reference].
 
-[quickstart]: https://docs.scopedb.io/guides/quickstart
-[query guide]: https://docs.scopedb.io/guides/query-events
-[language reference]: https://docs.scopedb.io/reference/
+[quickstart]: https://www.scopedb.io/docs/guides/quickstart
+[query guide]: https://www.scopedb.io/docs/guides/query-events
+[language reference]: https://www.scopedb.io/docs/reference
 
 ## Before running a write example
 

@@ -1,31 +1,81 @@
 # ScopeDB SDK for Go
 
-[![Apache License, Version 2.0](https://img.shields.io/:license-Apache%202-brightgreen.svg)](https://www.apache.org/licenses/LICENSE-2.0.txt) [![Go Reference](https://pkg.go.dev/badge/github.com/scopedb/goscopedb.svg)](https://pkg.go.dev/github.com/scopedb/goscopedb)
+[![Version](https://img.shields.io/github/v/tag/scopedb/goscopedb?filter=v*&sort=semver)](https://pkg.go.dev/github.com/scopedb/goscopedb) [![Docs](https://img.shields.io/badge/docs-scopedb.io-blue)](https://www.scopedb.io/docs/developer/go) [![CI](https://img.shields.io/github/actions/workflow/status/scopedb/goscopedb/ci.yml?branch=main&label=CI)](https://github.com/scopedb/goscopedb/actions/workflows/ci.yml) [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](https://www.apache.org/licenses/LICENSE-2.0)
 
-The ScopeDB Go SDK supports ScopeQL statements, REST catalog discovery, and bounded asynchronous streaming writes. For application writes, start with `Table.AppendStream`.
+The official Go client for [ScopeDB](https://www.scopedb.io). Run ScopeQL queries, browse the catalog, and write rows with bounded asynchronous streams. For application writes, start with `Table.AppendStream`.
 
-## Runtime and installation
+## Runtime support
 
-The SDK requires Go 1.24 or later.
+Requires Go 1.24 or later. Use the SDK in a trusted server-side process and keep API keys out of source control.
+
+## Installation
+
+From your application module:
 
 ```sh
 go get github.com/scopedb/goscopedb@latest
 ```
 
-## Create a client
+## Quickstart
 
-Pass the ScopeDB endpoint and API key through application configuration. Keep API keys out of source control.
+Set `SCOPEDB_ENDPOINT` and `SCOPEDB_API_KEY` using the [connection guide](https://www.scopedb.io/docs/guides/connect-to-scopedb). Save this program as `main.go` and run `go run .`:
 
 ```go
-client, err := scopedb.NewClient(scopedb.Config{
-	Endpoint: os.Getenv("SCOPEDB_ENDPOINT"),
-	APIKey:   os.Getenv("SCOPEDB_API_KEY"),
-})
-if err != nil {
-	return err
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"os"
+
+	scopedb "github.com/scopedb/goscopedb"
+)
+
+func main() {
+	if err := run(); err != nil {
+		log.Fatal(err)
+	}
 }
-defer client.Close()
+
+func run() error {
+	client, err := scopedb.NewClient(scopedb.Config{
+		Endpoint: os.Getenv("SCOPEDB_ENDPOINT"),
+		APIKey:   os.Getenv("SCOPEDB_API_KEY"),
+	})
+	if err != nil {
+		return err
+	}
+	defer client.Close()
+
+	result, err := client.Query(context.Background(), "SELECT 1 AS ready")
+	if err != nil {
+		return err
+	}
+	rows, err := result.ToObjects()
+	if err != nil {
+		return err
+	}
+	fmt.Println(rows)
+	return nil
+}
 ```
+
+## Documentation
+
+- [SDK guide](https://www.scopedb.io/docs/developer/go)
+- [API reference](https://pkg.go.dev/github.com/scopedb/goscopedb)
+- [Examples](examples/README.md)
+- [Changelog](CHANGELOG.md)
+- [Report an issue](https://github.com/scopedb/goscopedb/issues)
+
+The SDK executes ScopeQL but does not define the language. Start with the language documentation:
+
+- [Quickstart](https://www.scopedb.io/docs/guides/quickstart)
+- [Query guide](https://www.scopedb.io/docs/guides/query-events)
+- [Language reference](https://www.scopedb.io/docs/reference)
+
+## Client configuration
 
 `NewClient` validates the endpoint and returns an error for invalid configuration. Set `Config.HTTPClient` when the application needs to own HTTP timeouts, proxies, TLS, or connection pooling. `Client.Close` closes idle connections only for the HTTP client created by the SDK; it never closes a caller-provided client.
 
@@ -34,14 +84,6 @@ Every table append and transform-ingest HTTP request has a client timeout of 30 
 Client timeouts after an HTTP attempt begins preserve the existing `*scopedb.Error` kind and cause and add `WriteDetails` with `Reason: scopedb.WriteErrorReasonTimeout` and `Outcome: scopedb.AppendStateUnknown`; `Error.Retryable` is false. In-flight caller cancellation uses `WriteErrorReasonCancelled`; cancellation before sending preserves the original context error. These fields remain available on subsequent errors returned by the stream. A timeout does not roll back a write: reconcile a client-interrupted write before replaying it. A server HTTP 408 is still a server response; an explicitly rejected append follows the existing safe retry policy. Append streams retain their existing at-least-once retry policy for other transient unknown outcomes; those retries may duplicate committed rows.
 
 Request bodies, including direct `AppendNDJSON` requests and `AppendStream` batches, use zstd compression by default. Set `Config.Compression` to `CompressionGzip` when gzip is required. Append limits are based on the uncompressed NDJSON body.
-
-## ScopeQL documentation
-
-The SDK executes ScopeQL but does not define the language. Start with the language documentation:
-
-- [Quickstart](https://docs.scopedb.io/guides/quickstart)
-- [Query guide](https://docs.scopedb.io/guides/query-events)
-- [Language reference](https://docs.scopedb.io/reference/)
 
 ## Query and results
 
@@ -278,9 +320,13 @@ if errors.As(err, &scopeErr) {
 
 The main kinds are `ErrorKindConfigInvalid`, `ErrorKindStatementFailed`, `ErrorKindAppendRowsFailed`, and `ErrorKindUnexpected`. Use `errors.Is` and `errors.As` to inspect the underlying cause.
 
-## Examples and development
+## Examples
 
-The [examples guide](examples/README.md) contains query and write examples with runnable commands. Development tasks are defined in [mise.toml](mise.toml); license tasks expect `hawkeye` on `PATH`.
+The [examples guide](examples/README.md) contains query and write examples with runnable commands.
+
+## Development
+
+Development tasks are defined in [mise.toml](mise.toml); license tasks expect `hawkeye` on `PATH`.
 
 ```sh
 mise install
@@ -289,8 +335,8 @@ mise run build
 mise run test
 ```
 
-Release notes and the maintainer runbook are in [CHANGELOG.md](CHANGELOG.md) and [RELEASE.md](RELEASE.md).
+Release history and the maintainer runbook are in [CHANGELOG.md](CHANGELOG.md) and [RELEASE.md](RELEASE.md).
 
 ## License
 
-This software is licensed under the [Apache License, Version 2.0](https://www.apache.org/licenses/LICENSE-2.0.txt).
+Licensed under the [Apache License, Version 2.0](https://www.apache.org/licenses/LICENSE-2.0).
