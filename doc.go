@@ -15,8 +15,8 @@
  */
 
 /*
-Package scopedb provides a Go client for ScopeQL statements, REST catalog
-discovery, and streaming writes.
+Package scopedb provides the official Go client for ScopeDB. It supports
+ScopeQL statements, REST catalog discovery, and streaming writes.
 
 Create and close one Client for the application's connection pool:
 
@@ -71,8 +71,8 @@ error covers only earlier confirmed batches, not a safe replay offset.
 ScopeQL is documented separately in the [quickstart], [query guide], and
 [language reference].
 
-[quickstart]: https://docs.scopedb.io/guides/quickstart
-[query guide]: https://docs.scopedb.io/guides/query-events
-[language reference]: https://docs.scopedb.io/reference/
+[quickstart]: https://www.scopedb.io/docs/guides/quickstart
+[query guide]: https://www.scopedb.io/docs/guides/query-events
+[language reference]: https://www.scopedb.io/docs/reference
 */
 package scopedb

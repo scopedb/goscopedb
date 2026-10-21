@@ -2,6 +2,12 @@
 
 The Go module lives at the repository root, so release tags use the `vX.Y.Z` form. The examples below use `v0.6.3`. Tags with the legacy `go/vX.Y.Z` form were retained only to preserve release history from the former monorepo.
 
+## Changelog format
+
+Use `# Changelog` with a short introduction, an `## Unreleased` section, and `## vX.Y.Z (YYYY-MM-DD)` release headings. Preserve published version numbers and dates. Use `*` bullets with one coherent, user-observable change per source line. Order nonempty sections as `Breaking Changes`, `New Features`, `Bug Fixes`, and `Improvements`.
+
+Compare each entry with the latest released version. Explain the impact and migration path for breaking changes, and describe deprecations alongside their replacements. Include documentation or metadata changes when they affect users; omit internal tests, refactors, and CI maintenance. GitHub release notes should use the matching changelog entry.
+
 ## Prepare and verify
 
 From the repository root:
