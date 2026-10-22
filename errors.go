@@ -29,8 +29,6 @@ import (
 	"github.com/google/uuid"
 )
 
-const ingestCommitOutcomeUnknownMessage = "ingest commit outcome is unknown; the request may have committed, so replay is not known to be safe"
-
 // ErrorKind identifies the operation-level category of a ScopeDB error.
 type ErrorKind string
 
@@ -41,6 +39,8 @@ const (
 	ErrorKindConfigInvalid ErrorKind = "ConfigInvalid"
 	// ErrorKindStatementFailed indicates a failed or cancelled statement.
 	ErrorKindStatementFailed ErrorKind = "StatementFailed"
+	// ErrorKindCatalogFailed indicates a catalog request failure or unknown commit outcome.
+	ErrorKindCatalogFailed ErrorKind = "CatalogFailed"
 	// ErrorKindAppendRowsFailed indicates a rejected append or an unknown commit outcome.
 	ErrorKindAppendRowsFailed ErrorKind = "AppendRowsFailed"
 )
@@ -64,7 +64,11 @@ type WriteErrorDetails struct {
 
 // Error represents a ScopeDB client or API error.
 type Error struct {
-	Kind          ErrorKind
+	// Details preserves code-specific HTTP error information from the server.
+	Details json.RawMessage
+	Kind    ErrorKind
+	// Code is the server error code, when provided. Unknown codes are retained.
+	Code          string
 	Message       string
 	HTTPStatus    int
 	RequestID     string
@@ -81,7 +85,7 @@ type Error struct {
 	cause error
 }
 
-// Error returns the server message unchanged when the error came from ScopeDB.
+// Error returns the human-readable error message.
 func (e *Error) Error() string {
 	return e.Message
 }
@@ -118,13 +122,12 @@ func (e *Error) withWriteContext(ctx context.Context) *Error {
 }
 
 type apiErrorPayload struct {
-	Message            string           `json:"message"`
-	RequestID          string           `json:"request_id"`
-	Retryable          *bool            `json:"retryable"`
-	AppendState        AppendState      `json:"append_state"`
-	RowErrors          []AppendRowError `json:"row_errors"`
-	RowErrorsTruncated bool             `json:"row_errors_truncated"`
-	Nested             *apiErrorPayload `json:"error"`
+	Code      string           `json:"code"`
+	Message   string           `json:"message"`
+	Details   json.RawMessage  `json:"details"`
+	RequestID string           `json:"request_id"`
+	Retryable *bool            `json:"retryable"`
+	Nested    *apiErrorPayload `json:"error"`
 }
 
 func responseError(resp *http.Response, body []byte, kind ErrorKind) *Error {
@@ -162,22 +165,21 @@ func responseError(resp *http.Response, body []byte, kind ErrorKind) *Error {
 			resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500,
 	}
 	if parsed {
+		err.Code = payload.Code
 		if payload.RequestID != "" {
 			err.RequestID = payload.RequestID
 		}
 		if payload.Retryable != nil {
 			err.Retryable = *payload.Retryable
 		}
-		if payload.AppendState == AppendStateRejected || payload.AppendState == AppendStateUnknown {
-			rowErrors := payload.RowErrors
-			if rowErrors == nil {
-				rowErrors = []AppendRowError{}
+		err.Details = payload.Details
+		var details AppendErrorDetails
+		if json.Unmarshal(payload.Details, &details) == nil &&
+			(details.AppendState == AppendStateRejected || details.AppendState == AppendStateUnknown) {
+			if details.RowErrors == nil {
+				details.RowErrors = []AppendRowError{}
 			}
-			err.AppendDetails = &AppendErrorDetails{
-				AppendState:        payload.AppendState,
-				RowErrors:          rowErrors,
-				RowErrorsTruncated: payload.RowErrorsTruncated,
-			}
+			err.AppendDetails = &details
 		}
 	}
 	return err
@@ -272,69 +274,20 @@ func validateStatementResponse(resp *statementResponse) error {
 		return nil
 	case StatementStatusFailed:
 		if resp.Error == nil {
-			// Older servers returned only the top-level message.
-			return nil
+			return fmt.Errorf("failed statement has no error")
 		}
-		return validateStatementError(resp.Error)
+		if resp.Error.Code == "" {
+			return fmt.Errorf("failed statement error has no code")
+		}
+		if resp.Error.Message == "" {
+			return fmt.Errorf("failed statement error has no message")
+		}
+		return nil
 	case StatementStatusFinished:
 		return validateFinishedResult(resp.ResultSet)
 	default:
 		return fmt.Errorf("unknown status %q", resp.Status)
 	}
-}
-
-func validateStatementError(statementError *StatementErrorDetails) error {
-	if statementError.Code == "" {
-		return fmt.Errorf("failed statement error has no code")
-	}
-	if statementError.Message == "" {
-		return fmt.Errorf("failed statement error has no message")
-	}
-
-	switch statementError.Code {
-	case StatementErrorCodeRowLimitExceeded:
-		return validateStatementLimitDetails(
-			statementError.Details,
-			"total_rows",
-			"max_total_rows",
-		)
-	case StatementErrorCodeScanLimitExceeded:
-		return validateStatementLimitDetails(
-			statementError.Details,
-			"scanned_uncompressed_bytes",
-			"max_scanned_uncompressed_bytes",
-		)
-	case StatementErrorCodePrepareError,
-		StatementErrorCodeExecuteError,
-		StatementErrorCodePendingTimeout,
-		StatementErrorCodeExecutionTimeout,
-		StatementErrorCodeHeartbeatLost:
-		return nil
-	default:
-		return nil
-	}
-}
-
-func validateStatementLimitDetails(details json.RawMessage, fields ...string) error {
-	if len(details) == 0 {
-		return fmt.Errorf("failed statement error has no details")
-	}
-
-	var object map[string]json.RawMessage
-	if err := json.Unmarshal(details, &object); err != nil || object == nil {
-		return fmt.Errorf("failed statement error details must be an object")
-	}
-	for _, field := range fields {
-		raw, ok := object[field]
-		if !ok {
-			return fmt.Errorf("failed statement error details has no %s", field)
-		}
-		var value *uint64
-		if err := json.Unmarshal(raw, &value); err != nil || value == nil {
-			return fmt.Errorf("failed statement error detail %s must be an unsigned integer", field)
-		}
-	}
-	return nil
 }
 
 func validateFinishedResult(result *resultSet) error {
@@ -364,135 +317,6 @@ func validateFinishedResult(result *resultSet) error {
 	}
 
 	return nil
-}
-
-func checkStatementCancelResponse(resp *http.Response) (*statementCancelResponse, error) {
-	data, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, responseMetadataError(
-			resp,
-			ErrorKindUnexpected,
-			"failed to read statement cancel response",
-			err,
-		)
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, responseError(resp, data, ErrorKindUnexpected)
-	}
-
-	var stmtResp statementCancelResponse
-	if err := json.Unmarshal(data, &stmtResp); err != nil {
-		return nil, responseMetadataError(
-			resp,
-			ErrorKindUnexpected,
-			"failed to decode statement cancel response",
-			err,
-		)
-	}
-	if stmtResp.Status == "" {
-		return nil, responseMetadataError(
-			resp,
-			ErrorKindUnexpected,
-			"statement cancel response is missing status",
-			nil,
-		)
-	}
-	if stmtResp.StatementID == uuid.Nil {
-		return nil, responseMetadataError(
-			resp,
-			ErrorKindUnexpected,
-			"statement cancel response is missing statement_id",
-			nil,
-		)
-	}
-	if stmtResp.CreatedAt.IsZero() {
-		return nil, responseMetadataError(
-			resp,
-			ErrorKindUnexpected,
-			"statement cancel response is missing created_at",
-			nil,
-		)
-	}
-	switch stmtResp.Status {
-	case StatementStatusPending,
-		StatementStatusRunning,
-		StatementStatusFinished,
-		StatementStatusFailed,
-		StatementStatusCancelled:
-	default:
-		return nil, responseMetadataError(
-			resp,
-			ErrorKindUnexpected,
-			fmt.Sprintf("statement cancel response has unknown status %q", stmtResp.Status),
-			nil,
-		)
-	}
-	return &stmtResp, nil
-}
-
-func checkIngestResponse(ctx context.Context, resp *http.Response) (*ingestResponse, error) {
-	data, err := io.ReadAll(resp.Body)
-	if err != nil {
-		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-			return nil, unknownIngestCommitOutcomeError(resp, err).withWriteContext(ctx)
-		}
-		readErr := responseMetadataError(
-			resp,
-			ErrorKindUnexpected,
-			"failed to read ingest response",
-			err,
-		)
-		readErr.Retryable = false
-		readErr.WriteDetails = writeErrorDetails(err)
-		return nil, readErr.withWriteContext(ctx)
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		httpErr := responseError(resp, data, ErrorKindUnexpected)
-		httpErr.Retryable = false
-		return nil, httpErr
-	}
-
-	var wireResponse *struct {
-		NumRowsInserted *int `json:"num_rows_inserted"`
-	}
-	if err := json.Unmarshal(data, &wireResponse); err != nil {
-		return nil, unknownIngestCommitOutcomeError(resp, err)
-	}
-	if wireResponse == nil {
-		return nil, unknownIngestCommitOutcomeError(
-			resp,
-			fmt.Errorf("ingest response body is null"),
-		)
-	}
-	if wireResponse.NumRowsInserted == nil {
-		return nil, unknownIngestCommitOutcomeError(
-			resp,
-			fmt.Errorf("ingest response is missing num_rows_inserted"),
-		)
-	}
-	if *wireResponse.NumRowsInserted < 0 {
-		return nil, unknownIngestCommitOutcomeError(
-			resp,
-			fmt.Errorf("ingest response reported negative num_rows_inserted"),
-		)
-	}
-	return &ingestResponse{NumRowsInserted: *wireResponse.NumRowsInserted}, nil
-}
-
-func unknownIngestCommitOutcomeError(resp *http.Response, cause error) *Error {
-	var err *Error
-	if resp == nil {
-		err = newError(
-			ErrorKindUnexpected,
-			ingestCommitOutcomeUnknownMessage,
-			cause,
-		)
-	} else {
-		err = responseMetadataError(resp, ErrorKindUnexpected, ingestCommitOutcomeUnknownMessage, cause)
-	}
-	err.Retryable = false
-	err.WriteDetails = writeErrorDetails(cause)
-	return err
 }
 
 // sneakyBodyClose closes the body and ignores the error.

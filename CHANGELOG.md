@@ -4,9 +4,16 @@ All significant changes to the ScopeDB Go SDK are documented in this file.
 
 ## Unreleased
 
+### Breaking Changes
+
+* Require ScopeDB 0.6.0 and use native Statement, declarative Catalog, and table ingest APIs. Replace paginated Catalog APIs and the legacy execution timeout option; cancellation retains complete terminal responses.
+* Removed the legacy transform Ingest stream API. Use table append APIs and transform rows in the producer; see the [migration guide](README.md#migrate-from-ingest).
+
 ### New Features
 
-* Table append and transform-ingest requests now have a configurable `Config.WriteTimeout`, defaulting to 30 seconds including response-body reads. Streams inherit it unless `AttemptTimeout` is explicitly set. Timeout outcomes remain unknown and are never automatically retried. The write timeout starts after local encoding, compression, and request preparation. Client interruptions expose `Error.WriteDetails` with a `timeout` or `cancelled` reason and an `unknown` outcome while preserving existing kinds, causes, and HTTP diagnostics.
+* Add complete Catalog replacements and deletion with dry-run, ETags, conditional updates, views, computed columns, and explicit destructive-change authorization. Preserve structured error codes/details and statement compute seconds.
+
+* Table append requests now have a configurable `Config.WriteTimeout`, defaulting to 30 seconds including response-body reads. Streams inherit it unless `AttemptTimeout` is explicitly set. Timeout outcomes remain unknown and are never automatically retried. The write timeout starts after local encoding, compression, and request preparation. Client interruptions expose `Error.WriteDetails` with a `timeout` or `cancelled` reason and an `unknown` outcome while preserving existing kinds, causes, and HTTP diagnostics.
 
 ### Improvements
 

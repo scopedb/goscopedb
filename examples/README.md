@@ -63,13 +63,15 @@ The telemetry example uses `TrySend` to add rows without waiting for queue space
 
 See the [streaming writes guide](../README.md#streaming-writes) for code snippets and report fields.
 
-## Advanced: server-side transformation
+## Shape source events before appending
 
-Use [`ingest_transform`](ingest_transform) only when source JSON specifically needs a ScopeQL transformation before it can match the destination table. For normal typed events, use `Table.AppendStream`.
+Use [`append_transform`](append_transform) to map source fields to the destination columns before calling `AppendStream.Send`. It uses sequential batches and disables automatic retries so an ambiguous write can be reconciled by the application.
 
 ```sh
-go run ./examples/ingest_transform
+go run ./examples/append_transform
 ```
+
+See the [migration guide](../README.md#migrate-from-ingeststream) for server-side transformations and delivery differences.
 
 ## Compile every example
 

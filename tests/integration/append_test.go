@@ -35,15 +35,18 @@ func TestTableAppendLifecycle(t *testing.T) {
 	defer cancel()
 
 	table := client.Table(RandomName(t))
-	_, err := client.Statement(fmt.Sprintf(`
-		CREATE TABLE %s (
-			id int,
-			source string,
-		)
-	`, table.Identifier())).Execute(ctx)
+	definition := &scopedb.CatalogTable{
+		Name: table.Name,
+		Columns: []scopedb.CatalogColumn{
+			{Name: "id", DataType: scopedb.IntDataType},
+			{Name: "source", DataType: scopedb.StringDataType},
+		},
+	}
+	_, err := table.Apply(ctx, definition)
 	require.NoError(t, err)
 	defer func() {
-		require.NoError(t, table.Drop(context.Background()))
+		_, err := client.Statement(fmt.Sprintf("DROP TABLE %s", table.Identifier())).Execute(context.Background())
+		require.NoError(t, err)
 	}()
 
 	direct, err := table.AppendNDJSON(ctx, []byte(
@@ -85,25 +88,13 @@ func TestTableAppendLifecycle(t *testing.T) {
 	require.Equal(t, uint64(streamedRows), report.AcceptedRows)
 	require.Equal(t, uint64(streamedRows), report.CommittedRows)
 
+	_, err = table.Apply(ctx, definition)
+	require.NoError(t, err)
+
 	description, err := table.Describe(ctx)
 	require.NoError(t, err)
 	require.Equal(t, table.Name, description.Name)
 	require.Len(t, description.Columns, 2)
-
-	found := false
-	for summary, iterateErr := range client.IterateTables(
-		ctx,
-		"scopedb",
-		"public",
-		scopedb.CatalogListOptions{PageSize: 1},
-	) {
-		require.NoError(t, iterateErr)
-		if summary.Name == table.Name {
-			found = true
-			break
-		}
-	}
-	require.True(t, found)
 
 	statement := client.Statement(fmt.Sprintf("FROM %s", table.Identifier()))
 	result, err := statement.Execute(ctx)

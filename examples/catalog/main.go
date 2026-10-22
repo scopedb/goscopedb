@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-// Package main demonstrates lazy REST catalog discovery.
+// Package main demonstrates declarative catalog discovery.
 package main
 
 import (
@@ -22,7 +22,6 @@ import (
 	"fmt"
 	"log"
 
-	scopedb "github.com/scopedb/goscopedb"
 	"github.com/scopedb/goscopedb/examples/internal/exampleutil"
 )
 
@@ -39,38 +38,13 @@ func run(ctx context.Context) error {
 	}
 	defer client.Close()
 
-	fmt.Println("databases:")
-	for database, err := range client.IterateDatabases(ctx, scopedb.CatalogListOptions{
-		PageSize: 100,
-	}) {
-		if err != nil {
-			return err
-		}
-		fmt.Println(" -", database.Name)
+	snapshot, err := client.Catalog().Schema(exampleutil.Database(), exampleutil.Schema()).Get(ctx)
+	if err != nil {
+		return err
 	}
-
-	fmt.Printf("tables in %s.%s:\n", exampleutil.Database(), exampleutil.Schema())
-	for summary, err := range client.IterateTables(
-		ctx,
-		exampleutil.Database(),
-		exampleutil.Schema(),
-		scopedb.CatalogListOptions{PageSize: 100},
-	) {
-		if err != nil {
-			return err
-		}
-		fmt.Println(" -", summary.Name)
-
-		table := client.Table(summary.Name)
-		table.Database = summary.Database
-		table.Schema = summary.Schema
-		description, err := table.Describe(ctx)
-		if err != nil {
-			return err
-		}
-		fmt.Printf("   first table has %d columns\n", len(description.Columns))
-		break
+	fmt.Printf("tables in %s.%s (version %s):\n", exampleutil.Database(), exampleutil.Schema(), snapshot.ETag)
+	for _, table := range snapshot.Definition.Tables {
+		fmt.Printf(" - %s (%d columns)\n", table.Name, len(table.Columns))
 	}
-
 	return nil
 }

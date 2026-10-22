@@ -4,6 +4,8 @@
 
 The official Go client for [ScopeDB](https://www.scopedb.io). Run ScopeQL queries, browse the catalog, and write rows with bounded asynchronous streams. For application writes, start with `Table.AppendStream`.
 
+This development version requires ScopeDB 0.6.0 or later and uses its native Statement, declarative Catalog, and table ingest APIs. These changes are not yet published.
+
 ## Runtime support
 
 Requires Go 1.24 or later. Use the SDK in a trusted server-side process and keep API keys out of source control.
@@ -79,7 +81,7 @@ The SDK executes ScopeQL but does not define the language. Start with the langua
 
 `NewClient` validates the endpoint and returns an error for invalid configuration. Set `Config.HTTPClient` when the application needs to own HTTP timeouts, proxies, TLS, or connection pooling. `Client.Close` closes idle connections only for the HTTP client created by the SDK; it never closes a caller-provided client.
 
-Every table append and transform-ingest HTTP request has a client timeout of 30 seconds by default. Its budget starts after local encoding, compression, and request preparation and covers one HTTP attempt through reading the complete response body. Set `Config.WriteTimeout` to a positive `time.Duration` to change it; zero uses the default. Streams inherit this timeout unless `AttemptTimeout` is explicitly set. A shorter caller context deadline or HTTP-client timeout still applies. Admission, retry backoff, and an entire `Flush`/`Shutdown` barrier are outside this budget.
+Every table append or Catalog mutation HTTP request has a client timeout of 30 seconds by default. Its budget starts after local encoding, compression, and request preparation and covers one HTTP attempt through reading the complete response body. Set `Config.WriteTimeout` to a positive `time.Duration` to change it; zero uses the default. Streams inherit this timeout unless `AttemptTimeout` is explicitly set. A shorter caller context deadline or HTTP-client timeout still applies. Admission, retry backoff, and an entire `Flush`/`Shutdown` barrier are outside this budget.
 
 Client timeouts after an HTTP attempt begins preserve the existing `*scopedb.Error` kind and cause and add `WriteDetails` with `Reason: scopedb.WriteErrorReasonTimeout` and `Outcome: scopedb.AppendStateUnknown`; `Error.Retryable` is false. In-flight caller cancellation uses `WriteErrorReasonCancelled`; cancellation before sending preserves the original context error. These fields remain available on subsequent errors returned by the stream. A timeout does not roll back a write: reconcile a client-interrupted write before replaying it. A server HTTP 408 is still a server response; an explicitly rejected append follows the existing safe retry policy. Append streams retain their existing at-least-once retry policy for other transient unknown outcomes; those retries may duplicate committed rows.
 
@@ -129,15 +131,16 @@ if err != nil {
 }
 ```
 
-Once a handle has a terminal status, `Status` returns the cached status without another request. Store `handle.ID()` and use `client.StatementHandle(id)` to resume the lifecycle in another process. `Cancel` returns the statement ID, creation time, status, and server message. If cancellation finds that a statement already finished or failed, `Wait` fetches the complete statement response needed for its result or structured failure details. A cancelled outcome uses the cancellation message directly.
+Once a handle has a terminal status, `Status` returns the cached status without another request. Store `handle.ID()` and use `client.StatementHandle(id)` to resume the lifecycle in another process. `Cancel` returns a `StatementStatus` and caches the complete response, just like `Status`. Read progress through `Progress`, finished rows through `ResultSet` or `Wait`, and failure details through `Wait`. A terminal response from `Cancel` needs no further request. `Wait` reports a cancelled outcome with the statement ID and a client-generated message.
 
-`Statement.ID` and `Statement.ExecTimeout` are the only optional statement settings. Provide an ID when the application needs to choose the statement ID; otherwise ScopeDB generates one. `StatementHandle.ID()` always returns the ID confirmed by ScopeDB:
+`Statement.ID` chooses the statement ID; otherwise ScopeDB generates one. `StatementHandle.ID()` returns the ID confirmed by ScopeDB. `MaxElapsed` limits server-side elapsed time, including queueing, and `MaxEstimated` limits the estimated execution duration. Both use `time.Duration`; zero omits the setting. The server defaults to one hour for elapsed time and no estimate limit. A context deadline limits local waiting independently:
 
 ```go
 statement := client.Statement("FROM events")
 statementID := uuid.New()
 statement.ID = &statementID // Optional.
-statement.ExecTimeout = "30s"
+statement.MaxElapsed = 30 * time.Second
+statement.MaxEstimated = 10 * time.Second
 handle, err := statement.Submit(ctx)
 if err != nil {
 	return err
@@ -145,7 +148,9 @@ if err != nil {
 fmt.Println("statement ID:", handle.ID())
 ```
 
-When `Wait` or `Execute` returns a `*scopedb.Error` with kind `ErrorKindStatementFailed`, `StatementDetails` preserves the server's structured error code, message, and code-specific JSON details. The outer error message remains the server's top-level statement message:
+Statement requests use the ScopeDB 0.6 protocol. Replace `ExecTimeout` duration strings with `MaxElapsed`. The server upgrade clears statement history and results, so handles saved before the upgrade cannot be resumed.
+
+When `Wait` or `Execute` returns a `*scopedb.Error` with kind `ErrorKindStatementFailed`, `Message` and `Code` expose the server's failure reason. `StatementDetails` also preserves the code-specific JSON details. HTTP errors expose their server code through the same `Code` field:
 
 ```go
 var scopeErr *scopedb.Error
@@ -156,50 +161,86 @@ if errors.As(err, &scopeErr) && scopeErr.StatementDetails != nil {
 }
 ```
 
-## Browse the REST catalog
+## Initialize a table
 
-List methods expose one explicit page. Iterators lazily request later pages and are the simpler choice for discovery:
-
-```go
-for database, err := range client.IterateDatabases(ctx, scopedb.CatalogListOptions{
-	PageSize: 100,
-}) {
-	if err != nil {
-		return err
-	}
-	fmt.Println(database.Name)
-}
-
-for table, err := range client.IterateTables(
-	ctx,
-	"scopedb",
-	"public",
-	scopedb.CatalogListOptions{PageSize: 100},
-) {
-	if err != nil {
-		return err
-	}
-	fmt.Println(table.Name)
-}
-```
-
-Use `ListDatabases`, `ListSchemas`, or `ListTables` when the application owns page boundaries. Use `FetchDatabase`, `FetchSchema`, or `FetchTable` for a full resource.
-
-## Describe a table
-
-The table helper defaults to database `scopedb` and schema `public`. Set both explicitly when the destination is application-configured:
+At application startup, apply the complete expected definition and start writing after it succeeds. `Table` defaults to database `scopedb` and schema `public`; set its `Database` and `Schema` fields to use another location. The parent database and schema must exist.
 
 ```go
 table := client.Table("events")
-table.Database = "scopedb"
-table.Schema = "public"
-
-description, err := table.Describe(ctx)
-if err != nil {
-	return err
+definition := &scopedb.CatalogTable{
+    Name: table.Name,
+    Columns: []scopedb.CatalogColumn{
+        {Name: "id", DataType: scopedb.IntDataType},
+        {Name: "message", DataType: scopedb.StringDataType},
+    },
 }
-fmt.Println(description.Columns)
+if _, err := table.Apply(ctx, definition); err != nil {
+    return err
+}
+
+_, err := table.AppendNDJSON(ctx, []byte("{\"id\":1,\"message\":\"service started\"}\n"))
+if err != nil {
+    return err
+}
 ```
+
+The default call applies immediately and rejects changes that may lose data. Applying the same definition again preserves existing rows. This is complete replacement: omitted fields and objects are cleared. If an older application version omits a physical column added by a newer version, its startup apply fails rather than deleting that column. Use `table.Describe(ctx)` to read the current `CatalogTable` definition.
+
+Pass one `CatalogOptions` value when you need a dry run, an ETag precondition, or explicit authorization for destructive changes. The same optional options are accepted by Catalog `Apply` and `Delete`.
+
+## Manage the catalog
+
+The declarative Catalog API reads complete definitions and replaces resources atomically. It requires a server with the declarative protocol; the old paginated catalog API is not supported.
+
+```go
+catalog := client.Catalog().Table("scopedb", "public", "events")
+snapshot, err := catalog.Get(ctx)
+if err != nil {
+    return err
+}
+definition := snapshot.Definition
+retention := int32(30)
+definition.RetentionDays = &retention
+plan, err := catalog.Apply(ctx, definition, scopedb.CatalogOptions{DryRun: true})
+if err != nil {
+    return err
+}
+// Review plan.Before, plan.After, and plan.Destructive before authorizing this write.
+result, err := catalog.Apply(ctx, definition, scopedb.CatalogOptions{
+    IfMatch: plan.ETag,
+    AllowDestructive: plan.Destructive,
+})
+if err != nil {
+    return err
+}
+fmt.Println(result.ETag)
+```
+
+`client.Catalog()` selects the entire tenant. Use `Database(name)`, `Schema(database, schema)`, `Table(database, schema, table)`, or `View(database, schema, view)` to select an individual resource. Pass names directly; the SDK escapes each name for the HTTP path. Each resource includes its complete subtree.
+
+`Get` returns a `CatalogSnapshot[T]` with a typed definition and an ETag. `Apply` accepts the same definition type and returns `CatalogResult[T]` with typed `Before` and `After` values. These definitions are pointers: `Before` is nil when creating a resource, and `After` is nil when deleting it.
+
+Omitted fields and objects are cleared, and omitted collections are empty. `Delete` removes one database, schema, table, or view using the same options; clear the tenant by applying `&scopedb.CatalogDocument{}`, or clear children by editing their parent definition. `IfMatch` is optional, while potentially irreversible data loss requires `AllowDestructive`. Dry runs validate and roll back without requiring that authorization. Storage is a creation-only input omitted from exports, so keep the original definition when planning creation.
+
+For export and apply workflows that must preserve fields unknown to this SDK, select `Raw()`. Definitions and before/after states are then `json.RawMessage`; absent states are JSON `null`:
+
+```go
+catalog := client.Catalog().Raw()
+snapshot, err := catalog.Get(ctx)
+if err != nil {
+    return err
+}
+// Retain snapshot.Definition as raw JSON when saving or editing it.
+plan, err := catalog.Apply(ctx, snapshot.Definition, scopedb.CatalogOptions{DryRun: true})
+if err != nil {
+    return err
+}
+fmt.Println(string(plan.After))
+```
+
+`Raw()` is also available on each resource selector. Typed and raw resources share the same HTTP behavior, options, and errors.
+
+Errors use `*scopedb.Error`, including the server `Code`, HTTP status, and request ID. Catalog writes are never automatically retried. If `Code` is `catalog_commit_outcome_unknown`, read the catalog and plan again before retrying; a lost response does not imply a rollback.
 
 ## Streaming writes
 
@@ -297,9 +338,28 @@ One request supports up to 8 MiB of uncompressed NDJSON and 200,000 rows.
 
 See the examples for [streaming writes](examples/append_stream), [file imports](examples/patterns/bulk_append), [telemetry](examples/patterns/telemetry), and [NDJSON](examples/append_ndjson).
 
-## Advanced: transform before writing
+## Migrate to ScopeDB 0.6
 
-Use `Client.IngestStream` only when source JSON specifically needs a server-side ScopeQL transformation before it can match the destination table. For normal typed events, shape the row in the producer and use `Table.AppendStream`. See the guarded [`ingest_transform`](examples/ingest_transform) example for the advanced path.
+- Replace `ExecTimeout` with `MaxElapsed time.Duration`; `MaxEstimated` independently limits estimated execution time. Zero omits a limit, and negative durations are invalid. Elapsed time includes queueing.
+- Replace the old Catalog list/fetch/iterator methods with `client.Catalog().Get(ctx)` or a database/schema/table/view selector followed by `.Get(ctx)`. Reads return a complete `Definition` and `ETag`, without pagination. `Raw()` retains fields unknown to this SDK.
+- `Table.Describe()` returns `CatalogTable`; use `Distinct` and `RetentionDays` in place of the old resource fields. Use `Table.Apply()` or a Catalog resource to replace definitions and delete through the Catalog resource in place of `Table.Drop()`.
+- `Cancel()` caches the complete server status, including a finished result or original failure. Read `ResultSet()`, `Progress()`, or `Wait()` after cancelling. `Error.Code` and `Details` retain structured errors; progress includes `ComputeSeconds`.
+- Appends use `/v1/catalog/databases/{db}/schemas/{schema}/tables/{table}/ingest`. Public `AppendState` and stream delivery/report APIs remain; the wire outcome is `status` on success and `details.status` on failure. Missing or unreadable outcomes remain unknown.
+
+The server's 0.5-to-0.6 migration clears statement history and saved results; saved handles cannot be resumed.
+
+## Migrate from IngestStream
+
+`Client.IngestStream`, `IngestStream`, `IngestStreamOptions`, and `IngestResult` have been removed. Select the destination with `client.Table(name)` and use `Table.AppendStream` for Go values or `Table.AppendNDJSON` for an existing NDJSON payload. This SDK version requires ScopeDB 0.6.0 or later.
+
+Append accepts rows matching the destination columns, not a ScopeQL statement. Move field renaming, type conversion, filtering, and routing into the producer before calling `Send`. The [`append_transform`](examples/append_transform) example maps a source `ts` field to `occurred_at`. For transformations that must run in ScopeQL, append the original event into an `object` column in a staging table, then execute a separate `FROM ... SELECT ... INSERT INTO ...` statement. Staging and transformation are separate commits; track processed batches before retrying the transformation.
+
+Review these behavior changes when migrating:
+
+- Append batches allow up to 8 MiB of uncompressed NDJSON and 200,000 rows. Reduce an old ingest batch-byte target above 8 MiB.
+- `Flush` and `Shutdown` return an `AppendDeliveryReport` for activity since the previous report. Read `CommittedRows` instead of `IngestResult.NumRowsInserted`, and check `Outcome` when using the continue policy.
+- Append streams send up to four batches concurrently by default. Set `MaxConcurrentBatches: 1` when the producer needs sequential requests; queries still require `ORDER BY` for ordered results.
+- Append streams may retry transient unknown outcomes, which can duplicate rows. To preserve the old stream's no-replay behavior, set `Retry: &scopedb.AppendRetryOptions{MaxRetries: 0}`. Client timeouts and cancellations are never retried. Direct `AppendNDJSON` makes one attempt.
 
 ## Structured errors
 
@@ -340,3 +400,13 @@ Release history and the maintainer runbook are in [CHANGELOG.md](CHANGELOG.md) a
 ## License
 
 Licensed under the [Apache License, Version 2.0](https://www.apache.org/licenses/LICENSE-2.0).
+
+## Live protocol validation
+
+From a source checkout, set `SCOPEDB_ENDPOINT` and `SCOPEDB_API_KEY` to an authenticated ScopeDB 0.6 endpoint, then run:
+
+```sh
+go test -v ./tests/integration -run TestNative06Lifecycle
+```
+
+The test creates a uniquely named schema and checks dry-run, ETag conflicts, committed and rejected appends, statement errors, elapsed timeout, and a cancellation racing with completion. It deletes its schema before returning. Running cancellation is covered separately with controlled HTTP responses in the unit tests.

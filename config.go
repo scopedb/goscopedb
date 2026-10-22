@@ -46,7 +46,7 @@ type Config struct {
 	// The default is CompressionZstd. Set this to CompressionGzip to talk to
 	// older deployments that do not support zstd yet.
 	Compression Compression `json:"compression"`
-	// WriteTimeout bounds each table append or transform-ingest request,
+	// WriteTimeout bounds each table append or catalog mutation request,
 	// including reading its response body. Zero defaults to 30 seconds.
 	// The budget starts after local encoding, compression, and request preparation.
 	// Stream AttemptTimeout settings override this default. A timeout leaves

@@ -30,16 +30,15 @@ func TestTableDescribeUsesDefaultLocation(t *testing.T) {
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, http.MethodGet, r.Method)
-		require.Equal(t, "/v1/databases/scopedb/schemas/public/tables/events", r.URL.Path)
+		require.Equal(t, "/v1/catalog/databases/scopedb/schemas/public/tables/events", r.URL.Path)
+		w.Header().Set("ETag", `"1"`)
 		writeTestJSON(t, w, `{
-			"database":"scopedb",
-			"schema":"public",
-			"name":"events",
+									"name":"events",
 			"columns":[{"name":"message","data_type":"string","comment":null}],
 			"partition_by":[],
 			"cluster_by":[],
-			"distinct_on":{"on":[],"by":[]},
-			"data_retention_days":null,
+			"distinct":{"on":[],"by":[]},
+			"retention_days":null,
 			"comment":"application events"
 		}`)
 	}))
@@ -48,10 +47,8 @@ func TestTableDescribeUsesDefaultLocation(t *testing.T) {
 	client := newTestClient(t, server.URL)
 	description, err := client.Table("events").Describe(context.Background())
 	require.NoError(t, err)
-	require.Equal(t, "scopedb", description.Database)
-	require.Equal(t, "public", description.Schema)
 	require.Equal(t, "events", description.Name)
-	require.Equal(t, []TableColumnSpec{{
+	require.Equal(t, []CatalogColumn{{
 		Name:     "message",
 		DataType: StringDataType,
 	}}, description.Columns)
@@ -65,13 +62,13 @@ func TestTableAppendNDJSONDelegatesRequest(t *testing.T) {
 	ndjson := []byte("{\"id\":1}\n{\"id\":2}")
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, http.MethodPost, r.Method)
-		require.Equal(t, "/v1/databases/analytics/schemas/events/tables/logs/rows", r.URL.Path)
+		require.Equal(t, "/v1/catalog/databases/analytics/schemas/events/tables/logs/ingest", r.URL.Path)
 		require.Equal(t, "application/x-ndjson", r.Header.Get("Content-Type"))
 		require.Equal(t, string(CompressionZstd), r.Header.Get("Content-Encoding"))
 		body, err := decodeCompressedRequestBody(r)
 		require.NoError(t, err)
 		require.Equal(t, ndjson, body)
-		writeTestJSON(t, w, `{"append_state":"committed","num_rows_inserted":2}`)
+		writeTestJSON(t, w, `{"status":"committed","num_rows_inserted":2}`)
 	}))
 	defer server.Close()
 

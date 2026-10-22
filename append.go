@@ -46,12 +46,12 @@ const (
 
 // AppendRowsResult is the result of a committed table append.
 type AppendRowsResult struct {
-	AppendState     AppendState `json:"append_state"`
+	AppendState     AppendState `json:"status"`
 	NumRowsInserted int64       `json:"num_rows_inserted"`
 }
 
 type appendRowsResponse struct {
-	AppendState     AppendState `json:"append_state"`
+	AppendState     AppendState `json:"status"`
 	NumRowsInserted *int64      `json:"num_rows_inserted"`
 }
 
@@ -64,7 +64,7 @@ type AppendRowError struct {
 
 // AppendErrorDetails contains the structured outcome of a failed append.
 type AppendErrorDetails struct {
-	AppendState        AppendState      `json:"append_state"`
+	AppendState        AppendState      `json:"status"`
 	RowErrors          []AppendRowError `json:"row_errors"`
 	RowErrorsTruncated bool             `json:"row_errors_truncated"`
 }
@@ -106,13 +106,14 @@ func (c *Client) appendNDJSONWithTimeout(
 	}
 
 	u, err := c.resourceURL(
+		"catalog",
 		"databases",
 		database,
 		"schemas",
 		schema,
 		"tables",
 		table,
-		"rows",
+		"ingest",
 	)
 	if err != nil {
 		return AppendRowsResult{}, err

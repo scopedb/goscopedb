@@ -69,7 +69,7 @@ func TestAppendClientTimeoutIsNotReplayed(t *testing.T) {
 				<-r.Context().Done()
 				return nil, r.Context().Err()
 			}
-			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"append_state":"committed","num_rows_inserted":1}`))}, nil
+			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"status":"committed","num_rows_inserted":1}`))}, nil
 		})},
 	})
 	require.NoError(t, err)
@@ -286,7 +286,7 @@ func TestAppendDeliveryUsesStatusWhenResponseBodyFails(t *testing.T) {
 					return &http.Response{
 						StatusCode: http.StatusOK,
 						Header:     make(http.Header),
-						Body:       io.NopCloser(strings.NewReader(`{"append_state":"committed","num_rows_inserted":1}`)),
+						Body:       io.NopCloser(strings.NewReader(`{"status":"committed","num_rows_inserted":1}`)),
 					}, nil
 				})},
 			})

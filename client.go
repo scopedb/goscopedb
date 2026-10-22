@@ -115,7 +115,7 @@ func (c *Client) Close() {
 	c.http.Close()
 }
 
-// httpClient is a wrapper around the standard http.Client to decorate GET/POST requests.
+// httpClient applies authentication and compression using the configured HTTP client.
 type httpClient struct {
 	client        *http.Client
 	authorization string
@@ -161,6 +161,7 @@ func (c *httpClient) newPostRequest(ctx context.Context, u *url.URL, body []byte
 
 func (c *httpClient) do(req *http.Request) (*http.Response, error) {
 	c.applyAuthorization(req)
+	req.Header.Set("X-ScopeDB-Client", "goscopedb")
 	return c.client.Do(req)
 }
 
@@ -203,6 +204,9 @@ func normalizeEndpoint(raw string) (*url.URL, error) {
 	if endpoint.Host == "" {
 		return nil, fmt.Errorf("endpoint host is required")
 	}
+	if endpoint.User != nil {
+		return nil, fmt.Errorf("endpoint must not contain user information; use APIKey instead")
+	}
 	if endpoint.RawQuery != "" || endpoint.Fragment != "" {
 		return nil, fmt.Errorf("endpoint must not contain a query or fragment")
 	}
@@ -212,6 +216,9 @@ func normalizeEndpoint(raw string) (*url.URL, error) {
 func (c *Client) resourceURL(segments ...string) (*url.URL, error) {
 	rawPath := strings.TrimRight(c.endpoint.EscapedPath(), "/") + "/v1"
 	for _, segment := range segments {
+		if segment == "" || segment == "." || segment == ".." {
+			return nil, newError(ErrorKindConfigInvalid, "resource names must not be empty or dot segments", nil)
+		}
 		rawPath += "/" + url.PathEscape(segment)
 	}
 	path, err := url.PathUnescape(rawPath)
@@ -260,10 +267,11 @@ type resultFormat string
 const resultFormatJSON resultFormat = "json"
 
 type statementRequest struct {
-	StatementID *uuid.UUID   `json:"statement_id,omitempty"`
-	Statement   string       `json:"statement"`
-	ExecTimeout string       `json:"exec_timeout,omitempty"`
-	Format      resultFormat `json:"format"`
+	StatementID         *uuid.UUID   `json:"statement_id,omitempty"`
+	Statement           string       `json:"statement"`
+	MaxElapsedSeconds   float64      `json:"max_elapsed_seconds,omitempty"`
+	MaxEstimatedSeconds float64      `json:"max_estimated_seconds,omitempty"`
+	Format              resultFormat `json:"format"`
 }
 
 type statementResponse struct {
@@ -272,9 +280,7 @@ type statementResponse struct {
 	Status   StatementStatus   `json:"status"`
 	Created  time.Time         `json:"created_at"`
 
-	// Message is set when the statement was failed or canceled.
-	Message *string `json:"message"`
-	// Error is set when the statement failed with structured details.
+	// Error is required when the statement failed.
 	Error *StatementErrorDetails `json:"error"`
 
 	// ResultSet is set when the statement was successfully finished.
@@ -345,7 +351,7 @@ func (c *Client) fetchStatementResult(ctx context.Context, id uuid.UUID) (*state
 	}
 
 	q := req.Query()
-	q.Add("format", string(resultFormatJSON))
+	q.Set("format", string(resultFormatJSON))
 	req.RawQuery = q.Encode()
 
 	resp, err := c.http.doGet(ctx, req)
@@ -356,74 +362,20 @@ func (c *Client) fetchStatementResult(ctx context.Context, id uuid.UUID) (*state
 	return checkStatementResponse(resp)
 }
 
-type statementCancelResponse = StatementCancelResult
-
-func (c *Client) cancelStatement(ctx context.Context, statementID uuid.UUID) (*statementCancelResponse, error) {
+func (c *Client) cancelStatement(ctx context.Context, statementID uuid.UUID) (*statementResponse, error) {
 	req, err := c.resourceURL("statements", statementID.String(), "cancel")
 	if err != nil {
 		return nil, err
 	}
+
+	q := req.Query()
+	q.Set("format", string(resultFormatJSON))
+	req.RawQuery = q.Encode()
 
 	resp, err := c.http.doPost(ctx, req, []byte{})
 	if err != nil {
 		return nil, err
 	}
 	defer sneakyBodyClose(resp.Body)
-	return checkStatementCancelResponse(resp)
-}
-
-type writeFormat string
-
-// writeFormatJSON is to ingest rows as JSON lines.
-const writeFormatJSON writeFormat = "json"
-
-type ingestRequest struct {
-	Data      ingestData `json:"data"`
-	Statement string     `json:"statement"`
-}
-
-type ingestData struct {
-	// Format is the format of the data to ingest.
-	Format writeFormat `json:"format"`
-	// Rows is the payload of the data to ingest.
-	Rows string `json:"rows"`
-}
-
-type ingestResponse struct {
-	NumRowsInserted int `json:"num_rows_inserted"`
-}
-
-func (c *Client) ingest(ctx context.Context, request *ingestRequest) (*ingestResponse, error) {
-	return c.ingestWithTimeout(ctx, request, c.writeTimeout)
-}
-
-func (c *Client) ingestWithTimeout(ctx context.Context, request *ingestRequest, timeout time.Duration) (*ingestResponse, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	u, err := c.resourceURL("ingest")
-	if err != nil {
-		return nil, err
-	}
-
-	body, err := json.Marshal(request)
-	if err != nil {
-		return nil, err
-	}
-	req, err := c.http.newPostRequest(ctx, u, body)
-	if err != nil {
-		return nil, err
-	}
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	ctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-
-	resp, err := c.http.do(req.WithContext(ctx))
-	if err != nil {
-		return nil, unknownIngestCommitOutcomeError(nil, err).withWriteContext(ctx)
-	}
-	defer sneakyBodyClose(resp.Body)
-	return checkIngestResponse(ctx, resp)
+	return checkStatementResponse(resp)
 }
