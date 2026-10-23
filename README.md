@@ -4,7 +4,7 @@
 
 The official Go client for [ScopeDB](https://www.scopedb.io). Run ScopeQL queries, browse the catalog, and write rows with bounded asynchronous streams. For application writes, start with `Table.AppendStream`.
 
-This development version requires ScopeDB 0.6.0 or later and uses its native Statement, declarative Catalog, and table ingest APIs. These changes are not yet published.
+Upgrading from v0.6? Follow the [v0.7 migration guide](#migrate-from-v06-to-v07).
 
 ## Runtime support
 
@@ -163,8 +163,6 @@ if err != nil {
 }
 fmt.Println("statement ID:", handle.ID())
 ```
-
-Statement requests use the ScopeDB 0.6 protocol. The server upgrade clears statement history and results, so handles saved before the upgrade cannot be resumed.
 
 When `Wait` or `Execute` returns a `*scopedb.Error` with kind `ErrorKindStatementFailed`, `Message` and `Code` expose the server's failure reason. `StatementDetails` also preserves the code-specific JSON details. HTTP errors expose their server code through the same `Code` field:
 
@@ -366,40 +364,54 @@ if err != nil {
 fmt.Println("committed rows:", result.NumRowsInserted)
 ```
 
-One request supports up to 8 MiB of uncompressed NDJSON and 200,000 rows. ScopeDB 0.6 parses NDJSON integer tokens as signed 64-bit integers, including values for `uint` columns and nested objects. Values above `9223372036854775807` are rejected; strings are not coerced into numeric columns. This input limit is independent of query results, which can contain the full `uint64` range.
+One request supports up to 8 MiB of uncompressed NDJSON and 200,000 rows. ScopeDB parses NDJSON integer tokens as signed 64-bit integers, including values for `uint` columns and nested objects. Values above `9223372036854775807` are rejected; strings are not coerced into numeric columns. This input limit is independent of query results, which can contain the full `uint64` range.
 
 `Send` uses standard `encoding/json`, without schema-aware conversions. `[]byte` encodes as the base64 string expected by binary columns and `time.Time` as RFC 3339. Encode interval columns as fixed-duration ISO 8601 strings (for example, `"PT1.5S"`), not Go's integer-encoded `time.Duration`. An integer-valued Go float may encode without a decimal point; for floats beyond the signed integer range, supply an explicit floating-point JSON token with `json.RawMessage`, such as `1e20`.
 
 See the examples for [streaming writes](examples/append_stream), [file imports](examples/patterns/bulk_append), [telemetry](examples/patterns/telemetry), and [NDJSON](examples/append_ndjson).
 
-## Migrate to ScopeDB 0.6
+## Migrate from v0.6 to v0.7
 
-This unpublished version intentionally replaces the previous development API:
+Upgrade to Go 1.26 or later before updating the SDK. The module and import paths remain `github.com/scopedb/goscopedb`. These changes are relative to the published v0.6.3 SDK.
 
-| Previous API                                       | Replacement                                                                                             |
+### Write timeouts
+
+Direct `AppendNDJSON` requests now have a default 30-second timeout, including reading the response body. Configure `Config.WriteTimeout` to change or disable this limit. Catalog mutations and dry runs use the same setting; queries and Catalog reads are governed by the caller's context and HTTP client.
+
+```go
+client, err := scopedb.NewClient(scopedb.Config{
+    Endpoint:     os.Getenv("SCOPEDB_ENDPOINT"),
+    APIKey:       os.Getenv("SCOPEDB_API_KEY"),
+    WriteTimeout: new(time.Duration), // Disable the SDK's write attempt timeout.
+})
+```
+
+`AppendStreamOptions.AttemptTimeout` changes from `time.Duration` to `*time.Duration`. Omit it to inherit the client setting, replace a positive `AttemptTimeout: duration` with `AttemptTimeout: new(duration)`, or set `new(time.Duration)` to disable the attempt limit. An explicit `AttemptTimeout: 0` in old source must become an omitted field or nil to preserve the default. Negative values are invalid.
+
+Caller context deadlines and HTTP-client timeouts still apply. Append streams also have a five-minute default delivery/retry budget per dispatched batch; disabling the attempt timeout does not disable that budget. See [client configuration](#client-configuration) for timeout scope and interruption diagnostics.
+
+### Statements and Catalog
+
+| v0.6 API                                           | v0.7 replacement                                                                                        |
 | -------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
 | `handle.LastStatus()`, `Progress()`, `ResultSet()` | `handle.Snapshot()` and its `Status`, `Progress`, `ResultSet`, and `Error` fields                       |
 | `handle.Status(ctx)`                               | `handle.Refresh(ctx)`, returning a complete `*StatementSnapshot`                                        |
 | `StatementCancelResult`                            | `*StatementSnapshot` from `Cancel`; `ID` replaces `StatementID`, and `Error` holds the original failure |
 | `status.Finished()`                                | `status == scopedb.StatementStatusFinished`; `Terminated()` still covers all terminal states            |
 | `table.Describe(ctx)`                              | `table.Catalog().Get(ctx)`, retaining both `Definition` and `ETag`                                      |
-| `table.Apply(ctx, definition)`                     | `table.Catalog().Apply(ctx, definition)`                                                                |
 | `table.Drop(ctx)`                                  | `table.Catalog().Delete(ctx, scopedb.CatalogOptions{IfMatch: etag, AllowDestructive: true})`            |
 | Append result/error/last-failure `.AppendState`    | `.Status`; append JSON uses `status`, matching the service                                              |
-| Automatic retries of transient unknown appends     | Explicit `Retry: &scopedb.AppendRetryOptions{MaxRetries: 8, RetryUnknown: true}`                        |
-| Historical `u_int` type spelling                   | Native `uint`                                                                                           |
+| Historical `u_int` type spelling                   | `uint`                                                                                                  |
 
-Replace `ExecTimeout` with `MaxElapsed time.Duration`; `MaxEstimated` independently limits estimated execution time. Zero omits a limit, negative durations are invalid, and elapsed time includes queueing. Server failures expose native `statement_*` codes through `Error.Code`; unknown codes remain available as strings. `ErrStatementCancelled` identifies server cancellation independently of a local `context.Canceled`.
+Replace `ExecTimeout` strings such as `"30s"` with `MaxElapsed: 30 * time.Second`; `MaxEstimated` independently limits estimated execution time. Zero omits the setting: the server defaults to one hour for elapsed time and no estimate limit. Negative durations are invalid, and elapsed time includes queueing. Replace `StatementErrorCode` and its constants with native string codes from `Error.Code` or `StatementErrorDetails.Code`; unknown codes remain available. `ErrStatementCancelled` identifies server cancellation independently of a local `context.Canceled`.
 
 Replace paginated Catalog list/fetch/iterator methods with `client.Catalog().Get(ctx)` or a database/schema/table/view selector followed by `.Get(ctx)`. Use `Distinct` and `RetentionDays` in the complete table definition. Typed reads reject unsupported fields; `Raw()` retains them without numeric conversion. Catalog writes are not retried.
 
-Appends use `/v1/catalog/databases/{db}/schemas/{schema}/tables/{table}/ingest`. The commit outcome is `status` on success and `details.status` on failure. The `AppendState` enum values and stream delivery/report types remain. Missing or unreadable outcomes are unknown, and retrying unknown outcomes now requires explicit opt-in.
+### Append and IngestStream
 
-The server's 0.5-to-0.6 migration clears statement history and saved results; saved handles cannot be resumed.
+Appends use `/v1/catalog/databases/{db}/schemas/{schema}/tables/{table}/ingest`. The commit outcome is `status` on success and `details.status` on failure. The `AppendState` enum values and stream delivery/report types remain. Missing or unreadable outcomes are unknown. As in v0.6.3, unknown outcomes are not retried by default; the new `RetryUnknown` option enables explicit replay when the application accepts possible duplicates.
 
-## Migrate from IngestStream
-
-`Client.IngestStream`, `IngestStream`, `IngestStreamOptions`, and `IngestResult` have been removed. Select the destination with `client.Table(name)` and use `Table.AppendStream` for Go values or `Table.AppendNDJSON` for an existing NDJSON payload. This SDK version requires ScopeDB 0.6.0 or later.
+`Client.IngestStream`, `IngestStream`, `IngestStreamOptions`, and `IngestResult` have been removed. Select the destination with `client.Table(name)` and use `Table.AppendStream` for Go values or `Table.AppendNDJSON` for an existing NDJSON payload.
 
 Append accepts rows matching the destination columns, not a ScopeQL statement. Move field renaming, type conversion, filtering, and routing into the producer before calling `Send`. For transformations that must run in ScopeQL, append the original event into an `object` column in a staging table, then execute a separate `FROM ... SELECT ... INSERT INTO ...` statement. Staging and transformation are separate commits; track processed batches before retrying the transformation.
 
@@ -452,7 +464,7 @@ Licensed under the [Apache License, Version 2.0](https://www.apache.org/licenses
 
 ## Live protocol validation
 
-From a source checkout, set `SCOPEDB_ENDPOINT` and `SCOPEDB_API_KEY` to an authenticated ScopeDB 0.6 endpoint, then run:
+From a source checkout, set `SCOPEDB_ENDPOINT` and `SCOPEDB_API_KEY` for a disposable test workspace, then run:
 
 ```sh
 mise run test-integration

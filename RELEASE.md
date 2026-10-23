@@ -1,6 +1,6 @@
 # Releasing the ScopeDB Go SDK
 
-The Go module lives at the repository root, so release tags use the `vX.Y.Z` form. The examples below use `v0.6.3`. Tags with the legacy `go/vX.Y.Z` form were retained only to preserve release history from the former monorepo.
+The Go module lives at the repository root, so release tags use the `vX.Y.Z` form. The examples below use `v0.7.0`. Tags with the legacy `go/vX.Y.Z` form were retained only to preserve release history from the former monorepo.
 
 ## Changelog format
 
@@ -38,7 +38,7 @@ Confirm that `CHANGELOG.md` contains the intended release date, the examples com
 Immediately before publishing, obtain the required explicit acknowledgement. Then, from the repository root, create the annotated module tag and push only that tag:
 
 ```sh
-version=v0.6.3
+version=v0.7.0
 git tag -a "$version" -m "Release $version for Go SDK"
 git push origin "$version"
 ```
@@ -53,7 +53,7 @@ After the module proxy has observed the tag, verify it from a fresh temporary mo
 release_tmp=$(mktemp -d)
 cd "$release_tmp"
 go mod init example.com/scopedb-release-check
-go get github.com/scopedb/goscopedb@v0.6.3
+go get github.com/scopedb/goscopedb@v0.7.0
 go list -m github.com/scopedb/goscopedb
 go doc github.com/scopedb/goscopedb
 ```
