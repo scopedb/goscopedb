@@ -6,7 +6,7 @@ All significant changes to the ScopeDB Go SDK are documented in this file.
 
 ### Breaking Changes
 
-* Require ScopeDB 0.6.0 and use native Statement, declarative Catalog, and table ingest APIs. Replace paginated Catalog APIs and the legacy execution timeout option; cancellation retains complete terminal responses.
+* Require ScopeDB 0.6.0 and use native Statement, declarative Catalog, and table ingest APIs. Replace paginated Catalog APIs, the table description model, the legacy execution timeout option, and statement error codes; see the [migration guide](README.md#migrate-to-scopedb-06).
 * Removed the legacy transform Ingest stream API. Use table append APIs and transform rows in the producer; see the [migration guide](README.md#migrate-from-ingeststream).
 
 ### New Features
@@ -16,6 +16,8 @@ All significant changes to the ScopeDB Go SDK are documented in this file.
 
 ### Improvements
 
+* Cancellation caches complete terminal responses while retaining `StatementCancelResult`; finished results and original failures remain available without another request.
+* The bulk append example imports NDJSON from standard input with bounded memory and reports partial writes.
 * `AppendStream` now retries temporary rejections and transient `unknown` outcomes other than client timeouts or cancellations, providing at-least-once delivery that may insert duplicate rows. Direct `AppendNDJSON` remains a single attempt.
 * `AppendStream` now targets 4 MiB per batch by default; the maximum configurable target and uncompressed request limit remain 8 MiB.
 * Streaming write byte budgets now preserve FIFO waiter order so newer or smaller records cannot starve an older blocked producer.

@@ -174,13 +174,21 @@ func responseError(resp *http.Response, body []byte, kind ErrorKind) *Error {
 			err.Retryable = *payload.Retryable
 		}
 		err.Details = payload.Details
-		var details AppendErrorDetails
+		var details struct {
+			Status             AppendState      `json:"status"`
+			RowErrors          []AppendRowError `json:"row_errors"`
+			RowErrorsTruncated bool             `json:"row_errors_truncated"`
+		}
 		if json.Unmarshal(payload.Details, &details) == nil &&
-			(details.AppendState == AppendStateRejected || details.AppendState == AppendStateUnknown) {
+			(details.Status == AppendStateRejected || details.Status == AppendStateUnknown) {
 			if details.RowErrors == nil {
 				details.RowErrors = []AppendRowError{}
 			}
-			err.AppendDetails = &details
+			err.AppendDetails = &AppendErrorDetails{
+				AppendState:        details.Status,
+				RowErrors:          details.RowErrors,
+				RowErrorsTruncated: details.RowErrorsTruncated,
+			}
 		}
 	}
 	return err

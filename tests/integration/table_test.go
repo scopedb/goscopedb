@@ -44,8 +44,11 @@ func TestTableDescribe(t *testing.T) {
 	`, tbl.Identifier())).Execute(ctx)
 	require.NoError(t, err)
 	defer func() {
-		_, err := c.Statement(fmt.Sprintf("DROP TABLE %s", tbl.Identifier())).Execute(ctx)
-		require.NoError(t, err)
+		require.NoError(t, tbl.Drop(ctx))
+		_, err := tbl.Describe(ctx)
+		var failure *scopedb.Error
+		require.ErrorAs(t, err, &failure)
+		require.Equal(t, 404, failure.HTTPStatus)
 	}()
 
 	description, err := tbl.Describe(ctx)

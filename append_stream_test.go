@@ -931,9 +931,8 @@ func newAppendStreamTestTable(t *testing.T, handler http.HandlerFunc) *Table {
 func writeAppendStreamSuccess(t *testing.T, w http.ResponseWriter, rows int) {
 	t.Helper()
 	w.Header().Set("Content-Type", "application/json")
-	require.NoError(t, json.NewEncoder(w).Encode(AppendRowsResult{
-		AppendState:     AppendStateCommitted,
-		NumRowsInserted: int64(rows),
+	require.NoError(t, json.NewEncoder(w).Encode(map[string]any{
+		"status": "committed", "num_rows_inserted": rows,
 	}))
 }
 
@@ -949,7 +948,7 @@ func writeAppendStreamFailure(
 	w.WriteHeader(status)
 	require.NoError(t, json.NewEncoder(w).Encode(map[string]any{
 		"code": "unavailable", "message": "append failed", "retryable": retryable,
-		"details": AppendErrorDetails{AppendState: state, RowErrors: []AppendRowError{}},
+		"details": map[string]any{"status": state, "row_errors": []AppendRowError{}, "row_errors_truncated": false},
 	}))
 }
 

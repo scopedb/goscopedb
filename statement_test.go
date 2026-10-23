@@ -184,9 +184,9 @@ func TestStatementHandleStatusFetchesOnceAndCachesTerminalStatus(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, StatementStatusFinished, status)
 
-	status, err = handle.Cancel(context.Background())
+	cancelled, err := handle.Cancel(context.Background())
 	require.NoError(t, err)
-	require.Equal(t, StatementStatusFinished, status)
+	require.Equal(t, StatementStatusFinished, cancelled.Status)
 	require.Equal(t, int32(1), requests.Load(), "terminal status must be cached")
 	require.Equal(t, StatementStatusFinished, *handle.LastStatus())
 }
@@ -285,15 +285,20 @@ func TestStatementHandleCancelResumesWithoutSnapshot(t *testing.T) {
 
 	client := newTestClient(t, server.URL)
 	handle := client.StatementHandle(statementID)
-	status, err := handle.Cancel(context.Background())
+	cancelled, err := handle.Cancel(context.Background())
 	require.NoError(t, err)
-	require.Equal(t, StatementStatusCancelled, status)
-	require.Equal(t, status, *handle.LastStatus())
+	require.Equal(t, StatementCancelResult{
+		StatementID: statementID,
+		CreatedAt:   time.Date(2026, 8, 8, 0, 0, 0, 0, time.UTC),
+		Status:      StatementStatusCancelled,
+		Message:     "statement is cancelled",
+	}, cancelled)
+	require.Equal(t, cancelled.Status, *handle.LastStatus())
 	require.Equal(t, int64(6), handle.Progress().ScannedRows)
 
 	again, err := handle.Cancel(context.Background())
 	require.NoError(t, err)
-	require.Equal(t, status, again)
+	require.Equal(t, cancelled, again)
 
 	_, err = handle.Wait(context.Background())
 	require.ErrorContains(t, err, "cancelled")
@@ -327,9 +332,9 @@ func TestStatementHandleCancelCachesFinishedResult(t *testing.T) {
 
 	client := newTestClient(t, server.URL)
 	handle := client.StatementHandle(statementID)
-	status, err := handle.Cancel(context.Background())
+	cancelled, err := handle.Cancel(context.Background())
 	require.NoError(t, err)
-	require.Equal(t, StatementStatusFinished, status)
+	require.Equal(t, StatementStatusFinished, cancelled.Status)
 	require.NotNil(t, handle.ResultSet())
 
 	result, err := handle.Wait(context.Background())
@@ -339,7 +344,7 @@ func TestStatementHandleCancelCachesFinishedResult(t *testing.T) {
 	require.True(t, found)
 	require.Equal(t, "done", row["value"])
 
-	status, err = handle.Status(context.Background())
+	status, err := handle.Status(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, StatementStatusFinished, status)
 	require.Equal(t, int32(1), requests.Load(), "cancel provides the complete result")
@@ -385,10 +390,11 @@ func TestStatementHandleCancelCachesFailure(t *testing.T) {
 	require.Equal(t, StatementStatusRunning, status)
 	require.Equal(t, int64(11), handle.Progress().ScannedRows)
 
-	status, err = handle.Cancel(context.Background())
+	cancelled, err := handle.Cancel(context.Background())
 	require.NoError(t, err)
-	require.Equal(t, StatementStatusFailed, status)
-	require.Equal(t, status, *handle.LastStatus())
+	require.Equal(t, StatementStatusFailed, cancelled.Status)
+	require.Equal(t, "estimated duration exceeds limit", cancelled.Message)
+	require.Equal(t, cancelled.Status, *handle.LastStatus())
 	require.Equal(t, int64(12), handle.Progress().ScannedRows)
 	require.Equal(t, int64(3), handle.Progress().SkippedRows)
 

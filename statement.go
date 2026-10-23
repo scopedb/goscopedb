@@ -208,21 +208,36 @@ func (h *StatementHandle) Wait(ctx context.Context) (*ResultSet, error) {
 	}
 }
 
-// Cancel requests cancellation and returns the resulting status.
+// StatementCancelResult reports the statement's status after cancellation.
+type StatementCancelResult struct {
+	StatementID uuid.UUID       `json:"statement_id"`
+	CreatedAt   time.Time       `json:"created_at"`
+	Status      StatementStatus `json:"status"`
+	Message     string          `json:"message"`
+}
+
+// Cancel requests cancellation and returns the outcome.
 // The full response is cached for Progress, ResultSet, and Wait. A cached
-// terminal status is returned without making another request.
-func (h *StatementHandle) Cancel(ctx context.Context) (StatementStatus, error) {
-	if h.resp != nil && h.resp.Status.Terminated() {
-		return h.resp.Status, nil
+// terminal outcome is returned without making another request.
+func (h *StatementHandle) Cancel(ctx context.Context) (StatementCancelResult, error) {
+	if h.resp == nil || !h.resp.Status.Terminated() {
+		resp, err := h.c.cancelStatement(ctx, h.id)
+		if err != nil {
+			return StatementCancelResult{}, err
+		}
+		h.resp = resp
 	}
 
-	resp, err := h.c.cancelStatement(ctx, h.id)
-	if err != nil {
-		return "", err
+	message := fmt.Sprintf("statement is %s", h.resp.Status)
+	if h.resp.Error != nil {
+		message = h.resp.Error.Message
 	}
-
-	h.resp = resp
-	return h.resp.Status, nil
+	return StatementCancelResult{
+		StatementID: h.id,
+		CreatedAt:   h.resp.Created,
+		Status:      h.resp.Status,
+		Message:     message,
+	}, nil
 }
 
 // StatementStatus is a string that represents the status of a statement.

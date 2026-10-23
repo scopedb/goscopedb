@@ -131,7 +131,7 @@ if err != nil {
 }
 ```
 
-Once a handle has a terminal status, `Status` returns the cached status without another request. Store `handle.ID()` and use `client.StatementHandle(id)` to resume the lifecycle in another process. `Cancel` returns a `StatementStatus` and caches the complete response, just like `Status`. Read progress through `Progress`, finished rows through `ResultSet` or `Wait`, and failure details through `Wait`. A terminal response from `Cancel` needs no further request. `Wait` reports a cancelled outcome with the statement ID and a client-generated message.
+Once a handle has a terminal status, `Status` returns the cached status without another request. Store `handle.ID()` and use `client.StatementHandle(id)` to resume the lifecycle in another process. `Cancel` returns a `StatementCancelResult` with the ID, creation time, status, and message, and caches the complete response. Read progress through `Progress`, finished rows through `ResultSet` or `Wait`, and failure details through `Wait`. A terminal response from `Cancel` needs no further request. `Wait` reports a cancelled outcome with the statement ID and a client-generated message.
 
 `Statement.ID` chooses the statement ID; otherwise ScopeDB generates one. `StatementHandle.ID()` returns the ID confirmed by ScopeDB. `MaxElapsed` limits server-side elapsed time, including queueing, and `MaxEstimated` limits the estimated execution duration. Both use `time.Duration`; zero omits the setting. The server defaults to one hour for elapsed time and no estimate limit. A context deadline limits local waiting independently:
 
@@ -342,9 +342,10 @@ See the examples for [streaming writes](examples/append_stream), [file imports](
 
 - Replace `ExecTimeout` with `MaxElapsed time.Duration`; `MaxEstimated` independently limits estimated execution time. Zero omits a limit, and negative durations are invalid. Elapsed time includes queueing.
 - Replace the old Catalog list/fetch/iterator methods with `client.Catalog().Get(ctx)` or a database/schema/table/view selector followed by `.Get(ctx)`. Reads return a complete `Definition` and `ETag`, without pagination. `Raw()` retains fields unknown to this SDK.
-- `Table.Describe()` returns `CatalogTable`; use `Distinct` and `RetentionDays` in place of the old resource fields. Use `Table.Apply()` or a Catalog resource to replace definitions and delete through the Catalog resource in place of `Table.Drop()`.
-- `Cancel()` caches the complete server status, including a finished result or original failure. Read `ResultSet()`, `Progress()`, or `Wait()` after cancelling. `Error.Code` and `Details` retain structured errors; progress includes `ComputeSeconds`.
-- Appends use `/v1/catalog/databases/{db}/schemas/{schema}/tables/{table}/ingest`. Public `AppendState` and stream delivery/report APIs remain; the wire outcome is `status` on success and `details.status` on failure. Missing or unreadable outcomes remain unknown.
+- `Table.Describe()` returns `CatalogTable`; use `Distinct` and `RetentionDays` in place of the old resource fields. Use `Table.Apply()` or a Catalog resource to replace definitions. `Table.Drop()` still executes `DROP TABLE` and waits for completion; Catalog `Delete()` additionally supports dry-run and conditional deletion.
+- `Cancel()` still returns `StatementCancelResult`, with the statement ID, creation time, status, and message. It caches the complete server response, including a finished result or original failure. Read `ResultSet()`, `Progress()`, or `Wait()` after cancelling. `Error.Code` and `Details` retain structured errors; progress includes `ComputeSeconds`.
+- Statement error codes now follow the native `statement_*` codes. `StatementErrorCodeFailed` replaces the separate prepare/execute codes. The old row/scan limit codes no longer exist; `StatementErrorCodeEstimateLimitExceeded` reports the new estimate limit. Unknown codes remain available as strings.
+- Appends use `/v1/catalog/databases/{db}/schemas/{schema}/tables/{table}/ingest`. Public `AppendState` and stream delivery/report APIs remain, including the `append_state` JSON field on `AppendRowsResult` and `AppendErrorDetails`. The wire outcome is `status` on success and `details.status` on failure; raw `Error.Details` retains that server format. Missing or unreadable outcomes remain unknown.
 
 The server's 0.5-to-0.6 migration clears statement history and saved results; saved handles cannot be resumed.
 
@@ -352,7 +353,7 @@ The server's 0.5-to-0.6 migration clears statement history and saved results; sa
 
 `Client.IngestStream`, `IngestStream`, `IngestStreamOptions`, and `IngestResult` have been removed. Select the destination with `client.Table(name)` and use `Table.AppendStream` for Go values or `Table.AppendNDJSON` for an existing NDJSON payload. This SDK version requires ScopeDB 0.6.0 or later.
 
-Append accepts rows matching the destination columns, not a ScopeQL statement. Move field renaming, type conversion, filtering, and routing into the producer before calling `Send`. The [`append_transform`](examples/append_transform) example maps a source `ts` field to `occurred_at`. For transformations that must run in ScopeQL, append the original event into an `object` column in a staging table, then execute a separate `FROM ... SELECT ... INSERT INTO ...` statement. Staging and transformation are separate commits; track processed batches before retrying the transformation.
+Append accepts rows matching the destination columns, not a ScopeQL statement. Move field renaming, type conversion, filtering, and routing into the producer before calling `Send`. For transformations that must run in ScopeQL, append the original event into an `object` column in a staging table, then execute a separate `FROM ... SELECT ... INSERT INTO ...` statement. Staging and transformation are separate commits; track processed batches before retrying the transformation.
 
 Review these behavior changes when migrating:
 

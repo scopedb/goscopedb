@@ -47,10 +47,7 @@ func TestAppendNDJSONUsesConfiguredCompression(t *testing.T) {
 		body, err := decodeCompressedRequestBody(r)
 		require.NoError(t, err)
 		require.Equal(t, ndjson, body)
-		writeJSONValue(t, w, AppendRowsResult{
-			AppendState:     AppendStateCommitted,
-			NumRowsInserted: 2,
-		})
+		writeTestJSON(t, w, `{"status":"committed","num_rows_inserted":2}`)
 	}))
 	defer server.Close()
 
@@ -72,6 +69,9 @@ func TestAppendNDJSONUsesConfiguredCompression(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, AppendStateCommitted, result.AppendState)
 	require.Equal(t, int64(2), result.NumRowsInserted)
+	encoded, err := json.Marshal(result)
+	require.NoError(t, err)
+	require.JSONEq(t, `{"append_state":"committed","num_rows_inserted":2}`, string(encoded))
 }
 
 func TestAppendNDJSONRejectsLocalLimitsBeforeRequest(t *testing.T) {
@@ -135,6 +135,9 @@ func TestAppendNDJSONPreservesRejectedDetails(t *testing.T) {
 	}}, scopeErr.AppendDetails.RowErrors)
 	require.True(t, scopeErr.Retryable)
 	require.Equal(t, 1, requests)
+	encoded, err := json.Marshal(scopeErr.AppendDetails)
+	require.NoError(t, err)
+	require.JSONEq(t, `{"append_state":"rejected","row_errors":[{"row_index":1,"column":"id","message":"expected int"}],"row_errors_truncated":false}`, string(encoded))
 }
 
 func TestAppendNDJSONNeverRetriesUnknownOutcome(t *testing.T) {

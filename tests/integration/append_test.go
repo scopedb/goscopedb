@@ -45,8 +45,7 @@ func TestTableAppendLifecycle(t *testing.T) {
 	_, err := table.Apply(ctx, definition)
 	require.NoError(t, err)
 	defer func() {
-		_, err := client.Statement(fmt.Sprintf("DROP TABLE %s", table.Identifier())).Execute(context.Background())
-		require.NoError(t, err)
+		require.NoError(t, table.Drop(context.Background()))
 	}()
 
 	direct, err := table.AppendNDJSON(ctx, []byte(

@@ -86,9 +86,9 @@ func TestNative06Lifecycle(t *testing.T) {
 	}
 	t.Logf("QUERY rows=%d compute_seconds=%g\n", result.TotalRows, stmt.Progress().ComputeSeconds)
 	late := c.StatementHandle(stmt.ID())
-	status, err := late.Cancel(ctx)
+	cancelled, err := late.Cancel(ctx)
 	check(err)
-	if status != scopedb.StatementStatusFinished || late.ResultSet() == nil {
+	if cancelled.StatementID != stmt.ID() || cancelled.Status != scopedb.StatementStatusFinished || late.ResultSet() == nil {
 		t.Fatal("cancel lost result")
 	}
 	t.Log("CANCEL completed statement retained result")

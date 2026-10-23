@@ -42,6 +42,12 @@ func (c *Client) Table(tableName string) *Table {
 	}
 }
 
+// Drop issues a DROP TABLE statement and waits for completion.
+func (t *Table) Drop(ctx context.Context) error {
+	_, err := t.c.Query(ctx, "DROP TABLE "+t.Identifier())
+	return err
+}
+
 // Describe returns the complete REST catalog resource for this table.
 func (t *Table) Describe(ctx context.Context) (CatalogTable, error) {
 	snapshot, err := t.c.Catalog().Table(t.databaseName(), t.schemaName(), t.Name).Get(ctx)
