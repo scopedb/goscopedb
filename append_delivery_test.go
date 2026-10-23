@@ -91,7 +91,7 @@ func TestAppendClientTimeoutIsNotReplayed(t *testing.T) {
 	})
 	require.NoError(t, err)
 	t.Cleanup(client.Close)
-	stream, err := client.Table("events").AppendStream(AppendStreamOptions{AttemptTimeout: 25 * time.Millisecond, Retry: quickAppendRetry(2)})
+	stream, err := client.Table("events").AppendStream(AppendStreamOptions{AttemptTimeout: new(25 * time.Millisecond), Retry: quickAppendRetry(2)})
 	require.NoError(t, err)
 	require.NoError(t, stream.Send(context.Background(), map[string]int{"id": 1}))
 	report, err := stream.Shutdown(context.Background())

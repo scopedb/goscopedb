@@ -59,7 +59,7 @@ func TestTableAppendLifecycle(t *testing.T) {
 	stream, err := table.AppendStream(scopedb.AppendStreamOptions{
 		TargetBatchBytes:     1,
 		MaxConcurrentBatches: 4,
-		AttemptTimeout:       5 * time.Second,
+		AttemptTimeout:       new(5 * time.Second),
 	})
 	require.NoError(t, err)
 

@@ -13,8 +13,12 @@
 # limitations under the License.
 
 [tools]
-go = "1.24.13"
-golangci-lint = "2.1.6"
+"github:fast/hawkeye" = "7.1.0"
+go = "1.26.10"
+golangci-lint = "2.13.2"
+
+[task_config]
+shell = "bash -e -o pipefail -c"
 
 [tasks.build]
 description = "Build all packages"
@@ -26,6 +30,11 @@ run = '''
 packages="$(go list ./... | grep -v '/tests/integration$')"
 go test -v -bench=. $packages
 '''
+
+[tasks."test:race"]
+description = "Run unit tests and benchmarks with the race detector"
+env.GOFLAGS = "-race"
+run = "mise run test"
 
 [tasks.test-integration]
 description = "Run tests against a ScopeDB endpoint"

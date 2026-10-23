@@ -65,12 +65,12 @@ func NewClient(config Config) (*Client, error) {
 			nil,
 		)
 	}
-	writeTimeout := config.WriteTimeout
+	writeTimeout := defaultWriteTimeout
+	if config.WriteTimeout != nil {
+		writeTimeout = *config.WriteTimeout
+	}
 	if writeTimeout < 0 {
 		return nil, newError(ErrorKindConfigInvalid, "write timeout must not be negative", nil)
-	}
-	if writeTimeout == 0 {
-		writeTimeout = defaultWriteTimeout
 	}
 
 	standardClient := config.HTTPClient

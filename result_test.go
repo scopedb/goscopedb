@@ -28,11 +28,11 @@ func TestResultSetToValuesConvertsBinaryAndInterval(t *testing.T) {
 	t.Parallel()
 
 	rows, err := json.Marshal([][]*string{{
-		stringPointer("0001ABFF"),
-		stringPointer(""),
-		stringPointer("abcdef"),
-		stringPointer("PT1H2M3.000000004S"),
-		stringPointer("-PT1M0.000000001S"),
+		new("0001ABFF"),
+		new(""),
+		new("abcdef"),
+		new("PT1H2M3.000000004S"),
+		new("-PT1M0.000000001S"),
 		nil,
 	}})
 	require.NoError(t, err)
@@ -221,7 +221,7 @@ func TestResultSetToValuesRejectsNonNullValueForNullType(t *testing.T) {
 }
 
 func resultSetWithSingleValue(dataType DataType, value string) *ResultSet {
-	rows, err := json.Marshal([][]*string{{stringPointer(value)}})
+	rows, err := json.Marshal([][]*string{{new(value)}})
 	if err != nil {
 		panic(err)
 	}
@@ -230,10 +230,6 @@ func resultSetWithSingleValue(dataType DataType, value string) *ResultSet {
 		Schema:    Schema{&FieldSchema{Name: "value", Type: dataType}},
 		rows:      rows,
 	}
-}
-
-func stringPointer(value string) *string {
-	return &value
 }
 
 func TestResultNumericBoundaries(t *testing.T) {

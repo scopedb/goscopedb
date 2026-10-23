@@ -46,11 +46,14 @@ type Config struct {
 	// The default is CompressionZstd. CompressionGzip is also supported.
 	Compression Compression `json:"compression"`
 	// WriteTimeout bounds each table append or catalog mutation request,
-	// including reading its response body. Zero defaults to 30 seconds.
+	// including reading its response body. Nil uses the default of 30 seconds;
+	// a pointer to zero disables this limit. Negative values are invalid.
+	// NewClient copies the value.
+	// Caller context deadlines and HTTPClient timeouts still apply.
 	// The budget starts after local encoding, compression, and request preparation.
-	// Stream AttemptTimeout settings override this default. A timeout leaves
+	// Non-nil stream AttemptTimeout settings override this limit. A timeout leaves
 	// the commit outcome unknown; it does not roll back the write.
-	WriteTimeout time.Duration `json:"write_timeout"`
+	WriteTimeout *time.Duration `json:"write_timeout"`
 	// HTTPClient is the HTTP client used to send requests.
 	//
 	// When nil, the SDK creates and owns an independent HTTP client using Go's

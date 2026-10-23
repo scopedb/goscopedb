@@ -155,7 +155,7 @@ func (c *CatalogResource[T]) request(ctx context.Context, method string, data []
 		return nil, nil, err
 	}
 	writing := method != http.MethodGet && !options.DryRun
-	if method != http.MethodGet {
+	if method != http.MethodGet && c.client.writeTimeout > 0 {
 		writeCtx, cancel := context.WithTimeout(ctx, c.client.writeTimeout)
 		defer cancel()
 		req = req.WithContext(writeCtx)

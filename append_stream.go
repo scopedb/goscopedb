@@ -169,9 +169,11 @@ type AppendStreamOptions struct {
 	// MaxConcurrentBatches defaults to four, cannot exceed 1024, and may be set
 	// to one for serial request submission.
 	MaxConcurrentBatches int
-	// AttemptTimeout bounds each HTTP attempt. Zero uses Config.WriteTimeout.
+	// AttemptTimeout bounds each HTTP attempt. Nil inherits Config.WriteTimeout.
+	// A pointer to zero disables this limit, but the delivery/retry budget still applies.
+	// Negative values are invalid. The value is copied when the stream is created.
 	// A timeout leaves that batch's commit outcome unknown.
-	AttemptTimeout time.Duration
+	AttemptTimeout *time.Duration
 }
 
 // AppendDeliveryReport contains settlement counters since the previous barrier.
@@ -272,12 +274,9 @@ func (t *Table) AppendStream(options AppendStreamOptions) (*AppendStream, error)
 	if _, err := t.c.resourceURL("catalog", "databases", t.databaseName(), "schemas", t.schemaName(), "tables", t.Name, "ingest"); err != nil {
 		return nil, err
 	}
-	config, err := normalizeAppendStreamOptions(options)
+	config, err := normalizeAppendStreamOptions(options, t.c.writeTimeout)
 	if err != nil {
 		return nil, err
-	}
-	if options.AttemptTimeout == 0 {
-		config.attemptTimeout = t.c.writeTimeout
 	}
 
 	stream := &AppendStream{
@@ -299,7 +298,7 @@ func (t *Table) AppendStream(options AppendStreamOptions) (*AppendStream, error)
 	return stream, nil
 }
 
-func normalizeAppendStreamOptions(options AppendStreamOptions) (normalizedAppendStreamOptions, error) {
+func normalizeAppendStreamOptions(options AppendStreamOptions, writeTimeout time.Duration) (normalizedAppendStreamOptions, error) {
 	config := normalizedAppendStreamOptions{
 		failurePolicy:        options.FailurePolicy,
 		targetBatchBytes:     options.TargetBatchBytes,
@@ -307,7 +306,7 @@ func normalizeAppendStreamOptions(options AppendStreamOptions) (normalizedAppend
 		flushInterval:        options.FlushInterval,
 		maxBufferedBytes:     options.MaxBufferedBytes,
 		maxConcurrentBatches: options.MaxConcurrentBatches,
-		attemptTimeout:       options.AttemptTimeout,
+		attemptTimeout:       writeTimeout,
 	}
 	config.retry = AppendRetryOptions{MaxRetries: defaultAppendMaxRetries}
 	if options.Retry != nil {
@@ -366,6 +365,9 @@ func normalizeAppendStreamOptions(options AppendStreamOptions) (normalizedAppend
 		return config, appendStreamConfigError(
 			fmt.Sprintf("max concurrent batches must be from 1 to %d", maxAppendConcurrentBatches),
 		)
+	}
+	if options.AttemptTimeout != nil {
+		config.attemptTimeout = *options.AttemptTimeout
 	}
 	if config.attemptTimeout < 0 {
 		return config, appendStreamConfigError("attempt timeout must not be negative")
