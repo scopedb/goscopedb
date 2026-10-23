@@ -74,7 +74,7 @@ The `bulk_append` example reads standard input one line at a time, skips blank l
 
 Run `go run ./examples/patterns/bulk_append < events.ndjson`. The stream applies backpressure as its queue fills and `Shutdown` waits for accepted rows to settle. On an input or write error, the example reports the error and the delivery counts before exiting with a nonzero status.
 
-Some rows may commit before an import fails. This example disables automatic retries; reconcile an incomplete import before rerunning the file, since replaying it can duplicate rows. Append does not perform ScopeQL transformations. See the [migration guide](../README.md#migrate-from-ingeststream) for server-side transformations and delivery differences.
+Some rows may commit before an import fails. This example disables automatic retries; reconcile an incomplete import before rerunning the file, since replaying it can duplicate rows. Append does not perform ScopeQL transformations. See the [v0.7 migration guide](../README.md#append-and-ingeststream) for server-side transformations and delivery differences.
 
 ## Compile every example
 

@@ -4,30 +4,35 @@ All significant changes to the ScopeDB Go SDK are documented in this file.
 
 ## Unreleased
 
+## v0.7.0 (2026-10-23)
+
 ### Breaking Changes
 
 * Require Go 1.26 or later. Upgrade the Go toolchain before updating the SDK.
 * `AppendStreamOptions.AttemptTimeout` now takes `*time.Duration`. Omit it to inherit the client write timeout, use `new(duration)` with a positive duration to override it, or use `new(time.Duration)` to disable the per-attempt limit.
+* Direct table appends now have a default 30-second HTTP attempt timeout, including response-body reads. Set `Config.WriteTimeout` to `new(time.Duration)` to disable the SDK limit; caller context deadlines and HTTP-client timeouts still apply. The same setting bounds Catalog mutations and dry runs.
 * Replace partial Statement accessors and `StatementCancelResult` with complete `StatementSnapshot` values from `Snapshot`, `Refresh`, and `Cancel`. Confirmed cancellation is identifiable through `ErrStatementCancelled`.
-* Replace `Table.Describe`, `Apply`, and `Drop` with `Table.Catalog().Get`, `Apply`, and `Delete`, preserving ETags and using one conditional mutation contract.
-* Rename append outcome fields from `AppendState` to `Status` and serialize them as `status`. Unknown append outcomes now require explicit retry opt-in. Remove the historical `u_int` type alias.
-* Typed Catalog reads reject unknown fields instead of silently losing them; use `Raw()` for forward-compatible round trips.
-* Require ScopeDB 0.6.0 and use native Statement, declarative Catalog, and table ingest APIs. Replace paginated Catalog APIs, the table description model, the legacy execution timeout option, and statement error codes; see the [migration guide](README.md#migrate-to-scopedb-06).
-* Removed the legacy transform Ingest stream API. Use table append APIs and transform rows in the producer; see the [migration guide](README.md#migrate-from-ingeststream).
+* Replace `Statement.ExecTimeout` with `MaxElapsed` and `MaxEstimated` duration fields. Statement failures expose native string codes through `Error.Code` and `StatementErrorDetails.Code` instead of the previous `StatementErrorCode` type and constants.
+* Replace paginated Catalog APIs and table descriptions with complete declarative definitions. Use `Table.Catalog().Get` and `Delete` instead of `Table.Describe` and `Drop`, preserving ETags and explicitly authorizing destructive changes. Typed reads reject unknown fields; use `Raw()` for forward-compatible round trips.
+* Rename append outcome fields from `AppendState` to `Status` and serialize them as `status`. Remove the historical `u_int` data type spelling; use `uint`.
+* Remove the legacy transform Ingest stream API. Use table append APIs and transform rows in the producer. The [v0.6 to v0.7 migration guide](README.md#migrate-from-v06-to-v07) covers all API replacements and write behavior changes.
 
 ### New Features
 
 * Add complete Catalog replacements and deletion with dry-run, ETags, conditional updates, views, computed columns, and explicit destructive-change authorization. Preserve structured error codes/details, including through append retries and `Stats().LastFailure`, and statement compute seconds.
-* Table append and Catalog mutation requests have a configurable `Config.WriteTimeout` (`*time.Duration`), including response-body reads; nil uses the default of 30 seconds, a pointer to zero disables the limit, and a positive duration overrides it. Caller context deadlines, HTTP-client timeouts, and stream delivery/retry budgets remain in force. Timeout outcomes remain unknown and are never automatically retried. The write timeout starts after local encoding, compression, and request preparation. Client interruptions expose `Error.WriteDetails` with a `timeout` or `cancelled` reason and an `unknown` outcome while preserving existing kinds, causes, and HTTP diagnostics. Catalog dry runs use the same timeout without reporting an unknown commit.
+* Add `Config.WriteTimeout` (`*time.Duration`): nil uses 30 seconds, zero disables the limit, and a positive duration overrides it. Client interruptions expose `Error.WriteDetails` with a `timeout` or `cancelled` reason and an `unknown` outcome while preserving error kinds, causes, and HTTP diagnostics. Catalog dry runs use the same timeout without reporting an unknown commit.
+* Add configurable append retries and a five-minute default delivery budget per dispatched batch. Confirmed temporary rejections remain retryable by default. `RetryUnknown` explicitly opts into replaying other transient unknown outcomes, which may duplicate rows; client timeouts and cancellations are never retried. Direct `AppendNDJSON` remains a single SDK attempt.
+
+### Bug Fixes
+
+* Make Statement handles safe for concurrent waiting, refresh, cancellation, and local snapshots. Late responses cannot replace a terminal result, and snapshots do not share mutable fields with the cache.
+* Preserve FIFO order for streaming write byte-budget waiters so newer or smaller records cannot starve an older blocked producer.
 
 ### Improvements
 
-* Statement handles are safe for concurrent waiting, refresh, cancellation, and local snapshots. Late responses cannot replace a terminal result, and snapshots do not share mutable fields with the cache.
-* Result decoding preserves integer boundaries and identifies failing rows and columns. Unstructured Catalog gateway failures report an unknown commit outcome.
+* Validate result row widths and identify failing rows and columns in decoding errors. Integer results retain their full `int64` and `uint64` ranges.
 * The bulk append example imports NDJSON from standard input with bounded memory and reports partial writes.
-* `AppendStream` retries confirmed temporary rejections by default. Opt into at-least-once replay of transient unknown outcomes with `RetryUnknown`; client timeouts and cancellations are never retried. `Stats().LastFailure` preserves timeout diagnostics. Direct `AppendNDJSON` remains a single SDK attempt.
 * `AppendStream` now targets 4 MiB per batch by default; the maximum configurable target and uncompressed request limit remain 8 MiB.
-* Streaming write byte budgets now preserve FIFO waiter order so newer or smaller records cannot starve an older blocked producer.
 
 ## v0.6.3 (2026-08-26)
 
