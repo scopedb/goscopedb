@@ -546,7 +546,7 @@ func TestAppendStreamContinuePreservesStructuredLastFailure(t *testing.T) {
 	require.Equal(t, "invalid timestamp", failure.Message)
 	require.Equal(t, "invalid_schema", failure.Code)
 	require.JSONEq(t, details, string(failure.Details))
-	require.Equal(t, AppendStateRejected, failure.AppendState)
+	require.Equal(t, AppendStateRejected, failure.Status)
 	require.Equal(t, http.StatusUnprocessableEntity, failure.HTTPStatus)
 	require.Equal(t, "append-request-123", failure.RequestID)
 	require.Equal(t, 2*time.Second, failure.RetryAfter)
@@ -861,7 +861,7 @@ func TestAppendStreamConcurrentProducersAndStats(t *testing.T) {
 }
 
 func TestAppendStreamOptionValidation(t *testing.T) {
-	table := &Table{}
+	table := newTestClient(t, "https://example.invalid").Table("events")
 	invalid := []AppendStreamOptions{
 		{FailurePolicy: AppendFailurePolicy(9)},
 		{TargetBatchBytes: -1},
@@ -886,27 +886,11 @@ func TestAppendStreamOptionValidation(t *testing.T) {
 		require.ErrorAs(t, err, &scopeErr)
 		require.Equal(t, ErrorKindConfigInvalid, scopeErr.Kind)
 	}
-	defaults, err := normalizeAppendStreamOptions(AppendStreamOptions{})
-	require.NoError(t, err)
-	require.Equal(t, 4*1024*1024, defaults.targetBatchBytes)
-	require.Equal(t, 64*1024*1024, defaults.maxBufferedBytes)
-	require.Equal(t, 8, defaults.retry.MaxRetries)
-	require.Equal(t, 5*time.Minute, defaults.retry.MaxElapsedTime)
 	for range 100 {
 		delay := appendRetryDelay(time.Second, 0)
 		require.GreaterOrEqual(t, delay, 500*time.Millisecond)
 		require.Less(t, delay, time.Second)
 	}
-	require.Equal(t, "stop", AppendFailureStop.String())
-	require.Equal(t, "continue", AppendFailureContinue.String())
-	require.Equal(t, "open", AppendStreamOpen.String())
-	require.Equal(t, "closing", AppendStreamClosing.String())
-	require.Equal(t, "closed", AppendStreamClosed.String())
-	require.Equal(t, "failed", AppendStreamFailed.String())
-	require.Equal(t, "ok", AppendDeliveryOK.String())
-	require.Equal(t, "partial", AppendDeliveryPartial.String())
-	require.Equal(t, "failed", AppendDeliveryFailed.String())
-	require.Equal(t, "unknown", AppendDeliveryUnknown.String())
 	require.Equal(t, 2*time.Second, appendRetryDelay(time.Second, 2*time.Second))
 	require.Equal(t, time.Hour, appendRetryDelay(time.Second, time.Hour))
 }

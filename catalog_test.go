@@ -101,7 +101,7 @@ func TestCatalogWorkflow(t *testing.T) {
 	require.Nil(t, deleted.After)
 	table := client.Table(original.Name)
 	table.Database = "db"
-	created, err := table.Apply(t.Context(), original)
+	created, err := table.Catalog().Apply(t.Context(), original)
 	require.NoError(t, err)
 	require.Nil(t, created.Before)
 	require.Equal(t, original, created.After)
@@ -160,6 +160,7 @@ func TestCatalogFailureOutcomes(t *testing.T) {
 	}{
 		{name: "conflict", status: 412, body: `{"code":"catalog_version_mismatch","message":"stale"}`, code: "catalog_version_mismatch"},
 		{name: "destructive", status: 409, body: `{"code":"catalog_destructive_change","message":"secret"}`, code: "catalog_destructive_change"},
+		{name: "gateway", status: 502, body: "upstream response lost", code: "catalog_commit_outcome_unknown"},
 		{name: "commit", status: 500, body: `{"code":"catalog_commit_outcome_unknown","message":"unknown"}`, code: "catalog_commit_outcome_unknown"},
 		{name: "transport", cause: context.Canceled, code: "catalog_commit_outcome_unknown", writeReason: WriteErrorReasonCancelled},
 		{name: "body", status: 200, partial: true, cause: io.ErrUnexpectedEOF, code: "catalog_commit_outcome_unknown"},
@@ -222,6 +223,7 @@ func TestParseRetryAfterHTTPDate(t *testing.T) {
 	now := time.Date(2026, time.August, 8, 12, 0, 0, 0, time.UTC)
 	retryAt := now.Add(7 * time.Second).Format(http.TimeFormat)
 	require.Equal(t, 7*time.Second, parseRetryAfter(retryAt, now))
+	require.Greater(t, parseRetryAfter("9223372036854775807", now), 24*time.Hour)
 }
 
 func writeJSONValue(t *testing.T, w http.ResponseWriter, value any) {
@@ -239,5 +241,40 @@ func TestCatalogRejectsPathTraversalBeforeMutation(t *testing.T) {
 		var failure *Error
 		require.ErrorAs(t, err, &failure)
 		require.Equal(t, ErrorKindConfigInvalid, failure.Kind)
+		_, err = client.Table(name).AppendStream(AppendStreamOptions{})
+		require.ErrorAs(t, err, &failure)
+		require.Equal(t, ErrorKindConfigInvalid, failure.Kind)
+	}
+}
+
+func TestCatalogTypedReadRejectsLossyRoundTrip(t *testing.T) {
+	for _, definition := range []string{
+		`{"name":"events","future":{"precise":9007199254740993}}`,
+		`{"name":"events","columns":[{"name":"id","data_type":"int","future":true}]}`,
+		`{"name":"events","distinct":{"on":[],"by":[],"future":true}}`,
+		`{"name":"events","columns":[{"name":"id","data_type":"int","indexes":[{"type":"search","future":true}]}]}`,
+	} {
+		t.Run(definition, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("ETag", `"1"`)
+				if r.Method == http.MethodGet {
+					_, _ = io.WriteString(w, definition)
+					return
+				}
+				data, err := io.ReadAll(r.Body)
+				require.NoError(t, err)
+				require.JSONEq(t, definition, string(data))
+				writeJSONValue(t, w, CatalogResult[json.RawMessage]{Before: json.RawMessage(definition), After: json.RawMessage(definition)})
+			}))
+			defer server.Close()
+			resource := newTestClient(t, server.URL).Table("events").Catalog()
+			_, err := resource.Get(t.Context())
+			require.ErrorContains(t, err, "use Raw")
+			snapshot, err := resource.Raw().Get(t.Context())
+			require.NoError(t, err)
+			result, err := resource.Raw().Apply(t.Context(), snapshot.Definition, CatalogOptions{IfMatch: snapshot.ETag})
+			require.NoError(t, err)
+			require.JSONEq(t, definition, string(result.After))
+		})
 	}
 }

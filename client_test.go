@@ -241,3 +241,27 @@ func decodeCompressedRequestBody(r *http.Request) ([]byte, error) {
 		return nil, io.ErrUnexpectedEOF
 	}
 }
+
+func TestOwnedClientDoesNotReplayRedirectedWrite(t *testing.T) {
+	for _, status := range []int{http.StatusFound, http.StatusTemporaryRedirect} {
+		t.Run(strconv.Itoa(status), func(t *testing.T) {
+			requests := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests++
+				if requests == 1 {
+					http.Redirect(w, r, "/redirected", status)
+					return
+				}
+				writeJSONValue(t, w, AppendRowsResult{Status: AppendStateCommitted, NumRowsInserted: 1})
+			}))
+			defer server.Close()
+			client := newTestClient(t, server.URL)
+			_, err := client.Table("events").AppendNDJSON(t.Context(), []byte(`{"id":1}`))
+			var failure *Error
+			require.ErrorAs(t, err, &failure)
+			require.Equal(t, status, failure.HTTPStatus)
+			require.Equal(t, AppendStateUnknown, failure.AppendDetails.Status)
+			require.Equal(t, 1, requests)
+		})
+	}
+}

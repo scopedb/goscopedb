@@ -42,26 +42,10 @@ func (c *Client) Table(tableName string) *Table {
 	}
 }
 
-// Drop issues a DROP TABLE statement and waits for completion.
-func (t *Table) Drop(ctx context.Context) error {
-	_, err := t.c.Query(ctx, "DROP TABLE "+t.Identifier())
-	return err
-}
-
-// Describe returns the complete REST catalog resource for this table.
-func (t *Table) Describe(ctx context.Context) (CatalogTable, error) {
-	snapshot, err := t.c.Catalog().Table(t.databaseName(), t.schemaName(), t.Name).Get(ctx)
-	if err != nil {
-		return CatalogTable{}, err
-	}
-	return *snapshot.Definition, nil
-}
-
-// Apply creates or replaces this table's complete definition. The definition's
-// Name must match the table name. Options may be omitted; by default, potentially
-// destructive changes are rejected. The parent database and schema must exist.
-func (t *Table) Apply(ctx context.Context, definition *CatalogTable, options ...CatalogOptions) (CatalogResult[*CatalogTable], error) {
-	return t.c.Catalog().Table(t.databaseName(), t.schemaName(), t.Name).Apply(ctx, definition, options...)
+// Catalog selects this table's complete definition for Get, Apply, Delete, or Raw.
+// The selector captures the current database, schema, and name.
+func (t *Table) Catalog() *CatalogResource[*CatalogTable] {
+	return t.c.Catalog().Table(t.databaseName(), t.schemaName(), t.Name)
 }
 
 // AppendNDJSON sends one caller-encoded NDJSON request of at most 8 MiB

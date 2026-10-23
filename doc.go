@@ -41,18 +41,19 @@ Query waits for a statement result, which can be converted to keyed objects:
 	}
 	fmt.Println(rows)
 
-Use Statement.Submit when an application needs the statement ID, a local status
-snapshot, an explicit remote status request, or a separate wait. Omit ID to let
-ScopeDB generate it. MaxElapsed and MaxEstimated set server-side duration limits.
+Use Statement.Submit when an application needs the statement ID, a local Snapshot,
+an explicit Refresh, or a separate Wait. Cancel returns the same complete
+StatementSnapshot as Refresh; all handle methods are safe to call concurrently.
+Omit ID to let ScopeDB generate it. MaxElapsed and MaxEstimated set server-side duration limits.
 Failed statements expose the server message and code on Error, with structured
 details on Error.StatementDetails.
 Client.Catalog reads and replaces the complete tenant catalog. Its Database,
 Schema, Table, and View selectors provide typed Get, Apply, and Delete operations.
 Raw retains JSON definitions including fields unknown to the SDK. Apply supports
 dry runs, ETag preconditions, and authorization for destructive changes.
-Table.Apply initializes a complete table definition before writing; options are
-optional and potentially destructive changes are rejected by default.
-Table.Describe returns a CatalogTable definition.
+Table.Catalog selects the table definition for Get, Apply, Delete, or Raw.
+Typed reads reject unsupported fields to prevent lossy replacements.
+Potentially destructive changes are rejected without explicit authorization.
 
 For application writes, Table.AppendStream is the recommended path:
 it accepts typed rows and adds bounded asynchronous batching that is safe for
@@ -68,6 +69,8 @@ rows in the delivery report and failure details in Stats().LastFailure.
 
 Stream Send methods confirm local admission only. Flush and Shutdown wait for
 the accepted prefix. AppendStream reports rejected and unknown outcomes.
+Unknown outcomes are not retried unless RetryUnknown is explicitly enabled;
+those retries may duplicate rows. Client timeouts are never retried.
 
 ScopeQL is documented separately in the [quickstart], [query guide], and
 [language reference].

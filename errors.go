@@ -174,21 +174,13 @@ func responseError(resp *http.Response, body []byte, kind ErrorKind) *Error {
 			err.Retryable = *payload.Retryable
 		}
 		err.Details = payload.Details
-		var details struct {
-			Status             AppendState      `json:"status"`
-			RowErrors          []AppendRowError `json:"row_errors"`
-			RowErrorsTruncated bool             `json:"row_errors_truncated"`
-		}
-		if json.Unmarshal(payload.Details, &details) == nil &&
+		var details AppendErrorDetails
+		if kind == ErrorKindAppendRowsFailed && json.Unmarshal(payload.Details, &details) == nil &&
 			(details.Status == AppendStateRejected || details.Status == AppendStateUnknown) {
 			if details.RowErrors == nil {
 				details.RowErrors = []AppendRowError{}
 			}
-			err.AppendDetails = &AppendErrorDetails{
-				AppendState:        details.Status,
-				RowErrors:          details.RowErrors,
-				RowErrorsTruncated: details.RowErrorsTruncated,
-			}
+			err.AppendDetails = &details
 		}
 	}
 	return err
@@ -217,7 +209,8 @@ func parseRetryAfter(value string, now time.Time) time.Duration {
 		return 0
 	}
 	if seconds, err := strconv.ParseInt(value, 10, 64); err == nil && seconds >= 0 {
-		return time.Duration(seconds) * time.Second
+		const maxSeconds = int64((1<<63 - 1) / time.Second)
+		return time.Duration(min(seconds, maxSeconds)) * time.Second
 	}
 	if retryAt, err := http.ParseTime(value); err == nil {
 		if delay := retryAt.Sub(now); delay > 0 {

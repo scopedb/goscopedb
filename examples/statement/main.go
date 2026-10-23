@@ -61,15 +61,15 @@ func run(ctx context.Context) error {
 		return err
 	}
 	fmt.Println("statement ID:", handle.ID())
-	if cached := handle.LastStatus(); cached != nil {
-		fmt.Println("cached status:", *cached)
+	if cached := handle.Snapshot(); cached != nil {
+		fmt.Println("cached status:", cached.Status)
 	}
 
-	latest, err := handle.Status(ctx)
+	latest, err := handle.Refresh(ctx)
 	if err != nil {
 		return err
 	}
-	fmt.Println("latest status:", latest)
+	fmt.Println("latest status:", latest.Status)
 
 	result, err = handle.Wait(ctx)
 	if err != nil {

@@ -73,7 +73,7 @@ func TestNative06Lifecycle(t *testing.T) {
 		t.Fatal("row count")
 	}
 	_, err = table.AppendNDJSON(ctx, []byte("{\"id\":\"invalid\",\"source\":\"go\"}"))
-	if !errors.As(err, &api) || api.AppendDetails == nil || api.AppendDetails.AppendState != scopedb.AppendStateRejected {
+	if !errors.As(err, &api) || api.AppendDetails == nil || api.AppendDetails.Status != scopedb.AppendStateRejected {
 		t.Fatalf("invalid row: %v", err)
 	}
 	t.Logf("REJECTED code=%s row_errors=%d\n", api.Code, len(api.AppendDetails.RowErrors))
@@ -84,11 +84,11 @@ func TestNative06Lifecycle(t *testing.T) {
 	if result.TotalRows != 2 {
 		t.Fatal("rejected rows committed")
 	}
-	t.Logf("QUERY rows=%d compute_seconds=%g\n", result.TotalRows, stmt.Progress().ComputeSeconds)
+	t.Logf("QUERY rows=%d compute_seconds=%g\n", result.TotalRows, stmt.Snapshot().Progress.ComputeSeconds)
 	late := c.StatementHandle(stmt.ID())
 	cancelled, err := late.Cancel(ctx)
 	check(err)
-	if cancelled.StatementID != stmt.ID() || cancelled.Status != scopedb.StatementStatusFinished || late.ResultSet() == nil {
+	if cancelled.ID != stmt.ID() || cancelled.Status != scopedb.StatementStatusFinished || late.Snapshot().ResultSet == nil {
 		t.Fatal("cancel lost result")
 	}
 	t.Log("CANCEL completed statement retained result")
@@ -105,4 +105,57 @@ func TestNative06Lifecycle(t *testing.T) {
 	}
 	t.Logf("TIMEOUT code=%s\n", api.Code)
 	t.Log("PASS native 0.6 lifecycle")
+}
+
+func TestNumericProtocolBoundaries(t *testing.T) {
+	client := NewClient(t)
+	defer client.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	table := client.Table(RandomName(t))
+	_, err := table.Catalog().Apply(ctx, &scopedb.CatalogTable{
+		Name: table.Name,
+		Columns: []scopedb.CatalogColumn{
+			{Name: "i", DataType: scopedb.IntDataType},
+			{Name: "u", DataType: scopedb.UIntDataType},
+			{Name: "object", DataType: scopedb.ObjectDataType},
+		},
+	})
+	require.NoError(t, err)
+	defer func() {
+		cleanup, done := context.WithTimeout(context.Background(), 30*time.Second)
+		defer done()
+		_, err := table.Catalog().Delete(cleanup, scopedb.CatalogOptions{AllowDestructive: true})
+		require.NoError(t, err)
+	}()
+	_, err = table.AppendNDJSON(ctx, []byte(`{"u":18446744073709551615}`))
+	var rejected *scopedb.Error
+	require.ErrorAs(t, err, &rejected)
+	require.Equal(t, scopedb.AppendStateRejected, rejected.AppendDetails.Status)
+	require.Equal(t, "invalid_schema", rejected.Code)
+	_, err = table.AppendNDJSON(ctx, []byte(`{"i":-9223372036854775808,"u":9223372036854775807,"object":{"id":9007199254740993}}`))
+	require.NoError(t, err)
+	stream, err := table.AppendStream(scopedb.AppendStreamOptions{})
+	require.NoError(t, err)
+	require.NoError(t, stream.Send(ctx, map[string]any{"i": int64(1<<63 - 1), "u": uint64(1<<63 - 1)}))
+	report, err := stream.Shutdown(ctx)
+	require.NoError(t, err)
+	require.EqualValues(t, 1, report.CommittedRows)
+	result, err := client.Query(ctx, "FROM "+table.Identifier()+" ORDER BY i")
+	require.NoError(t, err)
+	rows, err := result.ToObjects()
+	require.NoError(t, err)
+	require.Len(t, rows, 2)
+	require.Equal(t, int64(-1<<63), rows[0]["i"])
+	require.Equal(t, int64(1<<63-1), rows[1]["i"])
+	require.Equal(t, uint64(1<<63-1), rows[0]["u"])
+	require.Equal(t, uint64(1<<63-1), rows[1]["u"])
+	require.JSONEq(t, `{"id":9007199254740993}`, rows[0]["object"].(string))
+	require.Nil(t, rows[1]["object"])
+	result, err = client.Query(ctx, "SELECT '18446744073709551615'::uint AS u")
+	require.NoError(t, err)
+	row, ok, err := result.First()
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, uint64(1<<64-1), row["u"])
 }

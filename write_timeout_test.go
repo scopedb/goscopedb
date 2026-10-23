@@ -44,12 +44,16 @@ func TestWriteTimeoutRequestScope(t *testing.T) {
 					require.True(t, hasDeadline)
 					require.InDelta(t, timeout.Seconds(), time.Until(deadline).Seconds(), 1)
 				}
+				body := `{"before":{"name":"scopedb"},"after":{"name":"scopedb"},"destructive":false}`
+				if req.Method == http.MethodGet {
+					body = `{"name":"scopedb"}`
+				} else if req.Method == http.MethodPost {
+					body = `{"status":"committed","num_rows_inserted":1}`
+				}
 				return &http.Response{
 					StatusCode: http.StatusOK,
 					Header:     http.Header{"Etag": []string{`"1"`}},
-					Body: io.NopCloser(strings.NewReader(
-						`{"status":"committed","num_rows_inserted":1,"name":"scopedb","before":{"name":"scopedb"},"after":{"name":"scopedb"}}`,
-					)),
+					Body:       io.NopCloser(strings.NewReader(body)),
 				}, nil
 			})}
 			client, err := NewClient(Config{Endpoint: "https://example.com", HTTPClient: standardClient, WriteTimeout: timeout})
@@ -126,7 +130,7 @@ func TestWriteTimeoutBoundsHeadersAndResponseBody(t *testing.T) {
 					Reason: WriteErrorReasonTimeout, Outcome: AppendStateUnknown,
 				}, scopeErr.WriteDetails)
 				if operation == "append" {
-					require.Equal(t, AppendStateUnknown, scopeErr.AppendDetails.AppendState)
+					require.Equal(t, AppendStateUnknown, scopeErr.AppendDetails.Status)
 				} else {
 					require.Equal(t, ErrorKindCatalogFailed, scopeErr.Kind)
 					require.Equal(t, "catalog_commit_outcome_unknown", scopeErr.Code)
@@ -297,6 +301,6 @@ func TestServerTimeoutRejectionRemainsSafelyRetryable(t *testing.T) {
 	var scopeErr *Error
 	require.ErrorAs(t, err, &scopeErr)
 	require.Nil(t, scopeErr.WriteDetails)
-	require.Equal(t, AppendStateRejected, scopeErr.AppendDetails.AppendState)
+	require.Equal(t, AppendStateRejected, scopeErr.AppendDetails.Status)
 	require.True(t, scopeErr.Retryable)
 }

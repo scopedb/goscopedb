@@ -136,11 +136,15 @@ func (o AppendDeliveryOutcome) String() string {
 }
 
 // AppendRetryOptions configures retries of an exact encoded batch for temporary
-// rejections and transient unknown outcomes. A nil Retry uses the defaults;
+// rejections. A nil Retry uses the defaults;
 // a non-nil option with MaxRetries=0 disables retries.
 // Client timeouts and cancellations are never retried.
 type AppendRetryOptions struct {
 	MaxRetries int
+	// RetryUnknown opts into retries after a transient failure that may have
+	// committed. This can insert duplicate rows. It defaults to false and never
+	// overrides the prohibition on retrying client timeouts or cancellations.
+	RetryUnknown bool
 	// Zero durations use defaults: 100 ms initial, 5 s maximum backoff, 5 min
 	// elapsed budget per dispatched batch (including HTTP attempts).
 	InitialBackoff time.Duration
@@ -212,8 +216,8 @@ type AppendLastFailure struct {
 	// Code and Details preserve the last attempt's structured server error.
 	Code    string
 	Details json.RawMessage
-	// AppendState is rejected or unknown.
-	AppendState AppendState
+	// Status is the aggregate rejected or unknown outcome across all attempts.
+	Status AppendState
 	// HTTPStatus is zero when no HTTP response was available.
 	HTTPStatus int
 	// RequestID is the request identifier reported by the service, when present.
@@ -221,9 +225,11 @@ type AppendLastFailure struct {
 	// RetryAfter is the service-provided retry delay, when present.
 	RetryAfter time.Duration
 	// Retryable reports the underlying error's conservative retry classification;
-	// it is false for unknown outcomes. The stream also retries transient unknown
-	// outcomes by default, so this field is not the stream's retry decision.
+	// it is false for unknown outcomes. RetryUnknown may opt into replaying such
+	// outcomes, so this field is not the stream's retry decision.
 	Retryable bool
+	// WriteDetails identifies a client timeout or cancellation, when present.
+	WriteDetails *WriteErrorDetails
 	// RowErrors contains structured validation failures reported for the batch.
 	RowErrors []AppendRowError
 	// RowErrorsTruncated reports whether the service omitted additional row errors.
@@ -263,6 +269,9 @@ type normalizedAppendStreamOptions struct {
 
 // AppendStream creates a bounded asynchronous append stream for this table.
 func (t *Table) AppendStream(options AppendStreamOptions) (*AppendStream, error) {
+	if _, err := t.c.resourceURL("catalog", "databases", t.databaseName(), "schemas", t.schemaName(), "tables", t.Name, "ingest"); err != nil {
+		return nil, err
+	}
 	config, err := normalizeAppendStreamOptions(options)
 	if err != nil {
 		return nil, err
@@ -398,9 +407,8 @@ type appendBatch struct {
 }
 
 type appendBatchResult struct {
-	batch  appendBatch
-	result AppendRowsResult
-	err    error
+	batch appendBatch
+	err   error
 }
 
 type appendCounters struct {
@@ -427,8 +435,6 @@ type appendSharedState struct {
 	lastFailure     *AppendLastFailure
 	lastReport      *AppendDeliveryReport
 	fatal           error
-	terminalReport  AppendDeliveryReport
-	hasTerminal     bool
 }
 
 // AppendStream asynchronously batches rows into bounded NDJSON append requests.
@@ -449,7 +455,6 @@ type AppendStream struct {
 	admissionDone chan struct{}
 	admissionOnce sync.Once
 	terminalDone  chan struct{}
-	terminalOnce  sync.Once
 	failureDone   chan struct{}
 
 	shared appendSharedState
@@ -680,7 +685,8 @@ func (s *AppendStream) Stats() AppendStreamStats {
 		stats.LastFailure = copyAppendLastFailure(s.shared.lastFailure)
 	}
 	if s.shared.lastReport != nil {
-		stats.LastReport = copyAppendReport(*s.shared.lastReport)
+		report := *s.shared.lastReport
+		stats.LastReport = &report
 	}
 	return stats
 }
@@ -716,7 +722,7 @@ func (s *AppendStream) waitTerminal(ctx context.Context) (AppendDeliveryReport, 
 	select {
 	case <-s.terminalDone:
 		s.shared.mu.Lock()
-		report := s.shared.terminalReport
+		report := *s.shared.lastReport
 		err := s.shared.fatal
 		s.shared.mu.Unlock()
 		return report, err
@@ -725,7 +731,7 @@ func (s *AppendStream) waitTerminal(ctx context.Context) (AppendDeliveryReport, 
 	select {
 	case <-s.terminalDone:
 		s.shared.mu.Lock()
-		report := s.shared.terminalReport
+		report := *s.shared.lastReport
 		err := s.shared.fatal
 		s.shared.mu.Unlock()
 		return report, err
@@ -797,17 +803,13 @@ func (s *AppendStream) closeAdmission() {
 
 func (s *AppendStream) finishTerminal(report AppendDeliveryReport, err error, state AppendStreamState) {
 	s.shared.mu.Lock()
-	if !s.shared.hasTerminal {
-		s.shared.state = state
-		s.shared.terminalReport = report
-		s.shared.hasTerminal = true
-		s.shared.fatal = err
-		reportCopy := report
-		s.shared.lastReport = &reportCopy
-	}
+	s.shared.state = state
+	s.shared.fatal = err
+	s.shared.lastReport = &report
 	s.shared.mu.Unlock()
 	s.closeAdmission()
-	s.terminalOnce.Do(func() { close(s.terminalDone) })
+	// Only the worker finishes the stream, immediately before returning.
+	close(s.terminalDone)
 }
 
 func (s *AppendStream) releaseCommandSlot() {
@@ -999,12 +1001,11 @@ func (w *appendWorker) dispatchReady() {
 }
 
 func (s *AppendStream) sendBatch(batch appendBatch) {
-	var result AppendRowsResult
 	var err error
 	backoff := s.config.retry.InitialBackoff
 	deliveryCtx, deliveryCancel := context.WithTimeout(context.Background(), s.config.retry.MaxElapsedTime)
 	defer deliveryCancel()
-	var ambiguous error
+	hadUnknown := false
 retryLoop:
 	for attempt := 0; ; attempt++ {
 		if attempt > 0 {
@@ -1020,7 +1021,7 @@ retryLoop:
 			s.shared.counters.retries++
 			s.shared.mu.Unlock()
 		}
-		result, err = s.client.appendNDJSONWithTimeout(
+		_, err = s.client.appendNDJSONWithTimeout(
 			deliveryCtx,
 			s.database,
 			s.schema,
@@ -1028,16 +1029,17 @@ retryLoop:
 			batch.payload,
 			s.config.attemptTimeout,
 		)
-		if err == nil {
-			if result.AppendState != AppendStateCommitted || result.NumRowsInserted != int64(batch.rows) {
-				err = unknownAppendStreamError(fmt.Sprintf(
-					"append response did not confirm all %d rows committed",
-					batch.rows,
-				), nil)
-			}
+		// In-flight failures always carry AppendDetails. Errors without them
+		// happened before dispatch (for example, the retry budget expired while
+		// compressing). Those rows were not sent by this attempt.
+		var failure *Error
+		if err != nil && (!errors.As(err, &failure) || failure.AppendDetails == nil) {
+			rejected := appendRejectedError(err.Error())
+			rejected.cause = err
+			err = rejected
 		}
 		if err != nil && appendErrorState(err) == AppendStateUnknown {
-			ambiguous = err
+			hadUnknown = true
 		}
 		if err == nil || !s.isRetryableAppend(err) {
 			break
@@ -1073,10 +1075,10 @@ retryLoop:
 	}
 	// A later rejected attempt cannot prove an earlier unknown attempt did not
 	// commit. Only a successful acknowledgement resolves the batch for replay.
-	if err != nil && ambiguous != nil && appendErrorState(err) != AppendStateUnknown {
+	if err != nil && hadUnknown && appendErrorState(err) != AppendStateUnknown {
 		err = unknownAppendStreamError("an earlier append attempt may have committed; last attempt: "+err.Error(), err)
 	}
-	s.results <- appendBatchResult{batch: batch, result: result, err: err}
+	s.results <- appendBatchResult{batch: batch, err: err}
 }
 
 func appendRetryDelay(backoff time.Duration, retryAfter time.Duration) time.Duration {
@@ -1094,7 +1096,7 @@ func (s *AppendStream) isRetryableAppend(err error) bool {
 		return true
 	}
 	var e *Error
-	if !errors.As(err, &e) || e.WriteDetails != nil || e.AppendDetails == nil || e.AppendDetails.AppendState != AppendStateUnknown {
+	if !s.config.retry.RetryUnknown || !errors.As(err, &e) || e.WriteDetails != nil || e.AppendDetails == nil || e.AppendDetails.Status != AppendStateUnknown {
 		return false
 	}
 	// Authentication, schema, and other permanent HTTP errors must not spin.
@@ -1108,7 +1110,7 @@ func isRetryableRejectedAppend(err error) bool {
 	return errors.As(err, &scopeErr) &&
 		scopeErr.Retryable &&
 		scopeErr.AppendDetails != nil &&
-		scopeErr.AppendDetails.AppendState == AppendStateRejected
+		scopeErr.AppendDetails.Status == AppendStateRejected
 }
 
 func unknownAppendStreamError(message string, cause error) error {
@@ -1117,8 +1119,8 @@ func unknownAppendStreamError(message string, cause error) error {
 		Message:   message,
 		Retryable: false,
 		AppendDetails: &AppendErrorDetails{
-			AppendState: AppendStateUnknown,
-			RowErrors:   []AppendRowError{},
+			Status:    AppendStateUnknown,
+			RowErrors: []AppendRowError{},
 		},
 		cause: cause,
 	}
@@ -1175,16 +1177,16 @@ func (w *appendWorker) handleResult(result appendBatchResult) {
 func appendErrorState(err error) AppendState {
 	var scopeErr *Error
 	if errors.As(err, &scopeErr) && scopeErr.AppendDetails != nil {
-		return scopeErr.AppendDetails.AppendState
+		return scopeErr.AppendDetails.Status
 	}
 	return AppendStateUnknown
 }
 
 func makeAppendLastFailure(err error, state AppendState) *AppendLastFailure {
 	failure := &AppendLastFailure{
-		At:          time.Now(),
-		Message:     err.Error(),
-		AppendState: state,
+		At:      time.Now(),
+		Message: err.Error(),
+		Status:  state,
 	}
 	var scopeErr *Error
 	if !errors.As(err, &scopeErr) {
@@ -1196,6 +1198,10 @@ func makeAppendLastFailure(err error, state AppendState) *AppendLastFailure {
 	failure.RequestID = scopeErr.RequestID
 	failure.RetryAfter = scopeErr.RetryAfter
 	failure.Retryable = scopeErr.Retryable
+	if scopeErr.WriteDetails != nil {
+		details := *scopeErr.WriteDetails
+		failure.WriteDetails = &details
+	}
 	if scopeErr.AppendDetails != nil {
 		failure.RowErrors = slices.Clone(scopeErr.AppendDetails.RowErrors)
 		failure.RowErrorsTruncated = scopeErr.AppendDetails.RowErrorsTruncated
@@ -1210,6 +1216,10 @@ func copyAppendLastFailure(failure *AppendLastFailure) *AppendLastFailure {
 	cloned := *failure
 	cloned.Details = slices.Clone(failure.Details)
 	cloned.RowErrors = slices.Clone(failure.RowErrors)
+	if failure.WriteDetails != nil {
+		details := *failure.WriteDetails
+		cloned.WriteDetails = &details
+	}
 	return &cloned
 }
 
@@ -1363,11 +1373,6 @@ func (w *appendWorker) makeReportFrom(startedAt time.Time, counters appendCounte
 		report.Outcome = AppendDeliveryFailed
 	}
 	return report
-}
-
-func copyAppendReport(report AppendDeliveryReport) *AppendDeliveryReport {
-	cloned := report
-	return &cloned
 }
 
 type appendByteBudget struct {
