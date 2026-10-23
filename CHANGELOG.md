@@ -6,6 +6,7 @@ All significant changes to the ScopeDB Go SDK are documented in this file.
 
 ### Breaking Changes
 
+* `AppendStreamOptions.AttemptTimeout` now takes `*time.Duration`. Omit it to inherit the client write timeout, pass the address of a positive duration to override it, or use `new(time.Duration)` to disable the per-attempt limit.
 * Replace partial Statement accessors and `StatementCancelResult` with complete `StatementSnapshot` values from `Snapshot`, `Refresh`, and `Cancel`. Confirmed cancellation is identifiable through `ErrStatementCancelled`.
 * Replace `Table.Describe`, `Apply`, and `Drop` with `Table.Catalog().Get`, `Apply`, and `Delete`, preserving ETags and using one conditional mutation contract.
 * Rename append outcome fields from `AppendState` to `Status` and serialize them as `status`. Unknown append outcomes now require explicit retry opt-in. Remove the historical `u_int` type alias.
@@ -16,7 +17,7 @@ All significant changes to the ScopeDB Go SDK are documented in this file.
 ### New Features
 
 * Add complete Catalog replacements and deletion with dry-run, ETags, conditional updates, views, computed columns, and explicit destructive-change authorization. Preserve structured error codes/details, including through append retries and `Stats().LastFailure`, and statement compute seconds.
-* Table append and Catalog mutation requests have a configurable `Config.WriteTimeout`, including response-body reads; zero uses the default of 30 seconds, and `NoTimeout` disables the limit. Streams inherit it when `AttemptTimeout` is zero; a positive value overrides it, and `NoTimeout` disables the per-attempt limit. Caller context deadlines, HTTP-client timeouts, and stream delivery/retry budgets remain in force. Timeout outcomes remain unknown and are never automatically retried. The write timeout starts after local encoding, compression, and request preparation. Client interruptions expose `Error.WriteDetails` with a `timeout` or `cancelled` reason and an `unknown` outcome while preserving existing kinds, causes, and HTTP diagnostics. Catalog dry runs use the same timeout without reporting an unknown commit.
+* Table append and Catalog mutation requests have a configurable `Config.WriteTimeout` (`*time.Duration`), including response-body reads; nil uses the default of 30 seconds, a pointer to zero disables the limit, and a positive duration overrides it. Caller context deadlines, HTTP-client timeouts, and stream delivery/retry budgets remain in force. Timeout outcomes remain unknown and are never automatically retried. The write timeout starts after local encoding, compression, and request preparation. Client interruptions expose `Error.WriteDetails` with a `timeout` or `cancelled` reason and an `unknown` outcome while preserving existing kinds, causes, and HTTP diagnostics. Catalog dry runs use the same timeout without reporting an unknown commit.
 
 ### Improvements
 

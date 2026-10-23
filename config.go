@@ -21,10 +21,6 @@ import (
 	"time"
 )
 
-// NoTimeout disables Config.WriteTimeout or AppendStreamOptions.AttemptTimeout.
-// Caller contexts, HTTP-client timeouts, and stream delivery budgets still apply.
-const NoTimeout time.Duration = -1
-
 // Compression defines the compression used for request bodies.
 type Compression string
 
@@ -50,13 +46,14 @@ type Config struct {
 	// The default is CompressionZstd. CompressionGzip is also supported.
 	Compression Compression `json:"compression"`
 	// WriteTimeout bounds each table append or catalog mutation request,
-	// including reading its response body. Zero uses the default of 30 seconds;
-	// NoTimeout disables this limit. Other negative values are invalid.
+	// including reading its response body. Nil uses the default of 30 seconds;
+	// a pointer to zero disables this limit. Negative values are invalid.
+	// NewClient copies the value.
 	// Caller context deadlines and HTTPClient timeouts still apply.
 	// The budget starts after local encoding, compression, and request preparation.
-	// Nonzero stream AttemptTimeout settings override this limit. A timeout leaves
+	// Non-nil stream AttemptTimeout settings override this limit. A timeout leaves
 	// the commit outcome unknown; it does not roll back the write.
-	WriteTimeout time.Duration `json:"write_timeout"`
+	WriteTimeout *time.Duration `json:"write_timeout"`
 	// HTTPClient is the HTTP client used to send requests.
 	//
 	// When nil, the SDK creates and owns an independent HTTP client using Go's

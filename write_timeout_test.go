@@ -33,12 +33,12 @@ func TestWriteTimeoutRequestScope(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
 		name        string
-		timeout     time.Duration
+		timeout     *time.Duration
 		wantTimeout time.Duration
 	}{
-		{"default", 0, 30 * time.Second},
-		{"disabled", NoTimeout, 0},
-		{"configured", time.Minute, time.Minute},
+		{"default", nil, 30 * time.Second},
+		{"disabled", new(time.Duration), 0},
+		{"configured", durationPointer(time.Minute), time.Minute},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -67,6 +67,10 @@ func TestWriteTimeoutRequestScope(t *testing.T) {
 			})}
 			client, err := NewClient(Config{Endpoint: "https://example.com", HTTPClient: standardClient, WriteTimeout: tc.timeout})
 			require.NoError(t, err)
+			if tc.timeout != nil {
+				// Changing the caller's variable must not change an existing client.
+				*tc.timeout = -time.Second
+			}
 
 			_, err = client.Table("events").AppendNDJSON(context.Background(), []byte(`{"id":1}`))
 			require.NoError(t, err)
@@ -87,9 +91,9 @@ func TestWriteTimeoutRequestScope(t *testing.T) {
 	}
 }
 
-func TestWriteTimeoutRejectsInvalidNegativeConfig(t *testing.T) {
+func TestWriteTimeoutRejectsNegativeConfig(t *testing.T) {
 	t.Parallel()
-	_, err := NewClient(Config{Endpoint: "https://example.com", WriteTimeout: -time.Second})
+	_, err := NewClient(Config{Endpoint: "https://example.com", WriteTimeout: durationPointer(-1)})
 	var scopeErr *Error
 	require.ErrorAs(t, err, &scopeErr)
 	require.Equal(t, ErrorKindConfigInvalid, scopeErr.Kind)
@@ -120,7 +124,7 @@ func TestWriteTimeoutBoundsHeadersAndResponseBody(t *testing.T) {
 					<-r.Context().Done()
 				}))
 				defer server.Close()
-				client, err := NewClient(Config{Endpoint: server.URL, WriteTimeout: 50 * time.Millisecond})
+				client, err := NewClient(Config{Endpoint: server.URL, WriteTimeout: durationPointer(50 * time.Millisecond)})
 				require.NoError(t, err)
 				defer client.Close()
 				switch operation {
@@ -156,8 +160,12 @@ func TestWriteTimeoutBoundsHeadersAndResponseBody(t *testing.T) {
 
 func TestWriteTimeoutHonorsEarlierCallerDeadline(t *testing.T) {
 	t.Parallel()
-	for _, timeout := range []time.Duration{0, NoTimeout, time.Second} {
-		t.Run(timeout.String(), func(t *testing.T) {
+	for name, timeout := range map[string]*time.Duration{
+		"default":    nil,
+		"disabled":   new(time.Duration),
+		"configured": durationPointer(time.Second),
+	} {
+		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			client, err := NewClient(Config{
 				Endpoint:     "https://example.com",
@@ -184,17 +192,17 @@ func TestWriteTimeoutStreamInheritanceAndOverride(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
 		name           string
-		writeTimeout   time.Duration
-		attemptTimeout time.Duration
+		writeTimeout   *time.Duration
+		attemptTimeout *time.Duration
 		wantTimeout    time.Duration
 	}{
-		{"default", 0, 0, 30 * time.Second},
-		{"inherit disabled", NoTimeout, 0, defaultAppendRetryElapsedTime},
-		{"inherit", time.Minute, 0, time.Minute},
-		{"override", time.Minute, 2 * time.Minute, 2 * time.Minute},
-		{"enable", NoTimeout, time.Minute, time.Minute},
-		{"disable default", 0, NoTimeout, defaultAppendRetryElapsedTime},
-		{"disable configured", time.Minute, NoTimeout, defaultAppendRetryElapsedTime},
+		{"default", nil, nil, 30 * time.Second},
+		{"inherit disabled", new(time.Duration), nil, defaultAppendRetryElapsedTime},
+		{"inherit", durationPointer(time.Minute), nil, time.Minute},
+		{"override", durationPointer(time.Minute), durationPointer(2 * time.Minute), 2 * time.Minute},
+		{"enable", new(time.Duration), durationPointer(time.Minute), time.Minute},
+		{"disable default", nil, new(time.Duration), defaultAppendRetryElapsedTime},
+		{"disable configured", durationPointer(time.Minute), new(time.Duration), defaultAppendRetryElapsedTime},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -214,6 +222,10 @@ func TestWriteTimeoutStreamInheritanceAndOverride(t *testing.T) {
 			defer client.Close()
 			stream, err := client.Table("events").AppendStream(AppendStreamOptions{AttemptTimeout: tc.attemptTimeout})
 			require.NoError(t, err)
+			if tc.attemptTimeout != nil {
+				// The background worker must use the value captured at construction.
+				*tc.attemptTimeout = -time.Second
+			}
 			require.NoError(t, stream.Send(context.Background(), map[string]any{"id": 1}))
 			_, err = stream.Shutdown(context.Background())
 			require.NoError(t, err)
@@ -228,7 +240,7 @@ func TestWriteTimeoutStartsAfterRequestPreparation(t *testing.T) {
 	payload := []byte(`{"data":"` + strings.Repeat("x", 6*1024*1024) + `"}`)
 	var started time.Time
 	client, err := NewClient(Config{
-		Endpoint: "https://example.com", Compression: CompressionGzip, WriteTimeout: timeout,
+		Endpoint: "https://example.com", Compression: CompressionGzip, WriteTimeout: durationPointer(timeout),
 		HTTPClient: &http.Client{Transport: clientRoundTripFunc(func(req *http.Request) (*http.Response, error) {
 			reachedTransport := time.Now()
 			deadline, ok := req.Context().Deadline()
@@ -273,8 +285,12 @@ func TestWriteInterruptionUsesCurrentContextReason(t *testing.T) {
 
 func TestWriteTimeoutHonorsShorterHTTPClientTimeout(t *testing.T) {
 	t.Parallel()
-	for _, timeout := range []time.Duration{0, NoTimeout, time.Second} {
-		t.Run(timeout.String(), func(t *testing.T) {
+	for name, timeout := range map[string]*time.Duration{
+		"default":    nil,
+		"disabled":   new(time.Duration),
+		"configured": durationPointer(time.Second),
+	} {
+		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			client, err := NewClient(Config{
 				Endpoint: "https://example.com", WriteTimeout: timeout,
@@ -316,4 +332,8 @@ func TestServerTimeoutRejectionRemainsSafelyRetryable(t *testing.T) {
 	require.Nil(t, scopeErr.WriteDetails)
 	require.Equal(t, AppendStateRejected, scopeErr.AppendDetails.Status)
 	require.True(t, scopeErr.Retryable)
+}
+
+func durationPointer(value time.Duration) *time.Duration {
+	return &value
 }

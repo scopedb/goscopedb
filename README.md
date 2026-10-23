@@ -83,7 +83,17 @@ The SDK executes ScopeQL but does not define the language. Start with the langua
 
 [Go's default redirect behavior](https://pkg.go.dev/net/http#Client.Do) changes POST requests to GET without a body for HTTP 301, 302, and 303; HTTP 307 and 308 preserve the method and body when the body can be recreated. Redirects happen within one SDK attempt; `AppendRetryOptions` does not control them and `Stats().Retries` does not count them.
 
-Every table append or Catalog mutation HTTP request has a client timeout of 30 seconds by default. Set `Config.WriteTimeout` to a positive `time.Duration` to change it, or `scopedb.NoTimeout` to disable it; zero uses the default. Its budget starts after local encoding, compression, and request preparation and covers one HTTP attempt, including redirects and reading the complete response body. Streams inherit this timeout when `AttemptTimeout` is zero; a positive value overrides it, and `scopedb.NoTimeout` disables the per-attempt limit. The stream's separate delivery/retry budget still applies. Caller context deadlines and HTTP-client timeouts remain in force. Admission, retry backoff, and an entire `Flush`/`Shutdown` barrier are outside the write timeout. Catalog dry runs use the same timeout but cannot commit, so they do not return `WriteDetails` or report an unknown commit.
+Every table append or Catalog mutation HTTP request has a client timeout of 30 seconds by default. `Config.WriteTimeout` is a `*time.Duration`: nil uses the default, a pointer to zero disables the limit, and a pointer to a positive duration overrides it. Negative durations are invalid. `NewClient` copies the value, so changing the original variable does not change an existing client.
+
+```go
+writeTimeout := 2 * time.Minute
+client, err := scopedb.NewClient(scopedb.Config{
+    Endpoint:     "http://localhost:6543",
+    WriteTimeout: &writeTimeout, // Omit for 30 seconds; use new(time.Duration) to disable.
+})
+```
+
+The write timeout starts after local encoding, compression, and request preparation and covers one HTTP attempt, including redirects and reading the complete response body. Streams inherit it when `AppendStreamOptions.AttemptTimeout` is nil; a non-nil pointer overrides it, with zero disabling the per-attempt limit. The stream copies this value at construction. Its separate delivery/retry budget, caller context deadlines, and HTTP-client timeouts still apply. Admission, retry backoff, and an entire `Flush`/`Shutdown` barrier are outside the write timeout. Catalog dry runs use the same timeout but cannot commit, so they do not return `WriteDetails` or report an unknown commit.
 
 Client timeouts after an HTTP attempt begins preserve the existing `*scopedb.Error` kind and cause and add `WriteDetails` with `Reason: scopedb.WriteErrorReasonTimeout` and `Outcome: scopedb.AppendStateUnknown`; `Error.Retryable` is false. In-flight caller cancellation uses `WriteErrorReasonCancelled`; cancellation before sending preserves the original context error. These fields remain available on subsequent errors returned by the stream. A timeout does not roll back a write: reconcile a client-interrupted write before replaying it. A server HTTP 408 is still a server response; an explicitly rejected append follows the existing safe retry policy. Append streams do not retry unknown outcomes by default. `AppendRetryOptions.RetryUnknown` explicitly enables retries for other transient unknown outcomes; those retries may duplicate committed rows.
 

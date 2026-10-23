@@ -44,10 +44,11 @@ func run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	attemptTimeout := 5 * time.Second
 	stream, err := table.AppendStream(scopedb.AppendStreamOptions{
 		FailurePolicy:    scopedb.AppendFailureContinue,
 		MaxBufferedBytes: 16 * 1024 * 1024,
-		AttemptTimeout:   5 * time.Second,
+		AttemptTimeout:   &attemptTimeout,
 	})
 	if err != nil {
 		return err
