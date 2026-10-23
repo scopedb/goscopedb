@@ -24,6 +24,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/require"
@@ -167,23 +168,25 @@ func TestWriteTimeoutHonorsEarlierCallerDeadline(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			client, err := NewClient(Config{
-				Endpoint:     "https://example.com",
-				WriteTimeout: timeout,
-				HTTPClient: &http.Client{Transport: clientRoundTripFunc(func(req *http.Request) (*http.Response, error) {
-					<-req.Context().Done()
-					return nil, req.Context().Err()
-				})},
+			synctest.Test(t, func(t *testing.T) {
+				client, err := NewClient(Config{
+					Endpoint:     "https://example.com",
+					WriteTimeout: timeout,
+					HTTPClient: &http.Client{Transport: clientRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+						<-req.Context().Done()
+						return nil, req.Context().Err()
+					})},
+				})
+				require.NoError(t, err)
+				ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+				defer cancel()
+				_, err = client.Table("events").AppendNDJSON(ctx, []byte(`{"id":1}`))
+				require.ErrorIs(t, err, context.DeadlineExceeded)
+				require.ErrorIs(t, ctx.Err(), context.DeadlineExceeded)
+				var scopeErr *Error
+				require.ErrorAs(t, err, &scopeErr)
+				require.Equal(t, WriteErrorReasonTimeout, scopeErr.WriteDetails.Reason)
 			})
-			require.NoError(t, err)
-			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
-			defer cancel()
-			_, err = client.Table("events").AppendNDJSON(ctx, []byte(`{"id":1}`))
-			require.ErrorIs(t, err, context.DeadlineExceeded)
-			require.ErrorIs(t, ctx.Err(), context.DeadlineExceeded)
-			var scopeErr *Error
-			require.ErrorAs(t, err, &scopeErr)
-			require.Equal(t, WriteErrorReasonTimeout, scopeErr.WriteDetails.Reason)
 		})
 	}
 }
