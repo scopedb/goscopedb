@@ -45,9 +45,10 @@ func TestWriteTimeoutRequestScope(t *testing.T) {
 					require.InDelta(t, timeout.Seconds(), time.Until(deadline).Seconds(), 1)
 				}
 				body := `{"before":{"name":"scopedb"},"after":{"name":"scopedb"},"destructive":false}`
-				if req.Method == http.MethodGet {
+				switch req.Method {
+				case http.MethodGet:
 					body = `{"name":"scopedb"}`
-				} else if req.Method == http.MethodPost {
+				case http.MethodPost:
 					body = `{"status":"committed","num_rows_inserted":1}`
 				}
 				return &http.Response{
