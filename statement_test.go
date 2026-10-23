@@ -88,6 +88,12 @@ func TestStatementSubmitSendsOnlySupportedConfiguration(t *testing.T) {
 			maxEstimated: 30 * time.Second,
 			wantBody:     `{"statement_id":"01989a4e-4ee2-7e63-87a5-65ac3b5161dc","statement":"FROM events","max_elapsed_seconds":60,"max_estimated_seconds":30,"format":"json"}`,
 		},
+		{
+			name:         "sub-second limits",
+			maxElapsed:   time.Nanosecond,
+			maxEstimated: 250 * time.Millisecond,
+			wantBody:     `{"statement":"FROM events","max_elapsed_seconds":0.000000001,"max_estimated_seconds":0.25,"format":"json"}`,
+		},
 	}
 	for _, test := range tests {
 		test := test
@@ -400,7 +406,7 @@ func TestStatementHandleCancelCachesFailure(t *testing.T) {
 	require.Equal(t, int32(2), requests.Load(), "cancel provides the complete failure")
 }
 
-func TestStatementProgressIncludesSkippedWork(t *testing.T) {
+func TestStatementProgressIncludesComputeAndSkippedWork(t *testing.T) {
 	t.Parallel()
 
 	statementID := uuid.New()
@@ -410,6 +416,7 @@ func TestStatementProgressIncludesSkippedWork(t *testing.T) {
 			"status":"running",
 			"created_at":"2026-08-08T00:00:00Z",
 			"progress":{
+				"compute_seconds":0.125,
 				"skipped_partitions":1,
 				"skipped_rows":2,
 				"skipped_compressed_bytes":3,
@@ -424,6 +431,7 @@ func TestStatementProgressIncludesSkippedWork(t *testing.T) {
 	_, err := handle.Status(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, &StatementProgress{
+		ComputeSeconds:           0.125,
 		SkippedPartitions:        1,
 		SkippedRows:              2,
 		SkippedCompressedBytes:   3,

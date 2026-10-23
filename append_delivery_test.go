@@ -149,23 +149,32 @@ func TestAppendStopReleasesFailedAndUnsentCapacity(t *testing.T) {
 }
 
 func TestAppendUnknownRemainsUnknownAfterRejectedRetry(t *testing.T) {
+	const details = `{"status":"rejected","row_errors":[{"row_index":0,"column":"id","message":"invalid integer"}]}`
 	var calls atomic.Int64
 	table := newAppendStreamTestTable(t, func(w http.ResponseWriter, _ *http.Request) {
 		if calls.Add(1) == 1 {
 			writeAppendStreamFailure(t, w, 503, AppendStateUnknown, true)
 			return
 		}
-		writeAppendStreamFailure(t, w, 422, AppendStateRejected, false)
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		_, err := io.WriteString(w, `{"code":"invalid_schema","message":"invalid integer","details":`+details+`}`)
+		require.NoError(t, err)
 	})
 	stream, err := table.AppendStream(AppendStreamOptions{Retry: quickAppendRetry(2)})
 	require.NoError(t, err)
 	require.NoError(t, stream.Send(context.Background(), map[string]int{"id": 1}))
 	report, err := stream.Shutdown(context.Background())
 	require.Error(t, err)
+	var scopeErr *Error
+	require.ErrorAs(t, err, &scopeErr)
+	require.Equal(t, "invalid_schema", scopeErr.Code)
+	require.JSONEq(t, details, string(scopeErr.Details))
 	require.Equal(t, AppendStateUnknown, appendErrorState(err))
 	require.Equal(t, uint64(1), report.UnknownRows)
 	require.Zero(t, report.FailedRows)
 	require.Equal(t, 422, stream.Stats().LastFailure.HTTPStatus)
+	require.Equal(t, scopeErr.Code, stream.Stats().LastFailure.Code)
+	require.Equal(t, scopeErr.Details, stream.Stats().LastFailure.Details)
 }
 
 func TestAppendRetryAfterDoesNotRetryEarly(t *testing.T) {

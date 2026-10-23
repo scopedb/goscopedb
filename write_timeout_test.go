@@ -71,46 +71,60 @@ func TestWriteTimeoutRejectsNegativeConfig(t *testing.T) {
 
 func TestWriteTimeoutBoundsHeadersAndResponseBody(t *testing.T) {
 	t.Parallel()
-	for _, headers := range []bool{false, true} {
-		name := "append"
-		if headers {
-			name += "/response body"
-		} else {
-			name += "/response headers"
-		}
-		t.Run(name, func(t *testing.T) {
-			t.Parallel()
-			var requests atomic.Int32
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				_, err := io.Copy(io.Discard, r.Body)
-				require.NoError(t, err)
-				requests.Add(1)
-				if headers {
-					w.Header().Set("X-Request-ID", "stalled-write")
-					w.WriteHeader(http.StatusOK)
-					w.(http.Flusher).Flush()
-				}
-				<-r.Context().Done()
-			}))
-			defer server.Close()
-			client, err := NewClient(Config{Endpoint: server.URL, WriteTimeout: 50 * time.Millisecond})
-			require.NoError(t, err)
-			defer client.Close()
-			_, err = client.Table("events").AppendNDJSON(context.Background(), []byte(`{"id":1}`))
-			require.ErrorIs(t, err, context.DeadlineExceeded)
-			var scopeErr *Error
-			require.ErrorAs(t, err, &scopeErr)
-			require.False(t, scopeErr.Retryable)
-			require.Equal(t, &WriteErrorDetails{
-				Reason: WriteErrorReasonTimeout, Outcome: AppendStateUnknown,
-			}, scopeErr.WriteDetails)
-			require.Equal(t, AppendStateUnknown, scopeErr.AppendDetails.AppendState)
+	for _, operation := range []string{"append", "catalog apply", "catalog delete"} {
+		for _, headers := range []bool{false, true} {
+			name := operation
 			if headers {
-				require.Equal(t, http.StatusOK, scopeErr.HTTPStatus)
-				require.Equal(t, "stalled-write", scopeErr.RequestID)
+				name += "/response body"
+			} else {
+				name += "/response headers"
 			}
-			require.EqualValues(t, 1, requests.Load())
-		})
+			t.Run(name, func(t *testing.T) {
+				t.Parallel()
+				var requests atomic.Int32
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					_, err := io.Copy(io.Discard, r.Body)
+					require.NoError(t, err)
+					requests.Add(1)
+					if headers {
+						w.Header().Set("X-Request-ID", "stalled-write")
+						w.WriteHeader(http.StatusOK)
+						w.(http.Flusher).Flush()
+					}
+					<-r.Context().Done()
+				}))
+				defer server.Close()
+				client, err := NewClient(Config{Endpoint: server.URL, WriteTimeout: 50 * time.Millisecond})
+				require.NoError(t, err)
+				defer client.Close()
+				switch operation {
+				case "append":
+					_, err = client.Table("events").AppendNDJSON(context.Background(), []byte(`{"id":1}`))
+				case "catalog apply":
+					_, err = client.Catalog().Table("scopedb", "public", "events").Apply(context.Background(), &CatalogTable{Name: "events"})
+				case "catalog delete":
+					_, err = client.Catalog().Table("scopedb", "public", "events").Delete(context.Background())
+				}
+				require.ErrorIs(t, err, context.DeadlineExceeded)
+				var scopeErr *Error
+				require.ErrorAs(t, err, &scopeErr)
+				require.False(t, scopeErr.Retryable)
+				require.Equal(t, &WriteErrorDetails{
+					Reason: WriteErrorReasonTimeout, Outcome: AppendStateUnknown,
+				}, scopeErr.WriteDetails)
+				if operation == "append" {
+					require.Equal(t, AppendStateUnknown, scopeErr.AppendDetails.AppendState)
+				} else {
+					require.Equal(t, ErrorKindCatalogFailed, scopeErr.Kind)
+					require.Equal(t, "catalog_commit_outcome_unknown", scopeErr.Code)
+				}
+				if headers {
+					require.Equal(t, http.StatusOK, scopeErr.HTTPStatus)
+					require.Equal(t, "stalled-write", scopeErr.RequestID)
+				}
+				require.EqualValues(t, 1, requests.Load())
+			})
+		}
 	}
 }
 

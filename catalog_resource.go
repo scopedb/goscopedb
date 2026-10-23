@@ -44,12 +44,8 @@ func (c *CatalogResource[T]) Get(ctx context.Context) (CatalogSnapshot[T], error
 		return CatalogSnapshot[T]{}, err
 	}
 	trimmed := bytes.TrimSpace(data)
-	if !json.Valid(trimmed) || trimmed[0] != '{' || resp.Header.Get("ETag") == "" {
+	if len(trimmed) == 0 || trimmed[0] != '{' || resp.Header.Get("ETag") == "" {
 		return CatalogSnapshot[T]{}, responseMetadataError(resp, ErrorKindCatalogFailed, "invalid catalog response", nil)
-	}
-	// Raw callers can retain the response bytes directly.
-	if definition, ok := any(json.RawMessage(data)).(T); ok {
-		return CatalogSnapshot[T]{Definition: definition, ETag: resp.Header.Get("ETag")}, nil
 	}
 	var definition T
 	if err := json.Unmarshal(data, &definition); err != nil {
@@ -150,7 +146,9 @@ func (c *CatalogResource[T]) request(ctx context.Context, method string, data []
 		failure := newError(ErrorKindCatalogFailed, "catalog request failed", err)
 		if writing {
 			failure.Code = "catalog_commit_outcome_unknown"
-			failure.Message = "catalog apply could not be confirmed"
+			failure.Message = "catalog mutation could not be confirmed"
+			failure.WriteDetails = writeErrorDetails(err)
+			failure = failure.withWriteContext(req.Context())
 		}
 		return nil, nil, failure
 	}
@@ -160,6 +158,8 @@ func (c *CatalogResource[T]) request(ctx context.Context, method string, data []
 		failure := responseMetadataError(resp, ErrorKindCatalogFailed, "failed to read catalog response", err)
 		if writing {
 			failure.Retryable = false
+			failure.WriteDetails = writeErrorDetails(err)
+			failure = failure.withWriteContext(req.Context())
 			if resp.StatusCode < 400 || resp.StatusCode >= 500 {
 				failure.Code = "catalog_commit_outcome_unknown"
 			}

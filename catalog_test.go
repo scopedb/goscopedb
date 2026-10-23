@@ -148,22 +148,24 @@ func TestCatalogRawRoundTrip(t *testing.T) {
 func TestCatalogFailureOutcomes(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
-		name    string
-		dryRun  bool
-		get     bool
-		status  int
-		body    string
-		cause   error
-		partial bool
-		code    string
+		name        string
+		dryRun      bool
+		get         bool
+		status      int
+		body        string
+		cause       error
+		partial     bool
+		code        string
+		writeReason WriteErrorReason
 	}{
 		{name: "conflict", status: 412, body: `{"code":"catalog_version_mismatch","message":"stale"}`, code: "catalog_version_mismatch"},
 		{name: "destructive", status: 409, body: `{"code":"catalog_destructive_change","message":"secret"}`, code: "catalog_destructive_change"},
 		{name: "commit", status: 500, body: `{"code":"catalog_commit_outcome_unknown","message":"unknown"}`, code: "catalog_commit_outcome_unknown"},
-		{name: "transport", cause: context.Canceled, code: "catalog_commit_outcome_unknown"},
+		{name: "transport", cause: context.Canceled, code: "catalog_commit_outcome_unknown", writeReason: WriteErrorReasonCancelled},
 		{name: "body", status: 200, partial: true, cause: io.ErrUnexpectedEOF, code: "catalog_commit_outcome_unknown"},
 		{name: "invalid", status: 200, body: `{}`, code: "catalog_commit_outcome_unknown"},
 		{name: "preview", dryRun: true, cause: context.DeadlineExceeded},
+		{name: "preview_body", dryRun: true, status: 200, partial: true, cause: context.DeadlineExceeded},
 		{name: "typed_read", get: true, status: 200, body: `{"databases":"invalid"}`},
 		{name: "typed_preview", dryRun: true, status: 200, body: `{"before":null,"after":{"databases":"invalid"}}`},
 		{name: "typed_write", status: 200, body: `{"before":null,"after":{"databases":"invalid"}}`, code: "catalog_commit_outcome_unknown"},
@@ -202,6 +204,11 @@ func TestCatalogFailureOutcomes(t *testing.T) {
 			}
 			if tc.cause != nil {
 				require.ErrorIs(t, err, tc.cause)
+			}
+			if tc.writeReason == "" {
+				require.Nil(t, failure.WriteDetails)
+			} else {
+				require.Equal(t, &WriteErrorDetails{Reason: tc.writeReason, Outcome: AppendStateUnknown}, failure.WriteDetails)
 			}
 			require.False(t, failure.Retryable)
 			require.Equal(t, 1, calls)

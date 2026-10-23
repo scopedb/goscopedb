@@ -64,10 +64,11 @@ type WriteErrorDetails struct {
 
 // Error represents a ScopeDB client or API error.
 type Error struct {
-	// Details preserves code-specific HTTP error information from the server.
+	// Details preserves code-specific HTTP or statement error information from the server.
 	Details json.RawMessage
 	Kind    ErrorKind
-	// Code is the server error code, when provided. Unknown codes are retained.
+	// Code is the server error code, when provided, or catalog_commit_outcome_unknown
+	// when a catalog mutation could not be confirmed. Unknown codes are retained.
 	Code          string
 	Message       string
 	HTTPStatus    int
