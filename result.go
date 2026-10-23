@@ -59,6 +59,11 @@ func (rs *ResultSet) RawRows() ([][]*string, error) {
 			len(rows),
 		)
 	}
+	for i, row := range rows {
+		if row == nil || len(row) != len(rs.Schema) {
+			return nil, fmt.Errorf("result row %d: schema length does not match record length", i)
+		}
+	}
 	return rows, nil
 }
 
@@ -77,10 +82,10 @@ func (rs *ResultSet) ToValues() ([][]Value, error) {
 	}
 
 	valueLists := make([][]Value, 0, len(rows))
-	for _, r := range rows {
+	for i, r := range rows {
 		values, err := rs.convertRow(r)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("result row %d: %w", i, err)
 		}
 		valueLists = append(valueLists, values)
 	}
@@ -102,10 +107,10 @@ func (rs *ResultSet) ToObjects() ([]map[string]Value, error) {
 	}
 
 	objects := make([]map[string]Value, 0, len(rows))
-	for _, row := range rows {
+	for i, row := range rows {
 		values, err := rs.convertRow(row)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("result row %d: %w", i, err)
 		}
 		object := make(map[string]Value, len(names))
 		for i, name := range names {
@@ -133,7 +138,7 @@ func (rs *ResultSet) First() (map[string]Value, bool, error) {
 	}
 	values, err := rs.convertRow(rows[0])
 	if err != nil {
-		return nil, false, err
+		return nil, false, fmt.Errorf("result row 0: %w", err)
 	}
 	object := make(map[string]Value, len(names))
 	for i, name := range names {
@@ -159,10 +164,6 @@ func (rs *ResultSet) objectColumnNames() ([]string, error) {
 }
 
 func (rs *ResultSet) convertRow(row []*string) ([]Value, error) {
-	if len(row) != len(rs.Schema) {
-		return nil, errors.New("schema length does not match record length")
-	}
-
 	values := make([]Value, 0, len(row))
 	for i, cell := range row {
 		field := rs.Schema[i]
@@ -175,7 +176,7 @@ func (rs *ResultSet) convertRow(row []*string) ([]Value, error) {
 		}
 		value, err := convertValue(*cell, field.Type)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("column %q (%s): %w", field.Name, field.Type, err)
 		}
 		values = append(values, value)
 	}
@@ -282,24 +283,10 @@ func (d *DataType) UnmarshalJSON(data []byte) error {
 		return fmt.Errorf("invalid data type: %w", err)
 	}
 
-	switch DataType(value) {
-	case StringDataType,
-		BinaryDataType,
-		IntDataType,
-		FloatDataType,
-		BooleanDataType,
-		TimestampDataType,
-		IntervalDataType,
-		ArrayDataType,
-		ObjectDataType,
-		AnyDataType,
-		NullDataType:
-		*d = DataType(value)
-	case UIntDataType, DataType("u_int"):
-		*d = UIntDataType
-	default:
+	if !DataType(value).valid() {
 		return fmt.Errorf("unrecognized data type %q", value)
 	}
+	*d = DataType(value)
 	return nil
 }
 

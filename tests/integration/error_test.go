@@ -34,7 +34,7 @@ func TestStatusStatementFail(t *testing.T) {
 
 	id, err := uuid.Parse("c8fe71d6-3695-11f0-85b3-063c3400fda9")
 	require.NoError(t, err)
-	_, err = c.StatementHandle(id).Status(ctx)
+	_, err = c.StatementHandle(id).Refresh(ctx)
 	var failure *scopedb.Error
 	require.ErrorAs(t, err, &failure)
 	require.Equal(t, "not_found", failure.Code)

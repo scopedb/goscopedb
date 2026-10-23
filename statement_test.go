@@ -49,7 +49,7 @@ func TestClientQueryExecutesAndReturnsRows(t *testing.T) {
 			"created_at":"2026-08-08T00:00:00Z",
 			"progress":{},
 			"result_set":{
-				"metadata":{"fields":[{"name":"ready","data_type":"u_int"}],"num_rows":1},
+				"metadata":{"fields":[{"name":"ready","data_type":"uint"}],"num_rows":1},
 				"format":"json",
 				"rows":[["1"]]
 			}
@@ -172,23 +172,23 @@ func TestStatementHandleStatusFetchesOnceAndCachesTerminalStatus(t *testing.T) {
 	client := newTestClient(t, server.URL)
 	handle := client.StatementHandle(statementID)
 	require.Equal(t, statementID, handle.ID())
-	require.Nil(t, handle.LastStatus())
-	require.Zero(t, requests.Load(), "LastStatus must not make a request")
+	require.Nil(t, handle.Snapshot())
+	require.Zero(t, requests.Load(), "Snapshot must not make a request")
 
-	status, err := handle.Status(context.Background())
+	status, err := handle.Refresh(context.Background())
 	require.NoError(t, err)
-	require.Equal(t, StatementStatusFinished, status)
+	require.Equal(t, StatementStatusFinished, status.Status)
 	require.Equal(t, int32(1), requests.Load())
 
-	status, err = handle.Status(context.Background())
+	status, err = handle.Refresh(context.Background())
 	require.NoError(t, err)
-	require.Equal(t, StatementStatusFinished, status)
+	require.Equal(t, StatementStatusFinished, status.Status)
 
 	cancelled, err := handle.Cancel(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, StatementStatusFinished, cancelled.Status)
 	require.Equal(t, int32(1), requests.Load(), "terminal status must be cached")
-	require.Equal(t, StatementStatusFinished, *handle.LastStatus())
+	require.Equal(t, StatementStatusFinished, handle.Snapshot().Status)
 }
 
 func TestStatementHandleWaitPollsToFinished(t *testing.T) {
@@ -287,14 +287,14 @@ func TestStatementHandleCancelResumesWithoutSnapshot(t *testing.T) {
 	handle := client.StatementHandle(statementID)
 	cancelled, err := handle.Cancel(context.Background())
 	require.NoError(t, err)
-	require.Equal(t, StatementCancelResult{
-		StatementID: statementID,
-		CreatedAt:   time.Date(2026, 8, 8, 0, 0, 0, 0, time.UTC),
-		Status:      StatementStatusCancelled,
-		Message:     "statement is cancelled",
+	require.Equal(t, &StatementSnapshot{
+		ID:        statementID,
+		CreatedAt: time.Date(2026, 8, 8, 0, 0, 0, 0, time.UTC),
+		Status:    StatementStatusCancelled,
+		Progress:  StatementProgress{ScannedRows: 6},
 	}, cancelled)
-	require.Equal(t, cancelled.Status, *handle.LastStatus())
-	require.Equal(t, int64(6), handle.Progress().ScannedRows)
+	require.Equal(t, cancelled.Status, handle.Snapshot().Status)
+	require.Equal(t, int64(6), handle.Snapshot().Progress.ScannedRows)
 
 	again, err := handle.Cancel(context.Background())
 	require.NoError(t, err)
@@ -335,7 +335,7 @@ func TestStatementHandleCancelCachesFinishedResult(t *testing.T) {
 	cancelled, err := handle.Cancel(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, StatementStatusFinished, cancelled.Status)
-	require.NotNil(t, handle.ResultSet())
+	require.NotNil(t, handle.Snapshot().ResultSet)
 
 	result, err := handle.Wait(context.Background())
 	require.NoError(t, err)
@@ -344,9 +344,9 @@ func TestStatementHandleCancelCachesFinishedResult(t *testing.T) {
 	require.True(t, found)
 	require.Equal(t, "done", row["value"])
 
-	status, err := handle.Status(context.Background())
+	status, err := handle.Refresh(context.Background())
 	require.NoError(t, err)
-	require.Equal(t, StatementStatusFinished, status)
+	require.Equal(t, StatementStatusFinished, status.Status)
 	require.Equal(t, int32(1), requests.Load(), "cancel provides the complete result")
 }
 
@@ -385,18 +385,18 @@ func TestStatementHandleCancelCachesFailure(t *testing.T) {
 
 	client := newTestClient(t, server.URL)
 	handle := client.StatementHandle(statementID)
-	status, err := handle.Status(context.Background())
+	status, err := handle.Refresh(context.Background())
 	require.NoError(t, err)
-	require.Equal(t, StatementStatusRunning, status)
-	require.Equal(t, int64(11), handle.Progress().ScannedRows)
+	require.Equal(t, StatementStatusRunning, status.Status)
+	require.Equal(t, int64(11), handle.Snapshot().Progress.ScannedRows)
 
 	cancelled, err := handle.Cancel(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, StatementStatusFailed, cancelled.Status)
-	require.Equal(t, "estimated duration exceeds limit", cancelled.Message)
-	require.Equal(t, cancelled.Status, *handle.LastStatus())
-	require.Equal(t, int64(12), handle.Progress().ScannedRows)
-	require.Equal(t, int64(3), handle.Progress().SkippedRows)
+	require.Equal(t, "estimated duration exceeds limit", cancelled.Error.Message)
+	require.Equal(t, cancelled.Status, handle.Snapshot().Status)
+	require.Equal(t, int64(12), handle.Snapshot().Progress.ScannedRows)
+	require.Equal(t, int64(3), handle.Snapshot().Progress.SkippedRows)
 
 	_, err = handle.Wait(context.Background())
 	var scopeDBError *Error
@@ -434,7 +434,7 @@ func TestStatementProgressIncludesComputeAndSkippedWork(t *testing.T) {
 
 	client := newTestClient(t, server.URL)
 	handle := client.StatementHandle(statementID)
-	_, err := handle.Status(context.Background())
+	_, err := handle.Refresh(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, &StatementProgress{
 		ComputeSeconds:           0.125,
@@ -442,7 +442,7 @@ func TestStatementProgressIncludesComputeAndSkippedWork(t *testing.T) {
 		SkippedRows:              2,
 		SkippedCompressedBytes:   3,
 		SkippedUncompressedBytes: 4,
-	}, handle.Progress())
+	}, &handle.Snapshot().Progress)
 }
 
 func TestStatementStatusRejectsMalformedStructuredFailures(t *testing.T) {
@@ -472,7 +472,7 @@ func TestStatementStatusRejectsMalformedStructuredFailures(t *testing.T) {
 			defer server.Close()
 
 			client := newTestClient(t, server.URL)
-			_, err := client.StatementHandle(statementID).Status(context.Background())
+			_, err := client.StatementHandle(statementID).Refresh(context.Background())
 			var scopeDBError *Error
 			require.ErrorAs(t, err, &scopeDBError)
 			require.Equal(t, ErrorKindUnexpected, scopeDBError.Kind)
@@ -509,7 +509,7 @@ func TestStatementStatusRejectsMalformedFinishedResultsWithoutPanicking(t *testi
 
 			client := newTestClient(t, server.URL)
 			require.NotPanics(t, func() {
-				_, err := client.StatementHandle(statementID).Status(context.Background())
+				_, err := client.StatementHandle(statementID).Refresh(context.Background())
 				var scopeDBError *Error
 				require.ErrorAs(t, err, &scopeDBError)
 				require.Equal(t, ErrorKindUnexpected, scopeDBError.Kind)
@@ -584,9 +584,9 @@ func TestMalformedFinishedRowsReturnResultErrorsWithoutPanicking(t *testing.T) {
 			client := newTestClient(t, server.URL)
 			require.NotPanics(t, func() {
 				handle := client.StatementHandle(statementID)
-				_, err := handle.Status(context.Background())
+				_, err := handle.Refresh(context.Background())
 				require.NoError(t, err)
-				result := handle.ResultSet()
+				result := handle.Snapshot().ResultSet
 				require.NotNil(t, result)
 				test.assertErr(t, result)
 			})
@@ -608,4 +608,104 @@ func writeTestJSON(t *testing.T, w http.ResponseWriter, body string) {
 	w.WriteHeader(http.StatusOK)
 	_, err := w.Write([]byte(body))
 	require.NoError(t, err)
+}
+
+func TestStatementCancelWinsOverStaleRefresh(t *testing.T) {
+	for _, terminal := range []StatementStatus{StatementStatusCancelled, StatementStatusFinished, StatementStatusFailed} {
+		t.Run(string(terminal), func(t *testing.T) {
+			id := uuid.New()
+			started, release := make(chan struct{}, 4), make(chan struct{})
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				status := terminal
+				if r.Method == http.MethodGet {
+					started <- struct{}{}
+					<-release
+					status = StatementStatusRunning
+				}
+				response := map[string]any{
+					"statement_id": id, "created_at": "2026-10-23T00:00:00Z",
+					"status": status, "progress": map[string]int{"scanned_rows": 7},
+				}
+				if status == StatementStatusFinished {
+					response["result_set"] = json.RawMessage(`{"metadata":{"fields":[{"name":"n","data_type":"int"}],"num_rows":1},"format":"json","rows":[["9007199254740993"]]}`)
+				}
+				if status == StatementStatusFailed {
+					response["error"] = json.RawMessage(`{"code":"statement_failed","message":"original failure","details":{"n":9007199254740993}}`)
+				}
+				writeJSONValue(t, w, response)
+			}))
+			defer server.Close()
+			handle := newTestClient(t, server.URL).StatementHandle(id)
+			finished := make(chan *StatementSnapshot, 4)
+			for range 4 {
+				go func() {
+					snapshot, err := handle.Refresh(t.Context())
+					if err != nil {
+						t.Error(err)
+					}
+					finished <- snapshot
+				}()
+			}
+			for range 4 {
+				<-started
+			}
+			cancelled, err := handle.Cancel(t.Context())
+			close(release)
+			require.NoError(t, err)
+			require.Equal(t, terminal, cancelled.Status)
+			for range 4 {
+				require.Equal(t, terminal, (<-finished).Status)
+			}
+			cancelled.Status = StatementStatusPending
+			cancelled.Progress.ScannedRows = 999
+			if cancelled.ResultSet != nil {
+				cancelled.ResultSet.Schema[0].Name = "changed"
+			}
+			if cancelled.Error != nil {
+				cancelled.Error.Message = "changed"
+				cancelled.Error.Details[0] = '['
+			}
+			snapshot := handle.Snapshot()
+			require.Equal(t, terminal, snapshot.Status)
+			require.EqualValues(t, 7, snapshot.Progress.ScannedRows)
+			result, err := handle.Wait(t.Context())
+			switch terminal {
+			case StatementStatusCancelled:
+				require.ErrorIs(t, err, ErrStatementCancelled)
+				require.NotErrorIs(t, err, context.Canceled)
+			case StatementStatusFinished:
+				require.NoError(t, err)
+				row, ok, err := result.First()
+				require.NoError(t, err)
+				require.True(t, ok)
+				require.Equal(t, int64(9007199254740993), row["n"])
+			case StatementStatusFailed:
+				require.EqualError(t, err, "original failure")
+				require.JSONEq(t, `{"n":9007199254740993}`, string(snapshot.Error.Details))
+			case StatementStatusPending, StatementStatusRunning:
+				t.Fatal("expected a terminal snapshot")
+			}
+		})
+	}
+}
+
+func TestStatementRejectsMismatchedResponseID(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		writeJSONValue(t, w, map[string]any{
+			"statement_id": uuid.New(), "created_at": "2026-10-23T00:00:00Z", "status": "running",
+		})
+	}))
+	defer server.Close()
+	client := newTestClient(t, server.URL)
+	id := uuid.New()
+	statement := client.Statement("SELECT 1")
+	statement.ID = &id
+	_, err := statement.Submit(t.Context())
+	require.ErrorContains(t, err, "ID does not match")
+	handle := client.StatementHandle(id)
+	_, err = handle.Refresh(t.Context())
+	require.ErrorContains(t, err, "ID does not match")
+	_, err = handle.Cancel(t.Context())
+	require.ErrorContains(t, err, "ID does not match")
+	require.Nil(t, handle.Snapshot())
 }

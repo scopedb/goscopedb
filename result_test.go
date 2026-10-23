@@ -220,25 +220,6 @@ func TestResultSetToValuesRejectsNonNullValueForNullType(t *testing.T) {
 	require.ErrorContains(t, err, "unexpected non-null value for null data type")
 }
 
-func TestDataTypeUnmarshalAcceptsCanonicalUIntAndHistoricalAlias(t *testing.T) {
-	t.Parallel()
-
-	for _, wireValue := range []string{`"uint"`, `"u_int"`} {
-		var dataType DataType
-		require.NoError(t, json.Unmarshal([]byte(wireValue), &dataType))
-		require.Equal(t, UIntDataType, dataType)
-	}
-}
-
-func TestDataTypeUnmarshalRejectsUnknownAndNonStringValues(t *testing.T) {
-	t.Parallel()
-
-	for _, wireValue := range []string{`"unsigned"`, `42`} {
-		var dataType DataType
-		require.Error(t, json.Unmarshal([]byte(wireValue), &dataType))
-	}
-}
-
 func resultSetWithSingleValue(dataType DataType, value string) *ResultSet {
 	rows, err := json.Marshal([][]*string{{stringPointer(value)}})
 	if err != nil {
@@ -253,4 +234,40 @@ func resultSetWithSingleValue(dataType DataType, value string) *ResultSet {
 
 func stringPointer(value string) *string {
 	return &value
+}
+
+func TestResultNumericBoundaries(t *testing.T) {
+	for _, tc := range []struct {
+		kind DataType
+		wire string
+		want any
+	}{
+		{IntDataType, "-9223372036854775808", int64(-1 << 63)},
+		{IntDataType, "9223372036854775807", int64(1<<63 - 1)},
+		{IntDataType, "9007199254740993", int64(9007199254740993)},
+		{UIntDataType, "18446744073709551615", uint64(1<<64 - 1)},
+		{FloatDataType, "1.7976931348623157e308", float64(1.7976931348623157e308)},
+		{ObjectDataType, `{"id":9007199254740993}`, `{"id":9007199254740993}`},
+		{ArrayDataType, `[18446744073709551615]`, `[18446744073709551615]`},
+	} {
+		t.Run(string(tc.kind)+tc.wire, func(t *testing.T) {
+			row, ok, err := resultSetWithSingleValue(tc.kind, tc.wire).First()
+			require.NoError(t, err)
+			require.True(t, ok)
+			require.Equal(t, tc.want, row["value"])
+		})
+	}
+	for _, tc := range []struct {
+		kind DataType
+		wire string
+	}{
+		{IntDataType, "9223372036854775808"},
+		{IntDataType, "-9223372036854775809"},
+		{UIntDataType, "18446744073709551616"},
+		{UIntDataType, "-1"},
+		{FloatDataType, "1e309"},
+	} {
+		_, err := resultSetWithSingleValue(tc.kind, tc.wire).ToValues()
+		require.ErrorContains(t, err, `result row 0: column "value"`)
+	}
 }

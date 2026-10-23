@@ -19,7 +19,10 @@ package scopedb
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"slices"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -68,12 +71,13 @@ func (s *Statement) Submit(ctx context.Context) (*StatementHandle, error) {
 	if err != nil {
 		return nil, err
 	}
+	if s.ID != nil && resp.ID != *s.ID {
+		return nil, newError(ErrorKindUnexpected, "statement response ID does not match submitted ID", nil)
+	}
 
-	return &StatementHandle{
-		c:    s.c,
-		resp: resp,
-		id:   resp.ID,
-	}, nil
+	handle := s.c.StatementHandle(resp.ID)
+	handle.resp.Store(resp)
+	return handle, nil
 }
 
 // Execute submits the statement to ScopeDB for execution and waits for its completion.
@@ -85,12 +89,30 @@ func (s *Statement) Execute(ctx context.Context) (*ResultSet, error) {
 	return handle.Wait(ctx)
 }
 
-// StatementHandle is a handle to a statement that has been submitted to ScopeDB.
+// StatementHandle tracks a submitted statement. Its methods are safe to call
+// concurrently, including Cancel while another goroutine is waiting.
+// A handle must not be copied after first use.
 type StatementHandle struct {
 	c    *Client
-	resp *statementResponse
+	resp atomic.Pointer[statementResponse]
 	id   uuid.UUID
 }
+
+// StatementSnapshot is one observation of a statement. Error is present for a
+// failed statement; ResultSet is present for a finished statement. Snapshots
+// belong to the caller: modifying one does not change the handle's cache.
+type StatementSnapshot struct {
+	ID        uuid.UUID
+	CreatedAt time.Time
+	Status    StatementStatus
+	Progress  StatementProgress
+	Error     *StatementErrorDetails
+	ResultSet *ResultSet
+}
+
+// ErrStatementCancelled means the server confirmed cancellation. It is distinct
+// from context.Canceled, which only describes a local request or wait.
+var ErrStatementCancelled = errors.New("statement was cancelled")
 
 // StatementHandle creates a new StatementHandle with the given ID.
 func (c *Client) StatementHandle(id uuid.UUID) *StatementHandle {
@@ -105,75 +127,81 @@ func (h *StatementHandle) ID() uuid.UUID {
 	return h.id
 }
 
-// LastStatus returns the latest locally cached status without making a request.
-func (h *StatementHandle) LastStatus() *StatementStatus {
-	if h.resp != nil {
-		status := h.resp.Status
-		return &status
-	}
-	return nil
+// Snapshot returns the latest local observation without making a request.
+// It is nil until Submit, Refresh, or Cancel receives a response.
+func (h *StatementHandle) Snapshot() *StatementSnapshot {
+	return h.resp.Load().snapshot()
 }
 
-// Progress returns the last seen progress of the statement.
-func (h *StatementHandle) Progress() *StatementProgress {
-	if h.resp == nil {
+func (r *statementResponse) snapshot() *StatementSnapshot {
+	if r == nil {
 		return nil
 	}
-	progress := h.resp.Progress
-	return &progress
+	snapshot := &StatementSnapshot{
+		ID: r.ID, CreatedAt: r.Created, Status: r.Status,
+		Progress: r.Progress, ResultSet: r.ResultSet.toResultSet(),
+	}
+	if r.Error != nil {
+		failure := *r.Error
+		failure.Details = slices.Clone(failure.Details)
+		snapshot.Error = &failure
+	}
+	return snapshot
 }
 
-// ResultSet returns the result set of the statement if available.
-func (h *StatementHandle) ResultSet() *ResultSet {
-	if h.resp == nil {
-		return nil
-	}
-	if h.resp.ResultSet == nil {
-		return nil
-	}
-	return h.resp.ResultSet.toResultSet()
-}
-
-// Status fetches the latest status at most once. A cached terminal status is
-// returned without making another request.
-func (h *StatementHandle) Status(ctx context.Context) (StatementStatus, error) {
-	if h.resp != nil && h.resp.Status.Terminated() {
-		return h.resp.Status, nil
+// Refresh fetches one complete observation. A cached terminal observation is
+// returned without making another request. A failed request leaves the cache intact.
+func (h *StatementHandle) Refresh(ctx context.Context) (*StatementSnapshot, error) {
+	if cached := h.resp.Load(); cached != nil && cached.Status.Terminated() {
+		return cached.snapshot(), nil
 	}
 
 	resp, err := h.c.fetchStatementResult(ctx, h.id)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
+	return h.remember(resp)
+}
 
-	h.resp = resp
-	return h.resp.Status, nil
+func (h *StatementHandle) remember(resp *statementResponse) (*StatementSnapshot, error) {
+	if resp.ID != h.id {
+		return nil, newError(ErrorKindUnexpected, "statement response ID does not match handle", nil)
+	}
+	for {
+		previous := h.resp.Load()
+		// Requests can complete out of order. Never replace a terminal response
+		// or move a running statement back to pending. Within one active state,
+		// retain the observation with the greater elapsed time.
+		if previous != nil && (previous.Status.Terminated() ||
+			(previous.Status == StatementStatusRunning && resp.Status == StatementStatusPending) ||
+			(previous.Status == resp.Status && previous.Progress.NanosFromSubmitted > resp.Progress.NanosFromSubmitted)) {
+			return previous.snapshot(), nil
+		}
+		if h.resp.CompareAndSwap(previous, resp) {
+			return resp.snapshot(), nil
+		}
+	}
 }
 
 // Wait polls until the statement is finished, failed, or cancelled.
 //
-// When the statement is finished, the result set is returned. Otherwise, an error is returned.
+// A context error stops local waiting; it does not cancel the server statement.
+// Use Cancel with a live context to request server cancellation. Terminal
+// results remain cached even after the server expires its saved result.
 func (h *StatementHandle) Wait(ctx context.Context) (*ResultSet, error) {
 	delay := 5 * time.Millisecond
 	maxDelay := time.Second
 	for {
-		status, err := h.Status(ctx)
+		snapshot, err := h.Refresh(ctx)
 		if err != nil {
 			return nil, err
 		}
 
-		switch status {
+		switch snapshot.Status {
 		case StatementStatusFinished:
-			result := h.ResultSet()
-			if result != nil {
-				return result, nil
-			}
-			return nil, &Error{
-				Kind:    ErrorKindUnexpected,
-				Message: "finished statement response has no result set",
-			}
+			return snapshot.ResultSet, nil
 		case StatementStatusFailed:
-			failure := h.resp.Error
+			failure := snapshot.Error
 			return nil, &Error{
 				Kind:             ErrorKindStatementFailed,
 				Code:             string(failure.Code),
@@ -185,13 +213,14 @@ func (h *StatementHandle) Wait(ctx context.Context) (*ResultSet, error) {
 			return nil, &Error{
 				Kind:    ErrorKindStatementFailed,
 				Message: fmt.Sprintf("statement %s was cancelled", h.id),
+				cause:   ErrStatementCancelled,
 			}
 		case StatementStatusPending, StatementStatusRunning:
 			// Keep polling below.
 		default:
 			return nil, &Error{
 				Kind:    ErrorKindUnexpected,
-				Message: fmt.Sprintf("unknown statement status %q", status),
+				Message: fmt.Sprintf("unknown statement status %q", snapshot.Status),
 			}
 		}
 
@@ -208,36 +237,18 @@ func (h *StatementHandle) Wait(ctx context.Context) (*ResultSet, error) {
 	}
 }
 
-// StatementCancelResult reports the statement's status after cancellation.
-type StatementCancelResult struct {
-	StatementID uuid.UUID       `json:"statement_id"`
-	CreatedAt   time.Time       `json:"created_at"`
-	Status      StatementStatus `json:"status"`
-	Message     string          `json:"message"`
-}
-
-// Cancel requests cancellation and returns the outcome.
-// The full response is cached for Progress, ResultSet, and Wait. A cached
-// terminal outcome is returned without making another request.
-func (h *StatementHandle) Cancel(ctx context.Context) (StatementCancelResult, error) {
-	if h.resp == nil || !h.resp.Status.Terminated() {
-		resp, err := h.c.cancelStatement(ctx, h.id)
-		if err != nil {
-			return StatementCancelResult{}, err
-		}
-		h.resp = resp
+// Cancel requests server cancellation and returns the complete observation.
+// Completion may win the race: inspect Status, ResultSet, and Error. A cached
+// terminal observation is returned without making another request.
+func (h *StatementHandle) Cancel(ctx context.Context) (*StatementSnapshot, error) {
+	if cached := h.resp.Load(); cached != nil && cached.Status.Terminated() {
+		return cached.snapshot(), nil
 	}
-
-	message := fmt.Sprintf("statement is %s", h.resp.Status)
-	if h.resp.Error != nil {
-		message = h.resp.Error.Message
+	resp, err := h.c.cancelStatement(ctx, h.id)
+	if err != nil {
+		return nil, err
 	}
-	return StatementCancelResult{
-		StatementID: h.id,
-		CreatedAt:   h.resp.Created,
-		Status:      h.resp.Status,
-		Message:     message,
-	}, nil
+	return h.remember(resp)
 }
 
 // StatementStatus is a string that represents the status of a statement.
@@ -280,18 +291,6 @@ type StatementErrorDetails struct {
 	Code    StatementErrorCode `json:"code"`
 	Message string             `json:"message"`
 	Details json.RawMessage    `json:"details,omitempty"`
-}
-
-// Finished returns true if the statement is finished.
-func (s StatementStatus) Finished() bool {
-	switch s {
-	case StatementStatusFinished:
-		return true
-	case StatementStatusRunning, StatementStatusPending, StatementStatusFailed, StatementStatusCancelled:
-		return false
-	default:
-		return false
-	}
 }
 
 // Terminated returns true if the statement is finished, failed, or cancelled.
