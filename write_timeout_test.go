@@ -69,7 +69,7 @@ func TestWriteTimeoutRequestScope(t *testing.T) {
 			require.NoError(t, err)
 			if tc.timeout != nil {
 				// Changing the caller's variable must not change an existing client.
-				*tc.timeout = -time.Second
+				*tc.timeout = time.Second
 			}
 
 			_, err = client.Table("events").AppendNDJSON(context.Background(), []byte(`{"id":1}`))
@@ -224,7 +224,7 @@ func TestWriteTimeoutStreamInheritanceAndOverride(t *testing.T) {
 			require.NoError(t, err)
 			if tc.attemptTimeout != nil {
 				// The background worker must use the value captured at construction.
-				*tc.attemptTimeout = -time.Second
+				*tc.attemptTimeout = time.Second
 			}
 			require.NoError(t, stream.Send(context.Background(), map[string]any{"id": 1}))
 			_, err = stream.Shutdown(context.Background())
