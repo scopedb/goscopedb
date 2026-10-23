@@ -170,6 +170,8 @@ type AppendStreamOptions struct {
 	// to one for serial request submission.
 	MaxConcurrentBatches int
 	// AttemptTimeout bounds each HTTP attempt. Zero uses Config.WriteTimeout.
+	// NoTimeout disables this limit, but the delivery/retry budget still applies.
+	// Other negative values are invalid.
 	// A timeout leaves that batch's commit outcome unknown.
 	AttemptTimeout time.Duration
 }
@@ -367,8 +369,8 @@ func normalizeAppendStreamOptions(options AppendStreamOptions) (normalizedAppend
 			fmt.Sprintf("max concurrent batches must be from 1 to %d", maxAppendConcurrentBatches),
 		)
 	}
-	if config.attemptTimeout < 0 {
-		return config, appendStreamConfigError("attempt timeout must not be negative")
+	if config.attemptTimeout < 0 && config.attemptTimeout != NoTimeout {
+		return config, appendStreamConfigError("attempt timeout must be non-negative or NoTimeout")
 	}
 	return config, nil
 }

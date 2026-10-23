@@ -31,18 +31,26 @@ import (
 
 func TestWriteTimeoutRequestScope(t *testing.T) {
 	t.Parallel()
-	for _, timeout := range []time.Duration{0, time.Minute} {
-		t.Run(timeout.String(), func(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		timeout     time.Duration
+		wantTimeout time.Duration
+	}{
+		{"default", 0, 30 * time.Second},
+		{"disabled", NoTimeout, 0},
+		{"configured", time.Minute, time.Minute},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			var requestCtx context.Context
 			standardClient := &http.Client{Transport: clientRoundTripFunc(func(req *http.Request) (*http.Response, error) {
 				requestCtx = req.Context()
 				deadline, hasDeadline := requestCtx.Deadline()
-				if req.Method == http.MethodGet || timeout == 0 {
+				if req.Method == http.MethodGet || tc.wantTimeout == 0 {
 					require.False(t, hasDeadline)
 				} else {
 					require.True(t, hasDeadline)
-					require.InDelta(t, timeout.Seconds(), time.Until(deadline).Seconds(), 1)
+					require.InDelta(t, tc.wantTimeout.Seconds(), time.Until(deadline).Seconds(), 1)
 				}
 				body := `{"before":{"name":"scopedb"},"after":{"name":"scopedb"},"destructive":false}`
 				switch req.Method {
@@ -57,12 +65,12 @@ func TestWriteTimeoutRequestScope(t *testing.T) {
 					Body:       io.NopCloser(strings.NewReader(body)),
 				}, nil
 			})}
-			client, err := NewClient(Config{Endpoint: "https://example.com", HTTPClient: standardClient, WriteTimeout: timeout})
+			client, err := NewClient(Config{Endpoint: "https://example.com", HTTPClient: standardClient, WriteTimeout: tc.timeout})
 			require.NoError(t, err)
 
 			_, err = client.Table("events").AppendNDJSON(context.Background(), []byte(`{"id":1}`))
 			require.NoError(t, err)
-			if timeout > 0 {
+			if tc.wantTimeout > 0 {
 				require.ErrorIs(t, requestCtx.Err(), context.Canceled, "completed requests must release their timers")
 			}
 			catalog := client.Catalog().Database("scopedb")
@@ -79,7 +87,7 @@ func TestWriteTimeoutRequestScope(t *testing.T) {
 	}
 }
 
-func TestWriteTimeoutRejectsNegativeConfig(t *testing.T) {
+func TestWriteTimeoutRejectsInvalidNegativeConfig(t *testing.T) {
 	t.Parallel()
 	_, err := NewClient(Config{Endpoint: "https://example.com", WriteTimeout: -time.Second})
 	var scopeErr *Error
@@ -148,7 +156,7 @@ func TestWriteTimeoutBoundsHeadersAndResponseBody(t *testing.T) {
 
 func TestWriteTimeoutHonorsEarlierCallerDeadline(t *testing.T) {
 	t.Parallel()
-	for _, timeout := range []time.Duration{0, time.Second} {
+	for _, timeout := range []time.Duration{0, NoTimeout, time.Second} {
 		t.Run(timeout.String(), func(t *testing.T) {
 			t.Parallel()
 			client, err := NewClient(Config{
@@ -180,9 +188,13 @@ func TestWriteTimeoutStreamInheritanceAndOverride(t *testing.T) {
 		attemptTimeout time.Duration
 		wantTimeout    time.Duration
 	}{
-		{"disabled", 0, 0, defaultAppendRetryElapsedTime},
+		{"default", 0, 0, 30 * time.Second},
+		{"inherit disabled", NoTimeout, 0, defaultAppendRetryElapsedTime},
 		{"inherit", time.Minute, 0, time.Minute},
 		{"override", time.Minute, 2 * time.Minute, 2 * time.Minute},
+		{"enable", NoTimeout, time.Minute, time.Minute},
+		{"disable default", 0, NoTimeout, defaultAppendRetryElapsedTime},
+		{"disable configured", time.Minute, NoTimeout, defaultAppendRetryElapsedTime},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -261,7 +273,7 @@ func TestWriteInterruptionUsesCurrentContextReason(t *testing.T) {
 
 func TestWriteTimeoutHonorsShorterHTTPClientTimeout(t *testing.T) {
 	t.Parallel()
-	for _, timeout := range []time.Duration{0, time.Second} {
+	for _, timeout := range []time.Duration{0, NoTimeout, time.Second} {
 		t.Run(timeout.String(), func(t *testing.T) {
 			t.Parallel()
 			client, err := NewClient(Config{

@@ -21,6 +21,10 @@ import (
 	"time"
 )
 
+// NoTimeout disables Config.WriteTimeout or AppendStreamOptions.AttemptTimeout.
+// Caller contexts, HTTP-client timeouts, and stream delivery budgets still apply.
+const NoTimeout time.Duration = -1
+
 // Compression defines the compression used for request bodies.
 type Compression string
 
@@ -46,10 +50,11 @@ type Config struct {
 	// The default is CompressionZstd. CompressionGzip is also supported.
 	Compression Compression `json:"compression"`
 	// WriteTimeout bounds each table append or catalog mutation request,
-	// including reading its response body. Zero (the default) disables this limit;
-	// caller context deadlines and HTTPClient timeouts still apply.
+	// including reading its response body. Zero uses the default of 30 seconds;
+	// NoTimeout disables this limit. Other negative values are invalid.
+	// Caller context deadlines and HTTPClient timeouts still apply.
 	// The budget starts after local encoding, compression, and request preparation.
-	// Positive stream AttemptTimeout settings override this limit. A timeout leaves
+	// Nonzero stream AttemptTimeout settings override this limit. A timeout leaves
 	// the commit outcome unknown; it does not roll back the write.
 	WriteTimeout time.Duration `json:"write_timeout"`
 	// HTTPClient is the HTTP client used to send requests.

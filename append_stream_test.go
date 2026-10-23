@@ -872,7 +872,7 @@ func TestAppendStreamOptionValidation(t *testing.T) {
 		{MaxBufferedBytes: -1},
 		{MaxConcurrentBatches: -1},
 		{MaxConcurrentBatches: maxAppendConcurrentBatches + 1},
-		{AttemptTimeout: -1},
+		{AttemptTimeout: -time.Second},
 		{Retry: &AppendRetryOptions{MaxRetries: -1}},
 		{Retry: &AppendRetryOptions{InitialBackoff: -1}},
 		{Retry: &AppendRetryOptions{MaxBackoff: -1}},
