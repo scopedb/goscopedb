@@ -79,9 +79,11 @@ The SDK executes ScopeQL but does not define the language. Start with the langua
 
 ## Client configuration
 
-`NewClient` validates the endpoint and returns an error for invalid configuration. Set `Config.HTTPClient` when the application needs to own HTTP timeouts, proxies, TLS, or connection pooling. `Client.Close` closes idle connections only for the HTTP client created by the SDK; it never closes a caller-provided client. SDK-owned clients refuse HTTP redirects so a redirect cannot replay a write or turn it into a GET. A supplied HTTP client retains its own redirect and transport policies.
+`NewClient` validates the endpoint and returns an error for invalid configuration. Set `Config.HTTPClient` when the application needs to own HTTP timeouts, proxies, TLS, or connection pooling. `Client.Close` closes idle connections only for the HTTP client created by the SDK; it never closes a caller-provided client. SDK-owned clients use Go's default redirect policy. To customize redirects, supply an `http.Client` with `CheckRedirect` through `Config.HTTPClient`.
 
-Every table append or Catalog mutation HTTP request has a client timeout of 30 seconds by default. Its budget starts after local encoding, compression, and request preparation and covers one HTTP attempt through reading the complete response body. Set `Config.WriteTimeout` to a positive `time.Duration` to change it; zero uses the default. Streams inherit this timeout unless `AttemptTimeout` is explicitly set. A shorter caller context deadline or HTTP-client timeout still applies. Admission, retry backoff, and an entire `Flush`/`Shutdown` barrier are outside this budget. Catalog dry runs use the same timeout but cannot commit, so they do not return `WriteDetails` or report an unknown commit.
+[Go's default redirect behavior](https://pkg.go.dev/net/http#Client.Do) changes POST requests to GET without a body for HTTP 301, 302, and 303; HTTP 307 and 308 preserve the method and body when the body can be recreated. Redirects happen within one SDK attempt; `AppendRetryOptions` does not control them and `Stats().Retries` does not count them.
+
+Every table append or Catalog mutation HTTP request has a client timeout of 30 seconds by default. Its budget starts after local encoding, compression, and request preparation and covers one HTTP attempt, including redirects and reading the complete response body. Set `Config.WriteTimeout` to a positive `time.Duration` to change it; zero uses the default. Streams inherit this timeout unless `AttemptTimeout` is explicitly set. A shorter caller context deadline or HTTP-client timeout still applies. Admission, retry backoff, and an entire `Flush`/`Shutdown` barrier are outside this budget. Catalog dry runs use the same timeout but cannot commit, so they do not return `WriteDetails` or report an unknown commit.
 
 Client timeouts after an HTTP attempt begins preserve the existing `*scopedb.Error` kind and cause and add `WriteDetails` with `Reason: scopedb.WriteErrorReasonTimeout` and `Outcome: scopedb.AppendStateUnknown`; `Error.Retryable` is false. In-flight caller cancellation uses `WriteErrorReasonCancelled`; cancellation before sending preserves the original context error. These fields remain available on subsequent errors returned by the stream. A timeout does not roll back a write: reconcile a client-interrupted write before replaying it. A server HTTP 408 is still a server response; an explicitly rejected append follows the existing safe retry policy. Append streams do not retry unknown outcomes by default. `AppendRetryOptions.RetryUnknown` explicitly enables retries for other transient unknown outcomes; those retries may duplicate committed rows.
 
@@ -334,7 +336,7 @@ stream, err := table.AppendStream(scopedb.AppendStreamOptions{
 })
 ```
 
-A later successful acknowledgement confirms the logical rows were written at least once, not how many copies exist. A later rejection cannot resolve an earlier unknown attempt. `Retry: &scopedb.AppendRetryOptions{MaxRetries: 0}` disables all retries. Client timeouts and cancellations are never retried, even with `RetryUnknown` enabled. Direct `AppendNDJSON` always makes one SDK attempt.
+A later successful acknowledgement confirms the logical rows were written at least once, not how many copies exist. A later rejection cannot resolve an earlier unknown attempt. `Retry: &scopedb.AppendRetryOptions{MaxRetries: 0}` disables all SDK retries. Client timeouts and cancellations are never retried, even with `RetryUnknown` enabled. Direct `AppendNDJSON` always makes one SDK attempt.
 
 The default stream targets 4 MiB batches, accepts at most 200,000 rows per batch, and sends up to four batches concurrently. Set `MaxConcurrentBatches: 1` for serial requests. `MaxBufferedBytes` bounds accepted encoded rows, including in-flight batches; it excludes temporary encoding/compression buffers and rows held by blocked `Send` callers. Limit producer concurrency when bounding total process memory.
 
@@ -395,7 +397,7 @@ Review these behavior changes when migrating:
 - Append batches allow up to 8 MiB of uncompressed NDJSON and 200,000 rows. Reduce an old ingest batch-byte target above 8 MiB.
 - `Flush` and `Shutdown` return an `AppendDeliveryReport` for activity since the previous report. Read `CommittedRows` instead of `IngestResult.NumRowsInserted`, and check `Outcome` when using the continue policy.
 - Append streams send up to four batches concurrently by default. Set `MaxConcurrentBatches: 1` when the producer needs sequential requests; queries still require `ORDER BY` for ordered results.
-- Append streams retry confirmed temporary rejections by default. `RetryUnknown: true` opts into retrying transient unknown outcomes, which can duplicate rows. Set `MaxRetries: 0` to disable all retries. Client timeouts and cancellations are never retried. Direct `AppendNDJSON` makes one attempt.
+- Append streams retry confirmed temporary rejections by default. `RetryUnknown: true` opts into retrying transient unknown outcomes, which can duplicate rows. Set `MaxRetries: 0` to disable all SDK retries. Client timeouts and cancellations are never retried. Direct `AppendNDJSON` makes one SDK attempt; HTTP redirects follow the configured HTTP client's policy.
 
 ## Structured errors
 

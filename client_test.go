@@ -26,6 +26,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strconv"
+	"sync/atomic"
 	"testing"
 
 	"github.com/klauspost/compress/zstd"
@@ -242,26 +243,72 @@ func decodeCompressedRequestBody(r *http.Request) ([]byte, error) {
 	}
 }
 
-func TestOwnedClientDoesNotReplayRedirectedWrite(t *testing.T) {
-	for _, status := range []int{http.StatusFound, http.StatusTemporaryRedirect} {
-		t.Run(strconv.Itoa(status), func(t *testing.T) {
-			requests := 0
+func TestOwnedClientFollowsRedirectedWrite(t *testing.T) {
+	for _, tc := range []struct {
+		status int
+		method string
+	}{
+		{http.StatusMovedPermanently, http.MethodGet},
+		{http.StatusFound, http.MethodGet},
+		{http.StatusSeeOther, http.MethodGet},
+		{http.StatusTemporaryRedirect, http.MethodPost},
+		{http.StatusPermanentRedirect, http.MethodPost},
+	} {
+		t.Run(strconv.Itoa(tc.status), func(t *testing.T) {
+			payload := []byte(`{"id":1}`)
+			var requests atomic.Int32
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				requests++
-				if requests == 1 {
-					http.Redirect(w, r, "/redirected", status)
+				requests.Add(1)
+				require.Equal(t, "Bearer redirect-key", r.Header.Get("Authorization"))
+				if r.URL.Path != "/redirected" {
+					http.Redirect(w, r, "/redirected", tc.status)
 					return
+				}
+				require.Equal(t, tc.method, r.Method)
+				if r.Method == http.MethodPost {
+					body, err := decodeCompressedRequestBody(r)
+					require.NoError(t, err)
+					require.Equal(t, payload, body)
+				} else {
+					body, err := io.ReadAll(r.Body)
+					require.NoError(t, err)
+					require.Empty(t, body)
 				}
 				writeJSONValue(t, w, AppendRowsResult{Status: AppendStateCommitted, NumRowsInserted: 1})
 			}))
-			defer server.Close()
-			client := newTestClient(t, server.URL)
-			_, err := client.Table("events").AppendNDJSON(t.Context(), []byte(`{"id":1}`))
-			var failure *Error
-			require.ErrorAs(t, err, &failure)
-			require.Equal(t, status, failure.HTTPStatus)
-			require.Equal(t, AppendStateUnknown, failure.AppendDetails.Status)
-			require.Equal(t, 1, requests)
+			t.Cleanup(server.Close)
+			client, err := NewClient(Config{Endpoint: server.URL, APIKey: "redirect-key"})
+			require.NoError(t, err)
+			t.Cleanup(client.Close)
+			result, err := client.Table("events").AppendNDJSON(t.Context(), payload)
+			require.NoError(t, err)
+			require.Equal(t, AppendStateCommitted, result.Status)
+			require.EqualValues(t, 1, result.NumRowsInserted)
+			require.EqualValues(t, 2, requests.Load())
 		})
 	}
+}
+
+func TestClientPreservesCallerRedirectPolicy(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		http.Redirect(w, r, "/redirected", http.StatusTemporaryRedirect)
+	}))
+	t.Cleanup(server.Close)
+	standardClient := server.Client()
+	standardClient.CheckRedirect = func(_ *http.Request, _ []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	client, err := NewClient(Config{Endpoint: server.URL, HTTPClient: standardClient})
+	require.NoError(t, err)
+	t.Cleanup(standardClient.CloseIdleConnections)
+	t.Cleanup(client.Close)
+	_, err = client.Table("events").AppendNDJSON(t.Context(), []byte(`{"id":1}`))
+	var failure *Error
+	require.ErrorAs(t, err, &failure)
+	require.Equal(t, http.StatusTemporaryRedirect, failure.HTTPStatus)
+	require.NotNil(t, failure.AppendDetails)
+	require.Equal(t, AppendStateUnknown, failure.AppendDetails.Status)
+	require.EqualValues(t, 1, requests.Load())
 }

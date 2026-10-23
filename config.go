@@ -53,9 +53,8 @@ type Config struct {
 	WriteTimeout time.Duration `json:"write_timeout"`
 	// HTTPClient is the HTTP client used to send requests.
 	//
-	// When nil, the SDK creates and owns an independent HTTP client. A supplied
-	// client remains owned by the caller and is never closed by the SDK. The SDK
-	// client refuses redirects; supplied clients retain their redirect policy
-	// and must avoid replaying mutations without the caller's authorization.
+	// When nil, the SDK creates and owns an independent HTTP client using Go's
+	// default redirect policy. A supplied client retains its redirect policy,
+	// remains owned by the caller, and is never closed by the SDK.
 	HTTPClient *http.Client `json:"-"`
 }

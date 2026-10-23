@@ -200,9 +200,6 @@ func cloudClient(t *testing.T, key, tenant string) *scopedb.Client {
 		t.Cleanup(transport.CloseIdleConnections)
 		config.HTTPClient = &http.Client{
 			Transport: tenantHeaderTransport{base: transport, tenant: tenant},
-			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
-				return http.ErrUseLastResponse
-			},
 		}
 	}
 	client, err := scopedb.NewClient(config)
