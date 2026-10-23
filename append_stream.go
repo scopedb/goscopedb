@@ -210,6 +210,9 @@ type AppendLastFailure struct {
 	At time.Time
 	// Message is the original error message.
 	Message string
+	// Code and Details preserve the last attempt's structured server error.
+	Code    string
+	Details json.RawMessage
 	// AppendState is rejected or unknown.
 	AppendState AppendState
 	// HTTPStatus is zero when no HTTP response was available.
@@ -1127,6 +1130,8 @@ func unknownAppendStreamError(message string, cause error) error {
 	// the outcome across all attempts, including an earlier lost response.
 	var last *Error
 	if errors.As(cause, &last) {
+		result.Code = last.Code
+		result.Details = slices.Clone(last.Details)
 		result.WriteDetails = last.WriteDetails
 		result.HTTPStatus = last.HTTPStatus
 		result.RequestID = last.RequestID
@@ -1189,6 +1194,8 @@ func makeAppendLastFailure(err error, state AppendState) *AppendLastFailure {
 	if !errors.As(err, &scopeErr) {
 		return failure
 	}
+	failure.Code = scopeErr.Code
+	failure.Details = slices.Clone(scopeErr.Details)
 	failure.HTTPStatus = scopeErr.HTTPStatus
 	failure.RequestID = scopeErr.RequestID
 	failure.RetryAfter = scopeErr.RetryAfter
@@ -1205,6 +1212,7 @@ func copyAppendLastFailure(failure *AppendLastFailure) *AppendLastFailure {
 		return nil
 	}
 	cloned := *failure
+	cloned.Details = slices.Clone(failure.Details)
 	cloned.RowErrors = slices.Clone(failure.RowErrors)
 	return &cloned
 }

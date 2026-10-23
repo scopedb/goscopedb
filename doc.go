@@ -16,7 +16,7 @@
 
 /*
 Package scopedb provides the official Go client for ScopeDB. It supports
-ScopeQL statements, REST catalog discovery, and streaming writes.
+ScopeQL statements, declarative catalog management, and streaming writes.
 
 Create and close one Client for the application's connection pool:
 
@@ -42,12 +42,19 @@ Query waits for a statement result, which can be converted to keyed objects:
 	fmt.Println(rows)
 
 Use Statement.Submit when an application needs the statement ID, a local status
-snapshot, an explicit remote status request, or a separate wait. ID and
-ExecTimeout are the only optional statement settings; omit ID to let ScopeDB
-generate it, and read the confirmed ID from StatementHandle.ID. Failed
-statements expose structured server error details on Error.StatementDetails.
-Catalog iterators lazily traverse REST pages. Table.Describe returns table
-metadata. For application writes, Table.AppendStream is the recommended path:
+snapshot, an explicit remote status request, or a separate wait. Omit ID to let
+ScopeDB generate it. MaxElapsed and MaxEstimated set server-side duration limits.
+Failed statements expose the server message and code on Error, with structured
+details on Error.StatementDetails.
+Client.Catalog reads and replaces the complete tenant catalog. Its Database,
+Schema, Table, and View selectors provide typed Get, Apply, and Delete operations.
+Raw retains JSON definitions including fields unknown to the SDK. Apply supports
+dry runs, ETag preconditions, and authorization for destructive changes.
+Table.Apply initializes a complete table definition before writing; options are
+optional and potentially destructive changes are rejected by default.
+Table.Describe returns a CatalogTable definition.
+
+For application writes, Table.AppendStream is the recommended path:
 it accepts typed rows and adds bounded asynchronous batching that is safe for
 concurrent producers. Table.AppendStream and Table.AppendNDJSON use the
 client's configured compression, which defaults to zstd. Table.AppendNDJSON is
@@ -61,12 +68,6 @@ rows in the delivery report and failure details in Stats().LastFailure.
 
 Stream Send methods confirm local admission only. Flush and Shutdown wait for
 the accepted prefix. AppendStream reports rejected and unknown outcomes.
-
-Client.IngestStream is an advanced path for source JSON that specifically needs
-a server-side ScopeQL transformation before it matches the destination table.
-An IngestStream error can follow a remote commit, so callers must reconcile
-before replaying the same records. A nonzero ingest result returned with an
-error covers only earlier confirmed batches, not a safe replay offset.
 
 ScopeQL is documented separately in the [quickstart], [query guide], and
 [language reference].

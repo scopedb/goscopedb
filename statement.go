@@ -35,13 +35,12 @@ type Statement struct {
 	//
 	// When nil, ScopeDB generates the statement ID.
 	ID *uuid.UUID
-	// ExecTimeout is the maximum time allowed for statement execution.
-	//
-	// If the total execution time exceeds this value, the statement is failed
-	// as timed out.
-	//
-	// Values use duration strings such as "1h".
-	ExecTimeout string
+	// MaxElapsed limits the server-side elapsed time, including queueing.
+	// Zero uses the server default of one hour.
+	MaxElapsed time.Duration
+	// MaxEstimated limits the estimated total execution duration.
+	// Zero leaves the estimate unrestricted.
+	MaxEstimated time.Duration
 }
 
 // Statement creates a new statement with the given ScopeQL statement.
@@ -56,11 +55,15 @@ func (c *Client) Query(ctx context.Context, scopeql string) (*ResultSet, error) 
 
 // Submit submits the statement to ScopeDB for execution.
 func (s *Statement) Submit(ctx context.Context) (*StatementHandle, error) {
+	if s.MaxElapsed < 0 || s.MaxEstimated < 0 {
+		return nil, newError(ErrorKindConfigInvalid, "statement limits must not be negative", nil)
+	}
 	resp, err := s.c.submitStatement(ctx, &statementRequest{
-		StatementID: s.ID,
-		Statement:   s.stmt,
-		ExecTimeout: s.ExecTimeout,
-		Format:      resultFormatJSON,
+		StatementID:         s.ID,
+		Statement:           s.stmt,
+		MaxElapsedSeconds:   s.MaxElapsed.Seconds(),
+		MaxEstimatedSeconds: s.MaxEstimated.Seconds(),
+		Format:              resultFormatJSON,
 	})
 	if err != nil {
 		return nil, err
@@ -84,11 +87,9 @@ func (s *Statement) Execute(ctx context.Context) (*ResultSet, error) {
 
 // StatementHandle is a handle to a statement that has been submitted to ScopeDB.
 type StatementHandle struct {
-	c                      *Client
-	resp                   *statementResponse
-	cancelResult           *StatementCancelResult
-	cancelResultNeedsFetch bool
-	id                     uuid.UUID
+	c    *Client
+	resp *statementResponse
+	id   uuid.UUID
 }
 
 // StatementHandle creates a new StatementHandle with the given ID.
@@ -106,14 +107,6 @@ func (h *StatementHandle) ID() uuid.UUID {
 
 // LastStatus returns the latest locally cached status without making a request.
 func (h *StatementHandle) LastStatus() *StatementStatus {
-	if h.resp != nil && h.resp.Status.Terminated() {
-		status := h.resp.Status
-		return &status
-	}
-	if h.cancelResult != nil && h.cancelResult.Status.Terminated() {
-		status := h.cancelResult.Status
-		return &status
-	}
 	if h.resp != nil {
 		status := h.resp.Status
 		return &status
@@ -147,9 +140,6 @@ func (h *StatementHandle) Status(ctx context.Context) (StatementStatus, error) {
 	if h.resp != nil && h.resp.Status.Terminated() {
 		return h.resp.Status, nil
 	}
-	if h.cancelResult != nil && h.cancelResult.Status.Terminated() {
-		return h.cancelResult.Status, nil
-	}
 
 	resp, err := h.c.fetchStatementResult(ctx, h.id)
 	if err != nil {
@@ -171,26 +161,6 @@ func (h *StatementHandle) Wait(ctx context.Context) (*ResultSet, error) {
 		if err != nil {
 			return nil, err
 		}
-		if h.cancelResultNeedsFetch &&
-			(status == StatementStatusFinished || status == StatementStatusFailed) {
-			resp, err := h.c.fetchStatementResult(ctx, h.id)
-			if err != nil {
-				return nil, err
-			}
-			if !resp.Status.Terminated() {
-				return nil, &Error{
-					Kind: ErrorKindUnexpected,
-					Message: fmt.Sprintf(
-						"statement cancel reported %s but fetched status is %s",
-						status,
-						resp.Status,
-					),
-				}
-			}
-			h.resp = resp
-			h.cancelResultNeedsFetch = false
-			continue
-		}
 
 		switch status {
 		case StatementStatusFinished:
@@ -202,18 +172,20 @@ func (h *StatementHandle) Wait(ctx context.Context) (*ResultSet, error) {
 				Kind:    ErrorKindUnexpected,
 				Message: "finished statement response has no result set",
 			}
-		case StatementStatusFailed, StatementStatusCancelled:
-			message := fmt.Sprintf("statement is %s", status)
-			if h.resp != nil && h.resp.Status == status && h.resp.Message != nil {
-				message = *h.resp.Message
-			} else if h.cancelResult != nil && h.cancelResult.Status == status {
-				message = h.cancelResult.Message
+		case StatementStatusFailed:
+			failure := h.resp.Error
+			return nil, &Error{
+				Kind:             ErrorKindStatementFailed,
+				Code:             string(failure.Code),
+				Details:          failure.Details,
+				Message:          failure.Message,
+				StatementDetails: failure,
 			}
-			failure := &Error{Kind: ErrorKindStatementFailed, Message: message}
-			if h.resp != nil && h.resp.Status == status {
-				failure.StatementDetails = h.resp.Error
+		case StatementStatusCancelled:
+			return nil, &Error{
+				Kind:    ErrorKindStatementFailed,
+				Message: fmt.Sprintf("statement %s was cancelled", h.id),
 			}
-			return nil, failure
 		case StatementStatusPending, StatementStatusRunning:
 			// Keep polling below.
 		default:
@@ -236,7 +208,7 @@ func (h *StatementHandle) Wait(ctx context.Context) (*ResultSet, error) {
 	}
 }
 
-// StatementCancelResult reports the server's complete cancellation outcome.
+// StatementCancelResult reports the statement's status after cancellation.
 type StatementCancelResult struct {
 	StatementID uuid.UUID       `json:"statement_id"`
 	CreatedAt   time.Time       `json:"created_at"`
@@ -244,43 +216,28 @@ type StatementCancelResult struct {
 	Message     string          `json:"message"`
 }
 
-// Cancel cancels the statement if it is running or pending.
+// Cancel requests cancellation and returns the outcome.
+// The full response is cached for Progress, ResultSet, and Wait. A cached
+// terminal outcome is returned without making another request.
 func (h *StatementHandle) Cancel(ctx context.Context) (StatementCancelResult, error) {
-	if h.cancelResult != nil {
-		return *h.cancelResult, nil
-	}
-	if h.resp != nil && h.resp.Status.Terminated() {
-		result := h.cancelResultFromResponse()
-		h.cancelResult = &result
-		h.cancelResultNeedsFetch = false
-		return result, nil
+	if h.resp == nil || !h.resp.Status.Terminated() {
+		resp, err := h.c.cancelStatement(ctx, h.id)
+		if err != nil {
+			return StatementCancelResult{}, err
+		}
+		h.resp = resp
 	}
 
-	resp, err := h.c.cancelStatement(ctx, h.id)
-	if err != nil {
-		return StatementCancelResult{}, err
-	}
-
-	result := *resp
-	if result.Status.Terminated() {
-		h.cancelResult = &result
-		h.cancelResultNeedsFetch = result.Status == StatementStatusFinished ||
-			result.Status == StatementStatusFailed
-	}
-	return result, nil
-}
-
-func (h *StatementHandle) cancelResultFromResponse() StatementCancelResult {
 	message := fmt.Sprintf("statement is %s", h.resp.Status)
-	if h.resp.Message != nil && *h.resp.Message != "" {
-		message = *h.resp.Message
+	if h.resp.Error != nil {
+		message = h.resp.Error.Message
 	}
 	return StatementCancelResult{
 		StatementID: h.id,
 		CreatedAt:   h.resp.Created,
 		Status:      h.resp.Status,
 		Message:     message,
-	}
+	}, nil
 }
 
 // StatementStatus is a string that represents the status of a statement.
@@ -304,20 +261,16 @@ const (
 type StatementErrorCode string
 
 const (
-	// StatementErrorCodePrepareError indicates that statement preparation failed.
-	StatementErrorCodePrepareError StatementErrorCode = "prepare_error"
-	// StatementErrorCodeExecuteError indicates that statement execution failed.
-	StatementErrorCodeExecuteError StatementErrorCode = "execute_error"
+	// StatementErrorCodeFailed indicates that statement preparation or execution failed.
+	StatementErrorCodeFailed StatementErrorCode = "statement_failed"
 	// StatementErrorCodePendingTimeout indicates that the statement timed out before execution.
-	StatementErrorCodePendingTimeout StatementErrorCode = "pending_timeout"
+	StatementErrorCodePendingTimeout StatementErrorCode = "statement_pending_timeout"
 	// StatementErrorCodeExecutionTimeout indicates that the statement exceeded its execution timeout.
-	StatementErrorCodeExecutionTimeout StatementErrorCode = "execution_timeout"
+	StatementErrorCodeExecutionTimeout StatementErrorCode = "statement_execution_timeout"
+	// StatementErrorCodeEstimateLimitExceeded indicates that the estimated duration reached its limit.
+	StatementErrorCodeEstimateLimitExceeded StatementErrorCode = "statement_estimate_limit_exceeded"
 	// StatementErrorCodeHeartbeatLost indicates that the statement worker stopped reporting progress.
-	StatementErrorCodeHeartbeatLost StatementErrorCode = "heartbeat_lost"
-	// StatementErrorCodeRowLimitExceeded indicates that the statement exceeded a server-enforced row limit.
-	StatementErrorCodeRowLimitExceeded StatementErrorCode = "row_limit_exceeded"
-	// StatementErrorCodeScanLimitExceeded indicates that the statement exceeded a server-enforced scan limit.
-	StatementErrorCodeScanLimitExceeded StatementErrorCode = "scan_limit_exceeded"
+	StatementErrorCodeHeartbeatLost StatementErrorCode = "statement_heartbeat_lost"
 )
 
 // StatementErrorDetails contains the structured failure returned for a failed
@@ -355,6 +308,8 @@ func (s StatementStatus) Terminated() bool {
 
 // StatementProgress is a struct that represents the progress of a statement.
 type StatementProgress struct {
+	// ComputeSeconds is cumulative server compute time, not elapsed wall time.
+	ComputeSeconds float64 `json:"compute_seconds"`
 	// TotalPercentage denotes the total progress in percentage: [0.0, 100.0].
 	TotalPercentage float64 `json:"total_percentage"`
 	// NanosFromSubmitted denotes the duration in nanoseconds since the statement is submitted.

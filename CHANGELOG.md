@@ -4,12 +4,20 @@ All significant changes to the ScopeDB Go SDK are documented in this file.
 
 ## Unreleased
 
+### Breaking Changes
+
+* Require ScopeDB 0.6.0 and use native Statement, declarative Catalog, and table ingest APIs. Replace paginated Catalog APIs, the table description model, the legacy execution timeout option, and statement error codes; see the [migration guide](README.md#migrate-to-scopedb-06).
+* Removed the legacy transform Ingest stream API. Use table append APIs and transform rows in the producer; see the [migration guide](README.md#migrate-from-ingeststream).
+
 ### New Features
 
-* Table append and transform-ingest requests now have a configurable `Config.WriteTimeout`, defaulting to 30 seconds including response-body reads. Streams inherit it unless `AttemptTimeout` is explicitly set. Timeout outcomes remain unknown and are never automatically retried. The write timeout starts after local encoding, compression, and request preparation. Client interruptions expose `Error.WriteDetails` with a `timeout` or `cancelled` reason and an `unknown` outcome while preserving existing kinds, causes, and HTTP diagnostics.
+* Add complete Catalog replacements and deletion with dry-run, ETags, conditional updates, views, computed columns, and explicit destructive-change authorization. Preserve structured error codes/details, including through append retries and `Stats().LastFailure`, and statement compute seconds.
+* Table append and Catalog mutation requests now have a configurable `Config.WriteTimeout`, defaulting to 30 seconds including response-body reads. Streams inherit it unless `AttemptTimeout` is explicitly set. Timeout outcomes remain unknown and are never automatically retried. The write timeout starts after local encoding, compression, and request preparation. Client interruptions expose `Error.WriteDetails` with a `timeout` or `cancelled` reason and an `unknown` outcome while preserving existing kinds, causes, and HTTP diagnostics. Catalog dry runs use the same timeout without reporting an unknown commit.
 
 ### Improvements
 
+* Cancellation caches complete terminal responses while retaining `StatementCancelResult`; finished results and original failures remain available without another request.
+* The bulk append example imports NDJSON from standard input with bounded memory and reports partial writes.
 * `AppendStream` now retries temporary rejections and transient `unknown` outcomes other than client timeouts or cancellations, providing at-least-once delivery that may insert duplicate rows. Direct `AppendNDJSON` remains a single attempt.
 * `AppendStream` now targets 4 MiB per batch by default; the maximum configurable target and uncompressed request limit remain 8 MiB.
 * Streaming write byte budgets now preserve FIFO waiter order so newer or smaller records cannot starve an older blocked producer.

@@ -14,28 +14,31 @@
  * limitations under the License.
  */
 
-// Package main demonstrates bounded streaming writes for a bulk source.
+// Package main imports NDJSON from standard input with bounded streaming writes.
 package main
 
 import (
+	"bufio"
+	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"log"
-	"time"
+	"os"
 
 	scopedb "github.com/scopedb/goscopedb"
 	"github.com/scopedb/goscopedb/examples/internal/exampleutil"
 )
 
-const totalRows = 25_000
-
 func main() {
-	if err := run(context.Background()); err != nil {
+	if err := run(context.Background(), os.Stdin); err != nil {
 		log.Fatal(err)
 	}
 }
 
-func run(ctx context.Context) error {
+func run(ctx context.Context, input io.Reader) error {
 	client, err := exampleutil.NewClient()
 	if err != nil {
 		return err
@@ -47,45 +50,40 @@ func run(ctx context.Context) error {
 		return err
 	}
 	stream, err := table.AppendStream(scopedb.AppendStreamOptions{
-		FailurePolicy:        scopedb.AppendFailureStop,
-		TargetBatchBytes:     4 * 1024 * 1024,
-		MaxBatchRows:         5_000,
-		FlushInterval:        time.Second,
-		MaxBufferedBytes:     32 * 1024 * 1024,
-		MaxConcurrentBatches: 4,
-		AttemptTimeout:       30 * time.Second,
+		// Let the caller reconcile a failed import before replaying any rows.
+		Retry: &scopedb.AppendRetryOptions{MaxRetries: 0},
 	})
 	if err != nil {
 		return err
 	}
 
-	startedAt := time.Now().UTC()
-	// Replace this generated loop with a sequential file or queue reader. Do
-	// not start one goroutine per row; Send already provides bounded admission.
-	for id := 0; id < totalRows; id++ {
-		row := map[string]any{
-			"id":          id,
-			"event_id":    fmt.Sprintf("go-bulk-%d-%d", startedAt.UnixNano(), id),
-			"occurred_at": startedAt.Format(time.RFC3339Nano),
-			"name":        "example.bulk",
-			"attributes":  map[string]any{"source": "go"},
-		}
-		if err := stream.Send(ctx, row); err != nil {
-			_, _ = stream.Shutdown(ctx)
-			return err
-		}
-	}
-
-	report, err := stream.Shutdown(ctx)
-	if err != nil {
-		return err
-	}
+	readErr := sendRows(ctx, stream, input)
+	report, writeErr := stream.Shutdown(ctx)
 	fmt.Printf(
-		"accepted=%d committed=%d retries=%d duration=%s\n",
+		"accepted=%d committed=%d failed=%d unknown=%d duration=%s\n",
 		report.AcceptedRows,
 		report.CommittedRows,
-		report.Retries,
+		report.FailedRows,
+		report.UnknownRows,
 		report.Duration,
 	)
-	return nil
+	return errors.Join(readErr, writeErr)
+}
+
+func sendRows(ctx context.Context, stream *scopedb.AppendStream, input io.Reader) error {
+	scanner := bufio.NewScanner(input)
+	// One row must fit in the SDK's 8 MiB uncompressed request limit.
+	scanner.Buffer(make([]byte, 64*1024), 8*1024*1024)
+	for line := 1; scanner.Scan(); line++ {
+		row := bytes.TrimSpace(scanner.Bytes())
+		if len(row) == 0 {
+			continue
+		}
+		// RawMessage preserves JSON numbers; Send copies the row and waits for
+		// bounded queue space without waiting for a remote commit.
+		if err := stream.Send(ctx, json.RawMessage(row)); err != nil {
+			return fmt.Errorf("line %d: %w", line, err)
+		}
+	}
+	return scanner.Err()
 }

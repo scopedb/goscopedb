@@ -51,7 +51,7 @@ type AppendRowsResult struct {
 }
 
 type appendRowsResponse struct {
-	AppendState     AppendState `json:"append_state"`
+	AppendState     AppendState `json:"status"`
 	NumRowsInserted *int64      `json:"num_rows_inserted"`
 }
 
@@ -106,13 +106,14 @@ func (c *Client) appendNDJSONWithTimeout(
 	}
 
 	u, err := c.resourceURL(
+		"catalog",
 		"databases",
 		database,
 		"schemas",
 		schema,
 		"tables",
 		table,
-		"rows",
+		"ingest",
 	)
 	if err != nil {
 		return AppendRowsResult{}, err

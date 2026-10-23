@@ -38,7 +38,7 @@ func TestAppendNDJSONUsesConfiguredCompression(t *testing.T) {
 		require.Equal(t, http.MethodPost, r.Method)
 		require.Equal(
 			t,
-			"/proxy/v1/databases/analytics%2F2026/schemas/events%20archive/tables/events%3F%23%2Fraw/rows",
+			"/proxy/v1/catalog/databases/analytics%2F2026/schemas/events%20archive/tables/events%3F%23%2Fraw/ingest",
 			r.URL.EscapedPath(),
 		)
 		require.Equal(t, "Bearer append-key", r.Header.Get("Authorization"))
@@ -47,10 +47,7 @@ func TestAppendNDJSONUsesConfiguredCompression(t *testing.T) {
 		body, err := decodeCompressedRequestBody(r)
 		require.NoError(t, err)
 		require.Equal(t, ndjson, body)
-		writeJSONValue(t, w, AppendRowsResult{
-			AppendState:     AppendStateCommitted,
-			NumRowsInserted: 2,
-		})
+		writeTestJSON(t, w, `{"status":"committed","num_rows_inserted":2}`)
 	}))
 	defer server.Close()
 
@@ -72,6 +69,9 @@ func TestAppendNDJSONUsesConfiguredCompression(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, AppendStateCommitted, result.AppendState)
 	require.Equal(t, int64(2), result.NumRowsInserted)
+	encoded, err := json.Marshal(result)
+	require.NoError(t, err)
+	require.JSONEq(t, `{"append_state":"committed","num_rows_inserted":2}`, string(encoded))
 }
 
 func TestAppendNDJSONRejectsLocalLimitsBeforeRequest(t *testing.T) {
@@ -111,14 +111,7 @@ func TestAppendNDJSONPreservesRejectedDetails(t *testing.T) {
 		w.Header().Set("X-Request-ID", "header-request")
 		w.Header().Set("Retry-After", "3")
 		w.WriteHeader(http.StatusBadRequest)
-		_, err := w.Write([]byte(`{
-			"message":"column id is invalid",
-			"request_id":"append-request",
-			"retryable":true,
-			"append_state":"rejected",
-			"row_errors":[{"row_index":1,"column":"id","message":"expected int"}],
-			"row_errors_truncated":false
-		}`))
+		_, err := w.Write([]byte(`{"message":"column id is invalid","request_id":"append-request","retryable":true,"details":{"status":"rejected","row_errors":[{"row_index":1,"column":"id","message":"expected int"}],"row_errors_truncated":false},"code":"invalid_schema"}`))
 		require.NoError(t, err)
 	}))
 	defer server.Close()
@@ -142,6 +135,9 @@ func TestAppendNDJSONPreservesRejectedDetails(t *testing.T) {
 	}}, scopeErr.AppendDetails.RowErrors)
 	require.True(t, scopeErr.Retryable)
 	require.Equal(t, 1, requests)
+	encoded, err := json.Marshal(scopeErr.AppendDetails)
+	require.NoError(t, err)
+	require.JSONEq(t, `{"append_state":"rejected","row_errors":[{"row_index":1,"column":"id","message":"expected int"}],"row_errors_truncated":false}`, string(encoded))
 }
 
 func TestAppendNDJSONNeverRetriesUnknownOutcome(t *testing.T) {
@@ -151,13 +147,7 @@ func TestAppendNDJSONNeverRetriesUnknownOutcome(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		requests++
 		w.WriteHeader(http.StatusServiceUnavailable)
-		_, err := w.Write([]byte(`{
-			"message":"commit outcome is unavailable",
-			"retryable":true,
-			"append_state":"unknown",
-			"row_errors":[],
-			"row_errors_truncated":false
-		}`))
+		_, err := w.Write([]byte(`{"message":"commit outcome is unavailable","retryable":true,"details":{"status":"unknown","row_errors":[],"row_errors_truncated":false},"code":"commit_unknown"}`))
 		require.NoError(t, err)
 	}))
 	defer server.Close()
@@ -183,11 +173,11 @@ func TestAppendNDJSONTreatsInvalidSuccessAsUnknown(t *testing.T) {
 		body string
 	}{
 		{name: "malformed", body: "not-json"},
-		{name: "contradictory state", body: `{"append_state":"rejected","num_rows_inserted":0}`},
-		{name: "missing row count", body: `{"append_state":"committed"}`},
-		{name: "null row count", body: `{"append_state":"committed","num_rows_inserted":null}`},
-		{name: "negative row count", body: `{"append_state":"committed","num_rows_inserted":-1}`},
-		{name: "row count mismatch", body: `{"append_state":"committed","num_rows_inserted":2}`},
+		{name: "contradictory state", body: `{"status":"rejected","num_rows_inserted":0}`},
+		{name: "missing row count", body: `{"status":"committed"}`},
+		{name: "null row count", body: `{"status":"committed","num_rows_inserted":null}`},
+		{name: "negative row count", body: `{"status":"committed","num_rows_inserted":-1}`},
+		{name: "row count mismatch", body: `{"status":"committed","num_rows_inserted":2}`},
 	}
 	for _, test := range tests {
 		test := test
@@ -228,7 +218,7 @@ func TestAppendNDJSONValidatesZeroRowSuccess(t *testing.T) {
 		t.Parallel()
 
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-			_, err := io.WriteString(w, `{"append_state":"committed","num_rows_inserted":0}`)
+			_, err := io.WriteString(w, `{"status":"committed","num_rows_inserted":0}`)
 			require.NoError(t, err)
 		}))
 		defer server.Close()
@@ -250,7 +240,7 @@ func TestAppendNDJSONValidatesZeroRowSuccess(t *testing.T) {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			requests++
 			w.Header().Set("X-Request-ID", "missing-count-request")
-			_, err := io.WriteString(w, `{"append_state":"committed"}`)
+			_, err := io.WriteString(w, `{"status":"committed"}`)
 			require.NoError(t, err)
 		}))
 		defer server.Close()

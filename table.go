@@ -42,18 +42,26 @@ func (c *Client) Table(tableName string) *Table {
 	}
 }
 
-// Drop drops the table from ScopeDB.
-//
-// This method issues a DROP TABLE statement to ScopeDB and blocks until done.
+// Drop issues a DROP TABLE statement and waits for completion.
 func (t *Table) Drop(ctx context.Context) error {
-	s := t.c.Statement(fmt.Sprintf(`DROP TABLE %s`, t.Identifier()))
-	_, err := s.Execute(ctx)
+	_, err := t.c.Query(ctx, "DROP TABLE "+t.Identifier())
 	return err
 }
 
 // Describe returns the complete REST catalog resource for this table.
-func (t *Table) Describe(ctx context.Context) (TableResource, error) {
-	return t.c.FetchTable(ctx, t.databaseName(), t.schemaName(), t.Name)
+func (t *Table) Describe(ctx context.Context) (CatalogTable, error) {
+	snapshot, err := t.c.Catalog().Table(t.databaseName(), t.schemaName(), t.Name).Get(ctx)
+	if err != nil {
+		return CatalogTable{}, err
+	}
+	return *snapshot.Definition, nil
+}
+
+// Apply creates or replaces this table's complete definition. The definition's
+// Name must match the table name. Options may be omitted; by default, potentially
+// destructive changes are rejected. The parent database and schema must exist.
+func (t *Table) Apply(ctx context.Context, definition *CatalogTable, options ...CatalogOptions) (CatalogResult[*CatalogTable], error) {
+	return t.c.Catalog().Table(t.databaseName(), t.schemaName(), t.Name).Apply(ctx, definition, options...)
 }
 
 // AppendNDJSON sends one caller-encoded NDJSON request of at most 8 MiB

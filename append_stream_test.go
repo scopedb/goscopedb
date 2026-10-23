@@ -510,6 +510,7 @@ func TestAppendStreamFailurePolicies(t *testing.T) {
 }
 
 func TestAppendStreamContinuePreservesStructuredLastFailure(t *testing.T) {
+	const details = `{"status":"rejected","row_errors":[{"row_index":0,"column":"occurred_at","message":"invalid timestamp"}],"row_errors_truncated":true}`
 	var calls atomic.Int64
 	table := newAppendStreamTestTable(t, func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(r.Body)
@@ -520,15 +521,9 @@ func TestAppendStreamContinuePreservesStructuredLastFailure(t *testing.T) {
 			w.Header().Set("Retry-After", "2")
 			w.WriteHeader(http.StatusUnprocessableEntity)
 			require.NoError(t, json.NewEncoder(w).Encode(map[string]any{
-				"message":      "invalid timestamp",
-				"append_state": AppendStateRejected,
-				"retryable":    false,
-				"row_errors": []map[string]any{{
-					"row_index": 0,
-					"column":    "occurred_at",
-					"message":   "invalid timestamp",
-				}},
-				"row_errors_truncated": true,
+				"code":    "invalid_schema",
+				"message": "invalid timestamp",
+				"details": json.RawMessage(details),
 			}))
 			return
 		}
@@ -549,6 +544,8 @@ func TestAppendStreamContinuePreservesStructuredLastFailure(t *testing.T) {
 	failure := stream.Stats().LastFailure
 	require.NotNil(t, failure)
 	require.Equal(t, "invalid timestamp", failure.Message)
+	require.Equal(t, "invalid_schema", failure.Code)
+	require.JSONEq(t, details, string(failure.Details))
 	require.Equal(t, AppendStateRejected, failure.AppendState)
 	require.Equal(t, http.StatusUnprocessableEntity, failure.HTTPStatus)
 	require.Equal(t, "append-request-123", failure.RequestID)
@@ -561,8 +558,10 @@ func TestAppendStreamContinuePreservesStructuredLastFailure(t *testing.T) {
 		Message:  "invalid timestamp",
 	}}, failure.RowErrors)
 
-	// Stats snapshots must not share caller-mutable row-error storage.
+	// Stats snapshots must not share caller-mutable error details.
+	failure.Details[0] = '['
 	failure.RowErrors[0].Message = "mutated"
+	require.JSONEq(t, details, string(stream.Stats().LastFailure.Details))
 	require.Equal(t, "invalid timestamp", stream.Stats().LastFailure.RowErrors[0].Message)
 }
 
@@ -820,7 +819,7 @@ func TestAppendStreamSnapshotsDestinationAndHonorsPreCanceledSend(t *testing.T) 
 	pathsMu.Lock()
 	defer pathsMu.Unlock()
 	require.Len(t, paths, 1)
-	require.Contains(t, paths[0], "/databases/before%2Fdb/schemas/before%20schema/tables/events/rows")
+	require.Contains(t, paths[0], "/databases/before%2Fdb/schemas/before%20schema/tables/events/ingest")
 }
 
 func TestAppendStreamConcurrentProducersAndStats(t *testing.T) {
@@ -932,9 +931,8 @@ func newAppendStreamTestTable(t *testing.T, handler http.HandlerFunc) *Table {
 func writeAppendStreamSuccess(t *testing.T, w http.ResponseWriter, rows int) {
 	t.Helper()
 	w.Header().Set("Content-Type", "application/json")
-	require.NoError(t, json.NewEncoder(w).Encode(AppendRowsResult{
-		AppendState:     AppendStateCommitted,
-		NumRowsInserted: int64(rows),
+	require.NoError(t, json.NewEncoder(w).Encode(map[string]any{
+		"status": "committed", "num_rows_inserted": rows,
 	}))
 }
 
@@ -949,11 +947,8 @@ func writeAppendStreamFailure(
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	require.NoError(t, json.NewEncoder(w).Encode(map[string]any{
-		"message":              "append failed",
-		"append_state":         state,
-		"row_errors":           []any{},
-		"row_errors_truncated": false,
-		"retryable":            retryable,
+		"code": "unavailable", "message": "append failed", "retryable": retryable,
+		"details": map[string]any{"status": state, "row_errors": []AppendRowError{}, "row_errors_truncated": false},
 	}))
 }
 
