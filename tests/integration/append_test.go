@@ -42,10 +42,11 @@ func TestTableAppendLifecycle(t *testing.T) {
 			{Name: "source", DataType: scopedb.StringDataType},
 		},
 	}
-	_, err := table.Apply(ctx, definition)
+	_, err := table.Catalog().Apply(ctx, definition)
 	require.NoError(t, err)
 	defer func() {
-		require.NoError(t, table.Drop(context.Background()))
+		_, err := table.Catalog().Delete(context.Background(), scopedb.CatalogOptions{AllowDestructive: true})
+		require.NoError(t, err)
 	}()
 
 	direct, err := table.AppendNDJSON(ctx, []byte(
@@ -87,13 +88,13 @@ func TestTableAppendLifecycle(t *testing.T) {
 	require.Equal(t, uint64(streamedRows), report.AcceptedRows)
 	require.Equal(t, uint64(streamedRows), report.CommittedRows)
 
-	_, err = table.Apply(ctx, definition)
+	_, err = table.Catalog().Apply(ctx, definition)
 	require.NoError(t, err)
 
-	description, err := table.Describe(ctx)
+	description, err := table.Catalog().Get(ctx)
 	require.NoError(t, err)
-	require.Equal(t, table.Name, description.Name)
-	require.Len(t, description.Columns, 2)
+	require.Equal(t, table.Name, description.Definition.Name)
+	require.Len(t, description.Definition.Columns, 2)
 
 	statement := client.Statement(fmt.Sprintf("FROM %s", table.Identifier()))
 	result, err := statement.Execute(ctx)

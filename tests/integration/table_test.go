@@ -25,7 +25,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestTableDescribe(t *testing.T) {
+func TestTableCatalogLifecycle(t *testing.T) {
 	c := NewClient(t)
 	defer c.Close()
 
@@ -44,16 +44,17 @@ func TestTableDescribe(t *testing.T) {
 	`, tbl.Identifier())).Execute(ctx)
 	require.NoError(t, err)
 	defer func() {
-		require.NoError(t, tbl.Drop(ctx))
-		_, err := tbl.Describe(ctx)
+		_, err := tbl.Catalog().Delete(ctx, scopedb.CatalogOptions{AllowDestructive: true})
+		require.NoError(t, err)
+		_, err = tbl.Catalog().Get(ctx)
 		var failure *scopedb.Error
 		require.ErrorAs(t, err, &failure)
 		require.Equal(t, 404, failure.HTTPStatus)
 	}()
 
-	description, err := tbl.Describe(ctx)
+	description, err := tbl.Catalog().Get(ctx)
 	require.NoError(t, err)
-	require.Equal(t, tbl.Name, description.Name)
+	require.Equal(t, tbl.Name, description.Definition.Name)
 	require.Equal(t, []scopedb.CatalogColumn{
 		{Name: "i", DataType: scopedb.IntDataType, Indexes: []scopedb.CatalogColumnIndex{}},
 		{Name: "u", DataType: scopedb.UIntDataType, Indexes: []scopedb.CatalogColumnIndex{}},
@@ -62,5 +63,19 @@ func TestTableDescribe(t *testing.T) {
 		{Name: "b", DataType: scopedb.BooleanDataType, Indexes: []scopedb.CatalogColumnIndex{}},
 		{Name: "ts", DataType: scopedb.TimestampDataType, Indexes: []scopedb.CatalogColumnIndex{}},
 		{Name: "var", DataType: scopedb.AnyDataType, Indexes: []scopedb.CatalogColumnIndex{}},
-	}, description.Columns)
+	}, description.Definition.Columns)
+	comment := "updated through the conditional catalog API"
+	description.Definition.Comment = &comment
+	updated, err := tbl.Catalog().Apply(ctx, description.Definition, scopedb.CatalogOptions{IfMatch: description.ETag})
+	require.NoError(t, err)
+	_, err = tbl.Catalog().Delete(ctx, scopedb.CatalogOptions{IfMatch: description.ETag, AllowDestructive: true})
+	var failure *scopedb.Error
+	require.ErrorAs(t, err, &failure)
+	require.Equal(t, 412, failure.HTTPStatus)
+	_, err = tbl.Catalog().Delete(ctx, scopedb.CatalogOptions{IfMatch: updated.ETag})
+	require.ErrorAs(t, err, &failure)
+	require.Equal(t, 409, failure.HTTPStatus)
+	current, err := tbl.Catalog().Get(ctx)
+	require.NoError(t, err)
+	require.Equal(t, &comment, current.Definition.Comment)
 }

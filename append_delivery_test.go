@@ -19,6 +19,7 @@ package scopedb
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -30,34 +31,50 @@ import (
 )
 
 func quickAppendRetry(n int) *AppendRetryOptions {
-	return &AppendRetryOptions{MaxRetries: n, InitialBackoff: time.Millisecond, MaxBackoff: 2 * time.Millisecond, MaxElapsedTime: time.Second}
+	return &AppendRetryOptions{MaxRetries: n, RetryUnknown: true, InitialBackoff: time.Millisecond, MaxBackoff: 2 * time.Millisecond, MaxElapsedTime: time.Second}
 }
 
 // Simulate a server that commits the first payload, then loses the response.
-// The baseline must favor delivery over duplicate avoidance.
-func TestAppendAtLeastOnceLostAcknowledgement(t *testing.T) {
-	var commits atomic.Int64
-	table := newAppendStreamTestTable(t, func(w http.ResponseWriter, r *http.Request) {
-		body, err := io.ReadAll(r.Body)
-		require.NoError(t, err)
-		require.JSONEq(t, `{"id":1}`, string(body))
-		if commits.Add(1) == 1 {
-			conn, _, err := w.(http.Hijacker).Hijack()
+// Retrying unknown outcomes must be an explicit at-least-once choice.
+func TestAppendLostAcknowledgementRequiresReplayOptIn(t *testing.T) {
+	for _, replay := range []bool{false, true} {
+		t.Run(fmt.Sprint(replay), func(t *testing.T) {
+			var commits atomic.Int64
+			table := newAppendStreamTestTable(t, func(w http.ResponseWriter, r *http.Request) {
+				body, err := io.ReadAll(r.Body)
+				require.NoError(t, err)
+				require.JSONEq(t, `{"id":1}`, string(body))
+				if commits.Add(1) == 1 {
+					conn, _, err := w.(http.Hijacker).Hijack()
+					require.NoError(t, err)
+					require.NoError(t, conn.Close())
+					return
+				}
+				writeAppendStreamSuccess(t, w, 1)
+			})
+			options := AppendStreamOptions{}
+			if replay {
+				options.Retry = quickAppendRetry(2)
+			}
+			stream, err := table.AppendStream(options)
 			require.NoError(t, err)
-			require.NoError(t, conn.Close())
-			return
-		}
-		writeAppendStreamSuccess(t, w, 1)
-	})
-	stream, err := table.AppendStream(AppendStreamOptions{Retry: quickAppendRetry(2)})
-	require.NoError(t, err)
-	require.NoError(t, stream.Send(context.Background(), map[string]int{"id": 1}))
-	report, err := stream.Shutdown(context.Background())
-	require.NoError(t, err)
-	require.Equal(t, int64(2), commits.Load())
-	require.Equal(t, uint64(1), report.CommittedRows) // logical rows, not remote copies
-	require.Equal(t, uint64(1), report.Retries)
-	require.Zero(t, report.UnknownRows)
+			require.NoError(t, stream.Send(t.Context(), map[string]int{"id": 1}))
+			report, err := stream.Shutdown(t.Context())
+			if replay {
+				require.NoError(t, err)
+				require.EqualValues(t, 2, commits.Load())
+				require.EqualValues(t, 1, report.CommittedRows) // logical rows, not remote copies
+				require.EqualValues(t, 1, report.Retries)
+				require.Zero(t, report.UnknownRows)
+			} else {
+				require.Error(t, err)
+				require.EqualValues(t, 1, commits.Load())
+				require.Zero(t, report.CommittedRows)
+				require.Zero(t, report.Retries)
+				require.EqualValues(t, 1, report.UnknownRows)
+			}
+		})
+	}
 }
 
 func TestAppendClientTimeoutIsNotReplayed(t *testing.T) {
@@ -85,6 +102,10 @@ func TestAppendClientTimeoutIsNotReplayed(t *testing.T) {
 		Reason: WriteErrorReasonTimeout, Outcome: AppendStateUnknown,
 	}, scopeErr.WriteDetails)
 	require.False(t, scopeErr.Retryable)
+	failure := stream.Stats().LastFailure
+	require.Equal(t, scopeErr.WriteDetails, failure.WriteDetails)
+	failure.WriteDetails.Reason = WriteErrorReasonCancelled
+	require.Equal(t, WriteErrorReasonTimeout, stream.Stats().LastFailure.WriteDetails.Reason)
 	require.EqualValues(t, 1, calls.Load())
 	require.Equal(t, uint64(1), report.UnknownRows)
 	require.Zero(t, report.CommittedRows)
@@ -440,4 +461,28 @@ func TestAppendReplayUsesCallerOwnedSourceInterval(t *testing.T) {
 	require.Equal(t, uint64(2), report.CommittedRows)
 	require.Equal(t, int64(2), firstCopies.Load())
 	require.Equal(t, int64(1), secondCopies.Load())
+}
+
+func TestAppendExpiredDeliveryBudgetIsUnsent(t *testing.T) {
+	var calls atomic.Int64
+	client, err := NewClient(Config{
+		Endpoint: "https://example.invalid",
+		HTTPClient: &http.Client{Transport: appendRoundTripFunc(func(_ *http.Request) (*http.Response, error) {
+			calls.Add(1)
+			return nil, errors.New("unexpected dispatch")
+		})},
+	})
+	require.NoError(t, err)
+	defer client.Close()
+	stream, err := client.Table("events").AppendStream(AppendStreamOptions{
+		Retry: &AppendRetryOptions{MaxElapsedTime: time.Nanosecond},
+	})
+	require.NoError(t, err)
+	require.NoError(t, stream.Send(t.Context(), map[string]int{"id": 1}))
+	report, err := stream.Shutdown(t.Context())
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	require.ErrorIs(t, err, ErrAppendRetryExhausted)
+	require.Zero(t, calls.Load())
+	require.EqualValues(t, 1, report.FailedRows)
+	require.Zero(t, report.UnknownRows)
 }

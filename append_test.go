@@ -67,11 +67,11 @@ func TestAppendNDJSONUsesConfiguredCompression(t *testing.T) {
 		ndjson,
 	)
 	require.NoError(t, err)
-	require.Equal(t, AppendStateCommitted, result.AppendState)
+	require.Equal(t, AppendStateCommitted, result.Status)
 	require.Equal(t, int64(2), result.NumRowsInserted)
 	encoded, err := json.Marshal(result)
 	require.NoError(t, err)
-	require.JSONEq(t, `{"append_state":"committed","num_rows_inserted":2}`, string(encoded))
+	require.JSONEq(t, `{"status":"committed","num_rows_inserted":2}`, string(encoded))
 }
 
 func TestAppendNDJSONRejectsLocalLimitsBeforeRequest(t *testing.T) {
@@ -96,7 +96,7 @@ func TestAppendNDJSONRejectsLocalLimitsBeforeRequest(t *testing.T) {
 		var scopeErr *Error
 		require.ErrorAs(t, err, &scopeErr)
 		require.Equal(t, ErrorKindAppendRowsFailed, scopeErr.Kind)
-		require.Equal(t, AppendStateRejected, scopeErr.AppendDetails.AppendState)
+		require.Equal(t, AppendStateRejected, scopeErr.AppendDetails.Status)
 		require.False(t, scopeErr.Retryable)
 	}
 	require.Zero(t, requests)
@@ -127,7 +127,7 @@ func TestAppendNDJSONPreservesRejectedDetails(t *testing.T) {
 	require.Equal(t, ErrorKindAppendRowsFailed, scopeErr.Kind)
 	require.Equal(t, http.StatusBadRequest, scopeErr.HTTPStatus)
 	require.Equal(t, "append-request", scopeErr.RequestID)
-	require.Equal(t, AppendStateRejected, scopeErr.AppendDetails.AppendState)
+	require.Equal(t, AppendStateRejected, scopeErr.AppendDetails.Status)
 	require.Equal(t, []AppendRowError{{
 		RowIndex: 1,
 		Column:   "id",
@@ -137,7 +137,7 @@ func TestAppendNDJSONPreservesRejectedDetails(t *testing.T) {
 	require.Equal(t, 1, requests)
 	encoded, err := json.Marshal(scopeErr.AppendDetails)
 	require.NoError(t, err)
-	require.JSONEq(t, `{"append_state":"rejected","row_errors":[{"row_index":1,"column":"id","message":"expected int"}],"row_errors_truncated":false}`, string(encoded))
+	require.JSONEq(t, `{"status":"rejected","row_errors":[{"row_index":1,"column":"id","message":"expected int"}],"row_errors_truncated":false}`, string(encoded))
 }
 
 func TestAppendNDJSONNeverRetriesUnknownOutcome(t *testing.T) {
@@ -160,7 +160,7 @@ func TestAppendNDJSONNeverRetriesUnknownOutcome(t *testing.T) {
 	var scopeErr *Error
 	require.ErrorAs(t, err, &scopeErr)
 	require.Equal(t, "commit outcome is unavailable", scopeErr.Error())
-	require.Equal(t, AppendStateUnknown, scopeErr.AppendDetails.AppendState)
+	require.Equal(t, AppendStateUnknown, scopeErr.AppendDetails.Status)
 	require.False(t, scopeErr.Retryable)
 	require.Equal(t, 1, requests)
 }
@@ -199,7 +199,7 @@ func TestAppendNDJSONTreatsInvalidSuccessAsUnknown(t *testing.T) {
 			var scopeErr *Error
 			require.ErrorAs(t, err, &scopeErr)
 			require.Equal(t, ErrorKindAppendRowsFailed, scopeErr.Kind)
-			require.Equal(t, AppendStateUnknown, scopeErr.AppendDetails.AppendState)
+			require.Equal(t, AppendStateUnknown, scopeErr.AppendDetails.Status)
 			require.Equal(t, http.StatusOK, scopeErr.HTTPStatus)
 			require.Equal(t, "success-request", scopeErr.RequestID)
 			require.False(t, scopeErr.Retryable)
@@ -229,7 +229,7 @@ func TestAppendNDJSONValidatesZeroRowSuccess(t *testing.T) {
 
 		result, err := client.appendNDJSON(context.Background(), "db", "schema", "table", []byte("\n  \n"))
 		require.NoError(t, err)
-		require.Equal(t, AppendStateCommitted, result.AppendState)
+		require.Equal(t, AppendStateCommitted, result.Status)
 		require.Zero(t, result.NumRowsInserted)
 	})
 
@@ -253,7 +253,7 @@ func TestAppendNDJSONValidatesZeroRowSuccess(t *testing.T) {
 		var scopeErr *Error
 		require.ErrorAs(t, err, &scopeErr)
 		require.Equal(t, ErrorKindAppendRowsFailed, scopeErr.Kind)
-		require.Equal(t, AppendStateUnknown, scopeErr.AppendDetails.AppendState)
+		require.Equal(t, AppendStateUnknown, scopeErr.AppendDetails.Status)
 		require.Equal(t, "missing-count-request", scopeErr.RequestID)
 		require.False(t, scopeErr.Retryable)
 		require.Equal(t, 1, requests)
@@ -278,7 +278,7 @@ func TestAppendNDJSONUnstructuredHTTPErrorIsUnknown(t *testing.T) {
 	var scopeErr *Error
 	require.ErrorAs(t, err, &scopeErr)
 	require.Equal(t, "upstream disconnected", scopeErr.Error())
-	require.Equal(t, AppendStateUnknown, scopeErr.AppendDetails.AppendState)
+	require.Equal(t, AppendStateUnknown, scopeErr.AppendDetails.Status)
 	require.False(t, scopeErr.Retryable)
 }
 
@@ -302,7 +302,7 @@ func TestAppendNDJSONTransportAndReadErrorsPreserveCause(t *testing.T) {
 		require.ErrorAs(t, err, &scopeErr)
 		require.ErrorIs(t, scopeErr, transportErr)
 		require.Contains(t, scopeErr.Error(), transportErr.Error())
-		require.Equal(t, AppendStateUnknown, scopeErr.AppendDetails.AppendState)
+		require.Equal(t, AppendStateUnknown, scopeErr.AppendDetails.Status)
 	})
 
 	for _, status := range []int{http.StatusOK, http.StatusUnauthorized, http.StatusForbidden, http.StatusServiceUnavailable} {
@@ -333,7 +333,7 @@ func TestAppendNDJSONTransportAndReadErrorsPreserveCause(t *testing.T) {
 			require.ErrorAs(t, err, &scopeErr)
 			require.Equal(t, readErr.Error(), scopeErr.Error())
 			require.ErrorIs(t, scopeErr, readErr)
-			require.Equal(t, AppendStateUnknown, scopeErr.AppendDetails.AppendState)
+			require.Equal(t, AppendStateUnknown, scopeErr.AppendDetails.Status)
 			require.False(t, scopeErr.Retryable)
 			require.Equal(t, status, scopeErr.HTTPStatus)
 			require.Equal(t, "interrupted-append", scopeErr.RequestID)

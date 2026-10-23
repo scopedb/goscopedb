@@ -25,7 +25,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestTableDescribeUsesDefaultLocation(t *testing.T) {
+func TestTableCatalogUsesDefaultLocation(t *testing.T) {
 	t.Parallel()
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -33,7 +33,7 @@ func TestTableDescribeUsesDefaultLocation(t *testing.T) {
 		require.Equal(t, "/v1/catalog/databases/scopedb/schemas/public/tables/events", r.URL.Path)
 		w.Header().Set("ETag", `"1"`)
 		writeTestJSON(t, w, `{
-									"name":"events",
+			"name":"events",
 			"columns":[{"name":"message","data_type":"string","comment":null}],
 			"partition_by":[],
 			"cluster_by":[],
@@ -45,15 +45,15 @@ func TestTableDescribeUsesDefaultLocation(t *testing.T) {
 	defer server.Close()
 
 	client := newTestClient(t, server.URL)
-	description, err := client.Table("events").Describe(context.Background())
+	description, err := client.Table("events").Catalog().Get(context.Background())
 	require.NoError(t, err)
-	require.Equal(t, "events", description.Name)
+	require.Equal(t, "events", description.Definition.Name)
 	require.Equal(t, []CatalogColumn{{
 		Name:     "message",
 		DataType: StringDataType,
-	}}, description.Columns)
-	require.NotNil(t, description.Comment)
-	require.Equal(t, "application events", *description.Comment)
+	}}, description.Definition.Columns)
+	require.NotNil(t, description.Definition.Comment)
+	require.Equal(t, "application events", *description.Definition.Comment)
 }
 
 func TestTableAppendNDJSONDelegatesRequest(t *testing.T) {
@@ -78,7 +78,7 @@ func TestTableAppendNDJSONDelegatesRequest(t *testing.T) {
 	table.Schema = "events"
 	result, err := table.AppendNDJSON(context.Background(), ndjson)
 	require.NoError(t, err)
-	require.Equal(t, AppendStateCommitted, result.AppendState)
+	require.Equal(t, AppendStateCommitted, result.Status)
 	require.Equal(t, int64(2), result.NumRowsInserted)
 }
 

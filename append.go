@@ -46,12 +46,12 @@ const (
 
 // AppendRowsResult is the result of a committed table append.
 type AppendRowsResult struct {
-	AppendState     AppendState `json:"append_state"`
+	Status          AppendState `json:"status"`
 	NumRowsInserted int64       `json:"num_rows_inserted"`
 }
 
 type appendRowsResponse struct {
-	AppendState     AppendState `json:"status"`
+	Status          AppendState `json:"status"`
 	NumRowsInserted *int64      `json:"num_rows_inserted"`
 }
 
@@ -64,7 +64,7 @@ type AppendRowError struct {
 
 // AppendErrorDetails contains the structured outcome of a failed append.
 type AppendErrorDetails struct {
-	AppendState        AppendState      `json:"append_state"`
+	Status             AppendState      `json:"status"`
 	RowErrors          []AppendRowError `json:"row_errors"`
 	RowErrorsTruncated bool             `json:"row_errors_truncated"`
 }
@@ -153,11 +153,11 @@ func (c *Client) appendNDJSONWithTimeout(
 		apiErr := responseError(resp, responseBody, ErrorKindAppendRowsFailed)
 		if apiErr.AppendDetails == nil {
 			apiErr.AppendDetails = &AppendErrorDetails{
-				AppendState: AppendStateUnknown,
-				RowErrors:   []AppendRowError{},
+				Status:    AppendStateUnknown,
+				RowErrors: []AppendRowError{},
 			}
 		}
-		if apiErr.AppendDetails.AppendState == AppendStateUnknown {
+		if apiErr.AppendDetails.Status == AppendStateUnknown {
 			apiErr.Retryable = false
 		}
 		return AppendRowsResult{}, apiErr
@@ -167,7 +167,7 @@ func (c *Client) appendNDJSONWithTimeout(
 	if err := json.Unmarshal(responseBody, &response); err != nil {
 		return AppendRowsResult{}, appendUnknownError("failed to decode table append response", err, resp)
 	}
-	if response.AppendState != AppendStateCommitted {
+	if response.Status != AppendStateCommitted {
 		return AppendRowsResult{}, appendUnknownError(
 			"table append response did not confirm a committed outcome",
 			nil,
@@ -196,14 +196,14 @@ func (c *Client) appendNDJSONWithTimeout(
 		), nil, resp)
 	}
 	return AppendRowsResult{
-		AppendState:     response.AppendState,
+		Status:          response.Status,
 		NumRowsInserted: *response.NumRowsInserted,
 	}, nil
 }
 
 func countAppendRows(ndjson []byte) int {
 	rows := 0
-	for _, line := range bytes.Split(ndjson, []byte{'\n'}) {
+	for line := range bytes.Lines(ndjson) {
 		if len(bytes.TrimSpace(line)) > 0 {
 			rows++
 		}
@@ -216,8 +216,8 @@ func appendRejectedError(message string) *Error {
 		Kind:    ErrorKindAppendRowsFailed,
 		Message: message,
 		AppendDetails: &AppendErrorDetails{
-			AppendState: AppendStateRejected,
-			RowErrors:   []AppendRowError{},
+			Status:    AppendStateRejected,
+			RowErrors: []AppendRowError{},
 		},
 	}
 }
@@ -227,8 +227,8 @@ func appendUnknownError(message string, cause error, resp *http.Response) *Error
 		Kind:    ErrorKindAppendRowsFailed,
 		Message: message,
 		AppendDetails: &AppendErrorDetails{
-			AppendState: AppendStateUnknown,
-			RowErrors:   []AppendRowError{},
+			Status:    AppendStateUnknown,
+			RowErrors: []AppendRowError{},
 		},
 		WriteDetails: writeErrorDetails(cause),
 		cause:        cause,
