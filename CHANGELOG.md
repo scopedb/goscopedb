@@ -9,7 +9,7 @@ All significant changes to the ScopeDB Go SDK are documented in this file.
 * Replace partial Statement accessors and `StatementCancelResult` with complete `StatementSnapshot` values from `Snapshot`, `Refresh`, and `Cancel`. Confirmed cancellation is identifiable through `ErrStatementCancelled`.
 * Replace `Table.Describe`, `Apply`, and `Drop` with `Table.Catalog().Get`, `Apply`, and `Delete`, preserving ETags and using one conditional mutation contract.
 * Rename append outcome fields from `AppendState` to `Status` and serialize them as `status`. Unknown append outcomes now require explicit retry opt-in. Remove the historical `u_int` type alias.
-* Typed Catalog reads reject unknown fields instead of silently losing them; use `Raw()` for forward-compatible round trips. SDK-owned HTTP clients no longer follow redirects.
+* Typed Catalog reads reject unknown fields instead of silently losing them; use `Raw()` for forward-compatible round trips.
 * Require ScopeDB 0.6.0 and use native Statement, declarative Catalog, and table ingest APIs. Replace paginated Catalog APIs, the table description model, the legacy execution timeout option, and statement error codes; see the [migration guide](README.md#migrate-to-scopedb-06).
 * Removed the legacy transform Ingest stream API. Use table append APIs and transform rows in the producer; see the [migration guide](README.md#migrate-from-ingeststream).
 * Append streams inherit `Config.WriteTimeout` by default, whose zero value disables the per-attempt limit. Set `WriteTimeout` or the stream's `AttemptTimeout` to `30 * time.Second` to retain the previous per-attempt limit. The delivery/retry budget still applies.
@@ -24,7 +24,7 @@ All significant changes to the ScopeDB Go SDK are documented in this file.
 * Statement handles are safe for concurrent waiting, refresh, cancellation, and local snapshots. Late responses cannot replace a terminal result, and snapshots do not share mutable fields with the cache.
 * Result decoding preserves integer boundaries and identifies failing rows and columns. Unstructured Catalog gateway failures report an unknown commit outcome.
 * The bulk append example imports NDJSON from standard input with bounded memory and reports partial writes.
-* `AppendStream` retries confirmed temporary rejections by default. Opt into at-least-once replay of transient unknown outcomes with `RetryUnknown`; client timeouts and cancellations are never retried. `Stats().LastFailure` preserves timeout diagnostics. Direct `AppendNDJSON` remains a single attempt.
+* `AppendStream` retries confirmed temporary rejections by default. Opt into at-least-once replay of transient unknown outcomes with `RetryUnknown`; client timeouts and cancellations are never retried. `Stats().LastFailure` preserves timeout diagnostics. Direct `AppendNDJSON` remains a single SDK attempt.
 * `AppendStream` now targets 4 MiB per batch by default; the maximum configurable target and uncompressed request limit remain 8 MiB.
 * Streaming write byte budgets now preserve FIFO waiter order so newer or smaller records cannot starve an older blocked producer.
 

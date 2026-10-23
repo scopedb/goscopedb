@@ -70,12 +70,7 @@ func NewClient(config Config) (*Client, error) {
 	standardClient := config.HTTPClient
 	owned := false
 	if standardClient == nil {
-		transport := independentDefaultTransport()
-		standardClient = &http.Client{
-			Transport: transport,
-			// Redirects can replay a write or turn it into a successful GET.
-			CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse },
-		}
+		standardClient = &http.Client{Transport: independentDefaultTransport()}
 		owned = true
 	}
 	var authorization string
