@@ -54,7 +54,10 @@ func NewClient(config Config) (*Client, error) {
 		)
 	}
 
-	compression := requestCompression(config)
+	compression := config.Compression
+	if compression == "" {
+		compression = CompressionZstd
+	}
 	if compression != CompressionZstd && compression != CompressionGzip {
 		return nil, newError(
 			ErrorKindConfigInvalid,
@@ -74,8 +77,16 @@ func NewClient(config Config) (*Client, error) {
 	owned := false
 	if standardClient == nil {
 		transport := independentDefaultTransport()
-		standardClient = &http.Client{Transport: transport}
+		standardClient = &http.Client{
+			Transport: transport,
+			// Redirects can replay a write or turn it into a successful GET.
+			CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse },
+		}
 		owned = true
+	}
+	var authorization string
+	if config.APIKey != "" {
+		authorization = "Bearer " + config.APIKey
 	}
 
 	return &Client{
@@ -83,7 +94,7 @@ func NewClient(config Config) (*Client, error) {
 		writeTimeout: writeTimeout,
 		http: &httpClient{
 			client:        standardClient,
-			authorization: bearerAuthorization(config),
+			authorization: authorization,
 			compression:   compression,
 			owned:         owned,
 		},
@@ -177,20 +188,6 @@ func (c *httpClient) Close() {
 	if c.owned {
 		c.client.CloseIdleConnections()
 	}
-}
-
-func bearerAuthorization(config Config) string {
-	if config.APIKey == "" {
-		return ""
-	}
-	return "Bearer " + config.APIKey
-}
-
-func requestCompression(config Config) Compression {
-	if config.Compression == "" {
-		return CompressionZstd
-	}
-	return config.Compression
 }
 
 func normalizeEndpoint(raw string) (*url.URL, error) {

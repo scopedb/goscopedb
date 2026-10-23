@@ -45,11 +45,9 @@ func run(ctx context.Context) error {
 		return err
 	}
 	stream, err := table.AppendStream(scopedb.AppendStreamOptions{
-		FailurePolicy:        scopedb.AppendFailureContinue,
-		FlushInterval:        time.Second,
-		MaxBufferedBytes:     16 * 1024 * 1024,
-		MaxConcurrentBatches: 4,
-		AttemptTimeout:       5 * time.Second,
+		FailurePolicy:    scopedb.AppendFailureContinue,
+		MaxBufferedBytes: 16 * 1024 * 1024,
+		AttemptTimeout:   5 * time.Second,
 	})
 	if err != nil {
 		return err
@@ -89,8 +87,8 @@ func run(ctx context.Context) error {
 	}
 	if report.Outcome != scopedb.AppendDeliveryOK {
 		log.Printf("telemetry loss or ambiguity: %+v", report)
-		// Retry of an unknown outcome may have created duplicates. Continue
-		// mode reports terminal loss but does not retain payloads for replay.
+		// Unknown rows may have committed. Continue mode reports terminal
+		// loss but does not retain payloads for reconciliation or replay.
 	}
 	return nil
 }

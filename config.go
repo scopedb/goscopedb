@@ -43,8 +43,7 @@ type Config struct {
 	// Compression controls how request bodies are compressed, including direct
 	// table appends and AppendStream batches.
 	//
-	// The default is CompressionZstd. Set this to CompressionGzip to talk to
-	// older deployments that do not support zstd yet.
+	// The default is CompressionZstd. CompressionGzip is also supported.
 	Compression Compression `json:"compression"`
 	// WriteTimeout bounds each table append or catalog mutation request,
 	// including reading its response body. Zero defaults to 30 seconds.
@@ -55,6 +54,8 @@ type Config struct {
 	// HTTPClient is the HTTP client used to send requests.
 	//
 	// When nil, the SDK creates and owns an independent HTTP client. A supplied
-	// client remains owned by the caller and is never closed by the SDK.
+	// client remains owned by the caller and is never closed by the SDK. The SDK
+	// client refuses redirects; supplied clients retain their redirect policy
+	// and must avoid replaying mutations without the caller's authorization.
 	HTTPClient *http.Client `json:"-"`
 }

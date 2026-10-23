@@ -78,7 +78,7 @@ func TestTableAppendNDJSONDelegatesRequest(t *testing.T) {
 	table.Schema = "events"
 	result, err := table.AppendNDJSON(context.Background(), ndjson)
 	require.NoError(t, err)
-	require.Equal(t, AppendStateCommitted, result.AppendState)
+	require.Equal(t, AppendStateCommitted, result.Status)
 	require.Equal(t, int64(2), result.NumRowsInserted)
 }
 

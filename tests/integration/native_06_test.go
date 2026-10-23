@@ -73,7 +73,7 @@ func TestNative06Lifecycle(t *testing.T) {
 		t.Fatal("row count")
 	}
 	_, err = table.AppendNDJSON(ctx, []byte("{\"id\":\"invalid\",\"source\":\"go\"}"))
-	if !errors.As(err, &api) || api.AppendDetails == nil || api.AppendDetails.AppendState != scopedb.AppendStateRejected {
+	if !errors.As(err, &api) || api.AppendDetails == nil || api.AppendDetails.Status != scopedb.AppendStateRejected {
 		t.Fatalf("invalid row: %v", err)
 	}
 	t.Logf("REJECTED code=%s row_errors=%d\n", api.Code, len(api.AppendDetails.RowErrors))
