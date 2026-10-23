@@ -136,8 +136,11 @@ func (c *Client) appendNDJSONWithTimeout(
 	if err := ctx.Err(); err != nil {
 		return AppendRowsResult{}, err
 	}
-	ctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
+	if timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
 
 	resp, err := c.http.do(req.WithContext(ctx))
 	if err != nil {

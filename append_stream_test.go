@@ -890,7 +890,6 @@ func TestAppendStreamOptionValidation(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 4*1024*1024, defaults.targetBatchBytes)
 	require.Equal(t, 64*1024*1024, defaults.maxBufferedBytes)
-	require.Equal(t, defaultAppendAttemptTimeout, defaults.attemptTimeout)
 	require.Equal(t, 8, defaults.retry.MaxRetries)
 	require.Equal(t, 5*time.Minute, defaults.retry.MaxElapsedTime)
 	for range 100 {

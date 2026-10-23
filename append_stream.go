@@ -39,7 +39,6 @@ const (
 	defaultAppendMaxRetries           = 8
 	defaultAppendInitialBackoff       = 100 * time.Millisecond
 	defaultAppendMaxBackoff           = 5 * time.Second
-	defaultAppendAttemptTimeout       = defaultWriteTimeout
 	defaultAppendRetryElapsedTime     = 5 * time.Minute
 )
 
@@ -361,9 +360,6 @@ func normalizeAppendStreamOptions(options AppendStreamOptions) (normalizedAppend
 	}
 	if config.attemptTimeout < 0 {
 		return config, appendStreamConfigError("attempt timeout must not be negative")
-	}
-	if config.attemptTimeout == 0 {
-		config.attemptTimeout = defaultAppendAttemptTimeout
 	}
 	return config, nil
 }

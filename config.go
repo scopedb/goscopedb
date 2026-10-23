@@ -47,9 +47,10 @@ type Config struct {
 	// older deployments that do not support zstd yet.
 	Compression Compression `json:"compression"`
 	// WriteTimeout bounds each table append or catalog mutation request,
-	// including reading its response body. Zero defaults to 30 seconds.
+	// including reading its response body. Zero (the default) disables this limit;
+	// caller context deadlines and HTTPClient timeouts still apply.
 	// The budget starts after local encoding, compression, and request preparation.
-	// Stream AttemptTimeout settings override this default. A timeout leaves
+	// Positive stream AttemptTimeout settings override this limit. A timeout leaves
 	// the commit outcome unknown; it does not roll back the write.
 	WriteTimeout time.Duration `json:"write_timeout"`
 	// HTTPClient is the HTTP client used to send requests.

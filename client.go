@@ -41,8 +41,6 @@ type Client struct {
 	writeTimeout time.Duration
 }
 
-const defaultWriteTimeout = 30 * time.Second
-
 // NewClient creates a new ScopeDB client with the given configuration.
 func NewClient(config Config) (*Client, error) {
 	endpoint, err := normalizeEndpoint(config.Endpoint)
@@ -62,12 +60,8 @@ func NewClient(config Config) (*Client, error) {
 			nil,
 		)
 	}
-	writeTimeout := config.WriteTimeout
-	if writeTimeout < 0 {
+	if config.WriteTimeout < 0 {
 		return nil, newError(ErrorKindConfigInvalid, "write timeout must not be negative", nil)
-	}
-	if writeTimeout == 0 {
-		writeTimeout = defaultWriteTimeout
 	}
 
 	standardClient := config.HTTPClient
@@ -80,7 +74,7 @@ func NewClient(config Config) (*Client, error) {
 
 	return &Client{
 		endpoint:     endpoint,
-		writeTimeout: writeTimeout,
+		writeTimeout: config.WriteTimeout,
 		http: &httpClient{
 			client:        standardClient,
 			authorization: bearerAuthorization(config),
