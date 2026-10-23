@@ -6,7 +6,8 @@ All significant changes to the ScopeDB Go SDK are documented in this file.
 
 ### Breaking Changes
 
-* `AppendStreamOptions.AttemptTimeout` now takes `*time.Duration`. Omit it to inherit the client write timeout, pass the address of a positive duration to override it, or use `new(time.Duration)` to disable the per-attempt limit.
+* Require Go 1.26 or later. Upgrade the Go toolchain before updating the SDK.
+* `AppendStreamOptions.AttemptTimeout` now takes `*time.Duration`. Omit it to inherit the client write timeout, use `new(duration)` with a positive duration to override it, or use `new(time.Duration)` to disable the per-attempt limit.
 * Replace partial Statement accessors and `StatementCancelResult` with complete `StatementSnapshot` values from `Snapshot`, `Refresh`, and `Cancel`. Confirmed cancellation is identifiable through `ErrStatementCancelled`.
 * Replace `Table.Describe`, `Apply`, and `Drop` with `Table.Catalog().Get`, `Apply`, and `Delete`, preserving ETags and using one conditional mutation contract.
 * Rename append outcome fields from `AppendState` to `Status` and serialize them as `status`. Unknown append outcomes now require explicit retry opt-in. Remove the historical `u_int` type alias.

@@ -56,11 +56,10 @@ func TestTableAppendLifecycle(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, int64(2), direct.NumRowsInserted)
 
-	attemptTimeout := 5 * time.Second
 	stream, err := table.AppendStream(scopedb.AppendStreamOptions{
 		TargetBatchBytes:     1,
 		MaxConcurrentBatches: 4,
-		AttemptTimeout:       &attemptTimeout,
+		AttemptTimeout:       new(5 * time.Second),
 	})
 	require.NoError(t, err)
 

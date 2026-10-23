@@ -14,8 +14,8 @@
 
 [tools]
 "github:fast/hawkeye" = "7.1.0"
-go = "1.24.13"
-golangci-lint = "2.1.6"
+go = "1.26.10"
+golangci-lint = "2.13.2"
 
 [task_config]
 shell = "bash -e -o pipefail -c"

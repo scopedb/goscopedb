@@ -38,7 +38,7 @@ func TestWriteTimeoutRequestScope(t *testing.T) {
 	}{
 		{"default", nil, 30 * time.Second},
 		{"disabled", new(time.Duration), 0},
-		{"configured", durationPointer(time.Minute), time.Minute},
+		{"configured", new(time.Minute), time.Minute},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -93,7 +93,7 @@ func TestWriteTimeoutRequestScope(t *testing.T) {
 
 func TestWriteTimeoutRejectsNegativeConfig(t *testing.T) {
 	t.Parallel()
-	_, err := NewClient(Config{Endpoint: "https://example.com", WriteTimeout: durationPointer(-1)})
+	_, err := NewClient(Config{Endpoint: "https://example.com", WriteTimeout: new(-time.Nanosecond)})
 	var scopeErr *Error
 	require.ErrorAs(t, err, &scopeErr)
 	require.Equal(t, ErrorKindConfigInvalid, scopeErr.Kind)
@@ -124,7 +124,7 @@ func TestWriteTimeoutBoundsHeadersAndResponseBody(t *testing.T) {
 					<-r.Context().Done()
 				}))
 				defer server.Close()
-				client, err := NewClient(Config{Endpoint: server.URL, WriteTimeout: durationPointer(50 * time.Millisecond)})
+				client, err := NewClient(Config{Endpoint: server.URL, WriteTimeout: new(50 * time.Millisecond)})
 				require.NoError(t, err)
 				defer client.Close()
 				switch operation {
@@ -163,7 +163,7 @@ func TestWriteTimeoutHonorsEarlierCallerDeadline(t *testing.T) {
 	for name, timeout := range map[string]*time.Duration{
 		"default":    nil,
 		"disabled":   new(time.Duration),
-		"configured": durationPointer(time.Second),
+		"configured": new(time.Second),
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
@@ -198,11 +198,11 @@ func TestWriteTimeoutStreamInheritanceAndOverride(t *testing.T) {
 	}{
 		{"default", nil, nil, 30 * time.Second},
 		{"inherit disabled", new(time.Duration), nil, defaultAppendRetryElapsedTime},
-		{"inherit", durationPointer(time.Minute), nil, time.Minute},
-		{"override", durationPointer(time.Minute), durationPointer(2 * time.Minute), 2 * time.Minute},
-		{"enable", new(time.Duration), durationPointer(time.Minute), time.Minute},
+		{"inherit", new(time.Minute), nil, time.Minute},
+		{"override", new(time.Minute), new(2 * time.Minute), 2 * time.Minute},
+		{"enable", new(time.Duration), new(time.Minute), time.Minute},
 		{"disable default", nil, new(time.Duration), defaultAppendRetryElapsedTime},
-		{"disable configured", durationPointer(time.Minute), new(time.Duration), defaultAppendRetryElapsedTime},
+		{"disable configured", new(time.Minute), new(time.Duration), defaultAppendRetryElapsedTime},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -240,7 +240,7 @@ func TestWriteTimeoutStartsAfterRequestPreparation(t *testing.T) {
 	payload := []byte(`{"data":"` + strings.Repeat("x", 6*1024*1024) + `"}`)
 	var started time.Time
 	client, err := NewClient(Config{
-		Endpoint: "https://example.com", Compression: CompressionGzip, WriteTimeout: durationPointer(timeout),
+		Endpoint: "https://example.com", Compression: CompressionGzip, WriteTimeout: new(timeout),
 		HTTPClient: &http.Client{Transport: clientRoundTripFunc(func(req *http.Request) (*http.Response, error) {
 			reachedTransport := time.Now()
 			deadline, ok := req.Context().Deadline()
@@ -288,7 +288,7 @@ func TestWriteTimeoutHonorsShorterHTTPClientTimeout(t *testing.T) {
 	for name, timeout := range map[string]*time.Duration{
 		"default":    nil,
 		"disabled":   new(time.Duration),
-		"configured": durationPointer(time.Second),
+		"configured": new(time.Second),
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
@@ -332,8 +332,4 @@ func TestServerTimeoutRejectionRemainsSafelyRetryable(t *testing.T) {
 	require.Nil(t, scopeErr.WriteDetails)
 	require.Equal(t, AppendStateRejected, scopeErr.AppendDetails.Status)
 	require.True(t, scopeErr.Retryable)
-}
-
-func durationPointer(value time.Duration) *time.Duration {
-	return &value
 }

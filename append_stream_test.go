@@ -619,7 +619,7 @@ func TestAppendStreamRetryPolicies(t *testing.T) {
 			Retry:            &AppendRetryOptions{MaxRetries: 0},
 			FailurePolicy:    AppendFailureContinue,
 			TargetBatchBytes: 1,
-			AttemptTimeout:   durationPointer(10 * time.Millisecond),
+			AttemptTimeout:   new(10 * time.Millisecond),
 		})
 		require.NoError(t, err)
 		require.NoError(t, stream.Send(context.Background(), map[string]int{"id": 1}))
@@ -872,7 +872,7 @@ func TestAppendStreamOptionValidation(t *testing.T) {
 		{MaxBufferedBytes: -1},
 		{MaxConcurrentBatches: -1},
 		{MaxConcurrentBatches: maxAppendConcurrentBatches + 1},
-		{AttemptTimeout: durationPointer(-1)},
+		{AttemptTimeout: new(-time.Nanosecond)},
 		{Retry: &AppendRetryOptions{MaxRetries: -1}},
 		{Retry: &AppendRetryOptions{InitialBackoff: -1}},
 		{Retry: &AppendRetryOptions{MaxBackoff: -1}},

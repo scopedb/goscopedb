@@ -8,7 +8,7 @@ This development version requires ScopeDB 0.6.0 or later and uses its native Sta
 
 ## Runtime support
 
-Requires Go 1.24 or later. Use the SDK in a trusted server-side process and keep API keys out of source control.
+Requires Go 1.26 or later. Use the SDK in a trusted server-side process and keep API keys out of source control.
 
 ## Installation
 
@@ -86,14 +86,11 @@ The SDK executes ScopeQL but does not define the language. Start with the langua
 Every table append or Catalog mutation HTTP request has a client timeout of 30 seconds by default. `Config.WriteTimeout` is a `*time.Duration`: nil uses the default, a pointer to zero disables the limit, and a pointer to a positive duration overrides it. Negative durations are invalid. `NewClient` copies the value, so changing the original variable does not change an existing client.
 
 ```go
-writeTimeout := 2 * time.Minute
 client, err := scopedb.NewClient(scopedb.Config{
     Endpoint:     "http://localhost:6543",
-    WriteTimeout: &writeTimeout, // Omit for 30 seconds; use new(time.Duration) to disable.
+    WriteTimeout: new(2 * time.Minute), // Omit for 30 seconds; use new(time.Duration) to disable.
 })
 ```
-
-On Go 1.26 or later, `WriteTimeout: new(2 * time.Minute)` is equivalent. `new(time.Duration)` creates a pointer to zero on all supported Go versions.
 
 The write timeout starts after local encoding, compression, and request preparation and covers one HTTP attempt, including redirects and reading the complete response body. Caller context deadlines on direct appends and Catalog requests still apply, as do HTTP-client timeouts. Catalog dry runs use the same timeout but cannot commit, so they do not return `WriteDetails` or report an unknown commit.
 
