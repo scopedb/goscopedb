@@ -25,6 +25,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/require"
@@ -77,39 +78,73 @@ func TestAppendLostAcknowledgementRequiresReplayOptIn(t *testing.T) {
 	}
 }
 
-func TestAppendClientTimeoutIsNotReplayed(t *testing.T) {
-	var calls atomic.Int64
-	client, err := NewClient(Config{
-		Endpoint: "https://example.com", Compression: CompressionGzip,
-		HTTPClient: &http.Client{Transport: appendRoundTripFunc(func(r *http.Request) (*http.Response, error) {
-			if calls.Add(1) == 1 {
-				<-r.Context().Done()
-				return nil, r.Context().Err()
-			}
-			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"status":"committed","num_rows_inserted":1}`))}, nil
-		})},
-	})
-	require.NoError(t, err)
-	t.Cleanup(client.Close)
-	stream, err := client.Table("events").AppendStream(AppendStreamOptions{AttemptTimeout: new(25 * time.Millisecond), Retry: quickAppendRetry(2)})
-	require.NoError(t, err)
-	require.NoError(t, stream.Send(context.Background(), map[string]int{"id": 1}))
-	report, err := stream.Shutdown(context.Background())
-	require.ErrorIs(t, err, context.DeadlineExceeded)
-	var scopeErr *Error
-	require.ErrorAs(t, err, &scopeErr)
-	require.Equal(t, &WriteErrorDetails{
-		Reason: WriteErrorReasonTimeout, Outcome: AppendStateUnknown,
-	}, scopeErr.WriteDetails)
-	require.False(t, scopeErr.Retryable)
-	failure := stream.Stats().LastFailure
-	require.Equal(t, scopeErr.WriteDetails, failure.WriteDetails)
-	failure.WriteDetails.Reason = WriteErrorReasonCancelled
-	require.Equal(t, WriteErrorReasonTimeout, stream.Stats().LastFailure.WriteDetails.Reason)
-	require.EqualValues(t, 1, calls.Load())
-	require.Equal(t, uint64(1), report.UnknownRows)
-	require.Zero(t, report.CommittedRows)
-	require.Zero(t, report.Retries)
+func TestAppendTimeoutReplayHonorsOptInAndDeliveryBudget(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		replay    bool
+		budget    time.Duration
+		cancelled bool
+		calls     int64
+	}{
+		{"disabled", false, time.Second, false, 1},
+		{"recover", true, time.Second, false, 2},
+		{"budget exhausted", true, 40 * time.Millisecond, false, 2},
+		{"cancelled", true, time.Second, true, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				var calls atomic.Int64
+				client, err := NewClient(Config{
+					Endpoint: "https://example.com", Compression: CompressionGzip,
+					HTTPClient: &http.Client{Transport: appendRoundTripFunc(func(r *http.Request) (*http.Response, error) {
+						attempt := calls.Add(1)
+						if tc.cancelled {
+							return nil, context.Canceled
+						}
+						if attempt == 1 || tc.budget < time.Second {
+							<-r.Context().Done()
+							return nil, r.Context().Err()
+						}
+						return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"status":"committed","num_rows_inserted":1}`))}, nil
+					})},
+				})
+				require.NoError(t, err)
+				defer client.Close()
+				retry := quickAppendRetry(10)
+				retry.RetryUnknown, retry.MaxElapsedTime = tc.replay, tc.budget
+				stream, err := client.Table("events").AppendStream(AppendStreamOptions{AttemptTimeout: new(25 * time.Millisecond), Retry: retry})
+				require.NoError(t, err)
+				require.NoError(t, stream.Send(t.Context(), map[string]int{"id": 1}))
+				report, err := stream.Shutdown(t.Context())
+				require.Equal(t, tc.calls, calls.Load())
+				require.EqualValues(t, tc.calls-1, report.Retries)
+				if tc.name == "recover" {
+					require.NoError(t, err)
+					require.EqualValues(t, 1, report.CommittedRows)
+					require.Zero(t, report.UnknownRows)
+					return
+				}
+				reason, cause := WriteErrorReasonTimeout, context.DeadlineExceeded
+				if tc.cancelled {
+					reason, cause = WriteErrorReasonCancelled, context.Canceled
+				}
+				require.ErrorIs(t, err, cause)
+				if tc.budget < time.Second {
+					require.ErrorIs(t, err, ErrAppendRetryExhausted)
+				}
+				var scopeErr *Error
+				require.ErrorAs(t, err, &scopeErr)
+				require.Equal(t, &WriteErrorDetails{Reason: reason, Outcome: AppendStateUnknown}, scopeErr.WriteDetails)
+				require.False(t, scopeErr.Retryable)
+				failure := stream.Stats().LastFailure
+				require.Equal(t, scopeErr.WriteDetails, failure.WriteDetails)
+				failure.WriteDetails.Reason = "changed"
+				require.Equal(t, reason, stream.Stats().LastFailure.WriteDetails.Reason)
+				require.EqualValues(t, 1, report.UnknownRows)
+				require.Zero(t, report.CommittedRows)
+			})
+		})
+	}
 }
 
 func TestAppendOutageBackpressureAndRecovery(t *testing.T) {

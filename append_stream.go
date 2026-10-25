@@ -138,12 +138,12 @@ func (o AppendDeliveryOutcome) String() string {
 // AppendRetryOptions configures retries of an exact encoded batch for temporary
 // rejections. A nil Retry uses the defaults;
 // a non-nil option with MaxRetries=0 disables retries.
-// Timeouts after connection acquisition and caller cancellations are never retried.
+// Caller cancellations are never retried. Attempt timeouts require RetryUnknown.
 type AppendRetryOptions struct {
 	MaxRetries int
 	// RetryUnknown opts into retries after a transient failure that may have
-	// committed. This can insert duplicate rows. It defaults to false and never
-	// overrides the prohibition on retrying timeouts after connection acquisition or cancellations.
+	// committed, including attempt timeouts. This can insert duplicate rows. It
+	// defaults to false and does not override cancellation or the delivery budget.
 	RetryUnknown bool
 	// Zero durations use defaults: 100 ms initial, 5 s maximum backoff, 5 min
 	// elapsed budget per dispatched batch (including HTTP attempts).
@@ -1098,7 +1098,10 @@ func (s *AppendStream) isRetryableAppend(err error) bool {
 		return true
 	}
 	var e *Error
-	if !s.config.retry.RetryUnknown || !errors.As(err, &e) || e.WriteDetails != nil || e.AppendDetails == nil || e.AppendDetails.Status != AppendStateUnknown {
+	if !s.config.retry.RetryUnknown || !errors.As(err, &e) || e.AppendDetails == nil || e.AppendDetails.Status != AppendStateUnknown {
+		return false
+	}
+	if errors.Is(err, context.Canceled) || (e.WriteDetails != nil && e.WriteDetails.Reason != WriteErrorReasonTimeout) {
 		return false
 	}
 	// Authentication, schema, and other permanent HTTP errors must not spin.

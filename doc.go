@@ -70,7 +70,8 @@ rows in the delivery report and failure details in Stats().LastFailure.
 Stream Send methods confirm local admission only. Flush and Shutdown wait for
 the accepted prefix. AppendStream reports rejected and unknown outcomes.
 Unknown outcomes are not retried unless RetryUnknown is explicitly enabled;
-those retries may duplicate rows. Client timeouts are never retried.
+those retries may duplicate rows, including after an attempt timeout. Cancellation
+and the overall delivery budget still stop retries.
 
 ScopeQL is documented separately in the [quickstart], [query guide], and
 [language reference].
