@@ -51,8 +51,8 @@ type Config struct {
 	// NewClient copies the value.
 	// Caller context deadlines and HTTPClient timeouts still apply.
 	// The budget starts after local encoding, compression, and request preparation.
-	// Non-nil stream AttemptTimeout settings override this limit. A timeout leaves
-	// the commit outcome unknown; it does not roll back the write.
+	// Non-nil stream AttemptTimeout settings override this limit. A timeout after
+	// dispatch leaves the commit outcome unknown; it does not roll back the write.
 	WriteTimeout *time.Duration `json:"write_timeout"`
 	// HTTPClient is the HTTP client used to send requests.
 	//

@@ -45,7 +45,7 @@ const (
 	ErrorKindAppendRowsFailed ErrorKind = "AppendRowsFailed"
 )
 
-// WriteErrorReason identifies why an in-flight write was interrupted.
+// WriteErrorReason identifies why a write attempt was interrupted.
 type WriteErrorReason string
 
 const (
@@ -76,7 +76,8 @@ type Error struct {
 	RetryAfter    time.Duration
 	Retryable     bool
 	AppendDetails *AppendErrorDetails
-	// WriteDetails identifies a client timeout or cancellation after sending began.
+	// WriteDetails identifies a client or transport timeout or cancellation.
+	// Outcome distinguishes an unsent append from a potentially committed write.
 	// Existing error kinds, causes, and HTTP diagnostics remain available.
 	WriteDetails *WriteErrorDetails
 	// StatementDetails contains the structured server failure for a failed

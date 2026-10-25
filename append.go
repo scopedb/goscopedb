@@ -19,10 +19,14 @@ package scopedb
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptrace"
+	"sync/atomic"
 	"time"
 )
 
@@ -142,21 +146,45 @@ func (c *Client) appendNDJSONWithTimeout(
 		defer cancel()
 	}
 
+	var acquiring, connected atomic.Bool
+	ctx = httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
+		GetConn: func(string) { acquiring.Store(true) },
+		GotConn: func(httptrace.GotConnInfo) { connected.Store(true) },
+	})
 	resp, err := c.http.do(req.WithContext(ctx))
 	if err != nil {
-		return AppendRowsResult{}, appendUnknownError(err.Error(), err, nil).withWriteContext(ctx)
+		apiErr := appendUnknownError(err.Error(), err, nil).withWriteContext(ctx)
+		// Keep connection evidence across redirects. A later dial failure cannot
+		// prove that an earlier endpoint did not process the append. Transports
+		// without tracing also retain an unknown outcome.
+		if acquiring.Load() && !connected.Load() {
+			apiErr.AppendDetails.Status = AppendStateRejected
+			var certificateErr *tls.CertificateVerificationError
+			apiErr.Retryable = !errors.Is(err, context.Canceled) && !errors.As(err, &certificateErr)
+			if apiErr.WriteDetails != nil {
+				apiErr.WriteDetails.Outcome = AppendStateRejected
+			}
+		}
+		return AppendRowsResult{}, apiErr
 	}
 	defer sneakyBodyClose(resp.Body)
 
 	responseBody, err := io.ReadAll(resp.Body)
-	if err != nil {
+	if err != nil && resp.StatusCode != http.StatusTooManyRequests {
 		return AppendRowsResult{}, appendUnknownError(err.Error(), err, resp).withWriteContext(ctx)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		apiErr := responseError(resp, responseBody, ErrorKindAppendRowsFailed)
+		apiErr.cause = err
 		if apiErr.AppendDetails == nil {
+			status := AppendStateUnknown
+			// Rate limiting rejects the append before execution, including when an
+			// intermediary omits or truncates the structured error body.
+			if resp.StatusCode == http.StatusTooManyRequests {
+				status = AppendStateRejected
+			}
 			apiErr.AppendDetails = &AppendErrorDetails{
-				Status:    AppendStateUnknown,
+				Status:    status,
 				RowErrors: []AppendRowError{},
 			}
 		}

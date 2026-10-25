@@ -610,11 +610,16 @@ func TestAppendStreamRetryPolicies(t *testing.T) {
 
 	t.Run("attempt timeout", func(t *testing.T) {
 		var calls atomic.Int64
-		table := newAppendStreamTestTable(t, func(w http.ResponseWriter, _ *http.Request) {
-			calls.Add(1)
-			time.Sleep(50 * time.Millisecond)
-			writeAppendStreamSuccess(t, w, 1)
+		client, err := NewClient(Config{
+			Endpoint: "http://scopedb.invalid",
+			HTTPClient: &http.Client{Transport: appendRoundTripFunc(func(r *http.Request) (*http.Response, error) {
+				calls.Add(1)
+				<-r.Context().Done()
+				return nil, r.Context().Err()
+			})},
 		})
+		require.NoError(t, err)
+		table := client.Table("events")
 		stream, err := table.AppendStream(AppendStreamOptions{
 			Retry:            &AppendRetryOptions{MaxRetries: 0},
 			FailurePolicy:    AppendFailureContinue,
@@ -625,8 +630,8 @@ func TestAppendStreamRetryPolicies(t *testing.T) {
 		require.NoError(t, stream.Send(context.Background(), map[string]int{"id": 1}))
 		report, err := stream.Shutdown(context.Background())
 		require.NoError(t, err)
-		// The deadline can expire before the request reaches the server.
-		require.LessOrEqual(t, calls.Load(), int64(1))
+		// Without transport trace evidence, an interrupted attempt remains unknown.
+		require.Equal(t, int64(1), calls.Load())
 		require.Zero(t, report.Retries)
 		require.Equal(t, uint64(1), report.UnknownRows)
 	})

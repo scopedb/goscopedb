@@ -138,12 +138,12 @@ func (o AppendDeliveryOutcome) String() string {
 // AppendRetryOptions configures retries of an exact encoded batch for temporary
 // rejections. A nil Retry uses the defaults;
 // a non-nil option with MaxRetries=0 disables retries.
-// Client timeouts and cancellations are never retried.
+// Timeouts after connection acquisition and caller cancellations are never retried.
 type AppendRetryOptions struct {
 	MaxRetries int
 	// RetryUnknown opts into retries after a transient failure that may have
 	// committed. This can insert duplicate rows. It defaults to false and never
-	// overrides the prohibition on retrying client timeouts or cancellations.
+	// overrides the prohibition on retrying timeouts after connection acquisition or cancellations.
 	RetryUnknown bool
 	// Zero durations use defaults: 100 ms initial, 5 s maximum backoff, 5 min
 	// elapsed budget per dispatched batch (including HTTP attempts).
@@ -172,7 +172,7 @@ type AppendStreamOptions struct {
 	// AttemptTimeout bounds each HTTP attempt. Nil inherits Config.WriteTimeout.
 	// A pointer to zero disables this limit, but the delivery/retry budget still applies.
 	// Negative values are invalid. The value is copied when the stream is created.
-	// A timeout leaves that batch's commit outcome unknown.
+	// A timeout after connection acquisition leaves the commit outcome unknown.
 	AttemptTimeout *time.Duration
 }
 
