@@ -6,6 +6,7 @@ All significant changes to the ScopeDB Go SDK are documented in this file.
 
 ### Bug Fixes
 
+* Allow append streams with `RetryUnknown` enabled to replay attempt timeouts within their existing retry count and delivery deadline. Cancellation remains terminal, and timeout errors retain their unknown outcome and non-retryable classification for callers that have not opted in.
 * Classify connection failures before dispatch and HTTP 429 responses without ingest details as rejected appends. Streams can retry temporary failures safely; certificate verification errors and cancellation remain terminal. Missing outcomes after dispatch, including unstructured HTTP 503 responses, remain unknown.
 
 ## v0.7.0 (2026-10-23)

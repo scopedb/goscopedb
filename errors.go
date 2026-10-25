@@ -56,7 +56,7 @@ const (
 )
 
 // WriteErrorDetails describes an interrupted write. An unknown outcome may have
-// committed and must not be automatically replayed.
+// committed; replay requires explicit acceptance of possible duplicates.
 type WriteErrorDetails struct {
 	Reason  WriteErrorReason `json:"reason"`
 	Outcome AppendState      `json:"outcome"`
