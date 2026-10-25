@@ -198,9 +198,9 @@ if err != nil {
 }
 ```
 
-The default call applies immediately and rejects changes that may lose data. Applying the same definition again preserves existing rows. This is complete replacement: omitted fields and objects are cleared. If an older application version omits a physical column added by a newer version, its startup apply fails rather than deleting that column. Use `table.Catalog().Get(ctx)` to read the current definition and its ETag. Use `table.Catalog().Delete(ctx, options)` for conditional deletion with explicit destructive-change authorization.
+The default call applies immediately and rejects changes that may lose data. Applying the same definition again preserves existing rows. This is complete replacement: omitted fields and objects are cleared. If an older application version omits a physical column added by a newer version, its startup apply fails rather than deleting that column. Use `table.Catalog().Get(ctx)` to read the current definition and its version. Use `table.Catalog().Delete(ctx, options)` for conditional deletion with explicit destructive-change authorization.
 
-Pass one `CatalogOptions` value when you need a dry run, an ETag precondition, or explicit authorization for destructive changes. The same optional options are accepted by Catalog `Apply` and `Delete`.
+Pass one `CatalogOptions` value when you need a dry run, a version precondition, or explicit authorization for destructive changes. The same optional options are accepted by Catalog `Apply` and `Delete`.
 
 ## Manage the catalog
 
@@ -215,26 +215,26 @@ if err != nil {
 definition := snapshot.Definition
 retention := int32(30)
 definition.RetentionDays = &retention
-plan, err := catalog.Apply(ctx, definition, scopedb.CatalogOptions{DryRun: true, IfMatch: snapshot.ETag})
+plan, err := catalog.Apply(ctx, definition, scopedb.CatalogOptions{DryRun: true, ExpectedVersion: snapshot.Version})
 if err != nil {
     return err
 }
 // Review plan.Before, plan.After, and plan.Destructive before authorizing this write.
 result, err := catalog.Apply(ctx, definition, scopedb.CatalogOptions{
-    IfMatch: plan.ETag,
+    ExpectedVersion: plan.Version,
     AllowDestructive: plan.Destructive,
 })
 if err != nil {
     return err
 }
-fmt.Println(result.ETag)
+fmt.Println(result.Version)
 ```
 
 `client.Catalog()` selects the entire tenant. Use `Database(name)`, `Schema(database, schema)`, `Table(database, schema, table)`, or `View(database, schema, view)` to select an individual resource. Pass names directly; the SDK escapes each name for the HTTP path. Each resource includes its complete subtree.
 
-`Get` returns a `CatalogSnapshot[T]` with a typed definition and an ETag. Pass that ETag to the first dry run or write after editing; otherwise a change between Get and preview can be overwritten. `Apply` accepts the same definition type and returns `CatalogResult[T]` with typed `Before` and `After` values. These definitions are pointers: `Before` is nil when creating a resource, and `After` is nil when deleting it.
+`Get` returns a `CatalogSnapshot[T]` with a typed definition and an opaque `Version`. Pass it unchanged as `CatalogOptions.ExpectedVersion` to the first dry run or write after editing; otherwise a change between Get and preview can be overwritten. `Apply` accepts the same definition type and returns `CatalogResult[T]` with typed `Before` and `After` values. These definitions are pointers: `Before` is nil when creating a resource, and `After` is nil when deleting it.
 
-Omitted fields and objects are cleared, and omitted collections are empty. `Delete` removes one database, schema, table, or view using the same options; clear the tenant by applying `&scopedb.CatalogDocument{}`, or clear children by editing their parent definition. `IfMatch` is optional, while potentially irreversible data loss requires `AllowDestructive`. Dry runs validate and roll back without requiring that authorization. Storage is a creation-only input omitted from exports, so keep the original definition when planning creation.
+Omitted fields and objects are cleared, and omitted collections are empty. `Delete` removes one database, schema, table, or view using the same options; clear the tenant by applying `&scopedb.CatalogDocument{}`, or clear children by editing their parent definition. `ExpectedVersion` is optional, while potentially irreversible data loss requires `AllowDestructive`. Dry runs validate and roll back without requiring that authorization. Storage is a creation-only input omitted from exports, so keep the original definition when planning creation.
 
 Typed reads reject unknown fields, including nested fields, instead of silently discarding them before a later replacement. For export and apply workflows that must preserve fields unknown to this SDK, select `Raw()`. Definitions and before/after states are then `json.RawMessage`; absent states are JSON `null`:
 
@@ -245,7 +245,7 @@ if err != nil {
     return err
 }
 // Retain snapshot.Definition as raw JSON when saving or editing it.
-plan, err := catalog.Apply(ctx, snapshot.Definition, scopedb.CatalogOptions{DryRun: true, IfMatch: snapshot.ETag})
+plan, err := catalog.Apply(ctx, snapshot.Definition, scopedb.CatalogOptions{DryRun: true, ExpectedVersion: snapshot.Version})
 if err != nil {
     return err
 }
@@ -398,8 +398,8 @@ Caller context deadlines and HTTP-client timeouts still apply. Append streams al
 | `handle.Status(ctx)`                               | `handle.Refresh(ctx)`, returning a complete `*StatementSnapshot`                                        |
 | `StatementCancelResult`                            | `*StatementSnapshot` from `Cancel`; `ID` replaces `StatementID`, and `Error` holds the original failure |
 | `status.Finished()`                                | `status == scopedb.StatementStatusFinished`; `Terminated()` still covers all terminal states            |
-| `table.Describe(ctx)`                              | `table.Catalog().Get(ctx)`, retaining both `Definition` and `ETag`                                      |
-| `table.Drop(ctx)`                                  | `table.Catalog().Delete(ctx, scopedb.CatalogOptions{IfMatch: etag, AllowDestructive: true})`            |
+| `table.Describe(ctx)`                              | `table.Catalog().Get(ctx)`, retaining both `Definition` and `Version`                                   |
+| `table.Drop(ctx)`                                  | `table.Catalog().Delete(ctx, scopedb.CatalogOptions{ExpectedVersion: version, AllowDestructive: true})` |
 | Append result/error/last-failure `.AppendState`    | `.Status`; append JSON uses `status`, matching the service                                              |
 | Historical `u_int` type spelling                   | `uint`                                                                                                  |
 
@@ -470,7 +470,7 @@ From a source checkout, set `SCOPEDB_ENDPOINT` and `SCOPEDB_API_KEY` for a dispo
 mise run test-integration
 ```
 
-The suite creates uniquely named resources and checks dry-run, ETag conflicts, conditional deletion, committed and rejected appends, statement errors, elapsed timeout, and a cancellation racing with completion. It also checks signed integer boundaries, precise nested integers, the server's NDJSON unsigned-input limit, and full-range unsigned query results. Tests delete their resources before returning. Running cancellation is covered separately with controlled HTTP responses in the unit tests.
+The suite creates uniquely named resources and checks dry-run, version conflicts, conditional deletion, committed and rejected appends, statement errors, elapsed timeout, and a cancellation racing with completion. It also checks signed integer boundaries, precise nested integers, the server's NDJSON unsigned-input limit, and full-range unsigned query results. Tests delete their resources before returning. Running cancellation is covered separately with controlled HTTP responses in the unit tests.
 
 With `SCOPEDB_API_KEY` set, Cloud authentication checks verify that missing, malformed, and incorrect credentials return 401 for Catalog, queries, and writes. Rejected stream writes must count as failed rather than unknown, without retries or committed rows. Optional `SCOPEDB_EXPIRED_API_KEY` and `SCOPEDB_REVOKED_API_KEY` extend these checks to expired and revoked credentials.
 

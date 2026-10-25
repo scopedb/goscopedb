@@ -4,6 +4,10 @@ All significant changes to the ScopeDB Go SDK are documented in this file.
 
 ## Unreleased
 
+### Breaking Changes
+
+* Rename Catalog snapshot/result `ETag` to `Version` and `CatalogOptions.IfMatch` to `ExpectedVersion`. Pass the opaque version from a read or dry run unchanged to reject concurrent catalog changes.
+
 ### Bug Fixes
 
 * Classify connection failures before dispatch and HTTP 429 responses without ingest details as rejected appends. Streams can retry temporary failures safely; certificate verification errors and cancellation remain terminal. Missing outcomes after dispatch, including unstructured HTTP 503 responses, remain unknown.

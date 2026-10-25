@@ -50,7 +50,7 @@ details on Error.StatementDetails.
 Client.Catalog reads and replaces the complete tenant catalog. Its Database,
 Schema, Table, and View selectors provide typed Get, Apply, and Delete operations.
 Raw retains JSON definitions including fields unknown to the SDK. Apply supports
-dry runs, ETag preconditions, and authorization for destructive changes.
+dry runs, version preconditions, and authorization for destructive changes.
 Table.Catalog selects the table definition for Get, Apply, Delete, or Raw.
 Typed reads reject unsupported fields to prevent lossy replacements.
 Potentially destructive changes are rejected without explicit authorization.

@@ -66,13 +66,13 @@ func TestTableCatalogLifecycle(t *testing.T) {
 	}, description.Definition.Columns)
 	comment := "updated through the conditional catalog API"
 	description.Definition.Comment = &comment
-	updated, err := tbl.Catalog().Apply(ctx, description.Definition, scopedb.CatalogOptions{IfMatch: description.ETag})
+	updated, err := tbl.Catalog().Apply(ctx, description.Definition, scopedb.CatalogOptions{ExpectedVersion: description.Version})
 	require.NoError(t, err)
-	_, err = tbl.Catalog().Delete(ctx, scopedb.CatalogOptions{IfMatch: description.ETag, AllowDestructive: true})
+	_, err = tbl.Catalog().Delete(ctx, scopedb.CatalogOptions{ExpectedVersion: description.Version, AllowDestructive: true})
 	var failure *scopedb.Error
 	require.ErrorAs(t, err, &failure)
 	require.Equal(t, 412, failure.HTTPStatus)
-	_, err = tbl.Catalog().Delete(ctx, scopedb.CatalogOptions{IfMatch: updated.ETag})
+	_, err = tbl.Catalog().Delete(ctx, scopedb.CatalogOptions{ExpectedVersion: updated.Version})
 	require.ErrorAs(t, err, &failure)
 	require.Equal(t, 409, failure.HTTPStatus)
 	current, err := tbl.Catalog().Get(ctx)
