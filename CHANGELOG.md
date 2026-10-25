@@ -4,6 +4,10 @@ All significant changes to the ScopeDB Go SDK are documented in this file.
 
 ## Unreleased
 
+### Bug Fixes
+
+* Classify connection failures before dispatch and HTTP 429 responses without ingest details as rejected appends. Streams can retry temporary failures safely; certificate verification errors and cancellation remain terminal. Missing outcomes after dispatch, including unstructured HTTP 503 responses, remain unknown.
+
 ## v0.7.0 (2026-10-23)
 
 ### Breaking Changes
