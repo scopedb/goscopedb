@@ -204,7 +204,7 @@ Pass one `CatalogOptions` value when you need a dry run, an ETag precondition, o
 
 ## Manage the catalog
 
-The declarative Catalog API reads complete definitions and replaces resources atomically. It requires a server with the declarative protocol; the old paginated catalog API is not supported.
+The Catalog API reads complete definitions and replaces resources atomically.
 
 ```go
 catalog := client.Catalog().Table("scopedb", "public", "events")
@@ -409,7 +409,7 @@ Replace paginated Catalog list/fetch/iterator methods with `client.Catalog().Get
 
 ### Append and IngestStream
 
-Appends use `/v1/catalog/databases/{db}/schemas/{schema}/tables/{table}/ingest`. The commit outcome is `status` on success and `details.status` on failure. The `AppendState` enum values and stream delivery/report types remain. Missing or unreadable outcomes are unknown. As in v0.6.3, unknown outcomes are not retried by default; the new `RetryUnknown` option enables explicit replay when the application accepts possible duplicates.
+The `AppendState` enum values and stream delivery/report types remain. Missing or unreadable outcomes are unknown. As in v0.6.3, unknown outcomes are not retried by default; the new `RetryUnknown` option enables explicit replay when the application accepts possible duplicates.
 
 `Client.IngestStream`, `IngestStream`, `IngestStreamOptions`, and `IngestResult` have been removed. Select the destination with `client.Table(name)` and use `Table.AppendStream` for Go values or `Table.AppendNDJSON` for an existing NDJSON payload.
 
