@@ -38,7 +38,7 @@ func TestNative06Lifecycle(t *testing.T) {
 	def := &scopedb.CatalogSchema{Name: name, Tables: []scopedb.CatalogTable{{Name: "events", Columns: []scopedb.CatalogColumn{{Name: "id", DataType: scopedb.IntDataType}, {Name: "source", DataType: scopedb.StringDataType}}}}}
 	preview, err := resource.Apply(ctx, def, scopedb.CatalogOptions{DryRun: true})
 	check(err)
-	if preview.Before != nil || preview.After == nil || preview.ETag == "" {
+	if preview.Before != nil || preview.After == nil || preview.Version == "" {
 		t.Fatal("invalid dry-run")
 	}
 	_, err = resource.Get(ctx)
@@ -53,18 +53,18 @@ func TestNative06Lifecycle(t *testing.T) {
 		check(err)
 		t.Log("CLEANUP schema removed")
 	}()
-	applied, err := resource.Apply(ctx, def, scopedb.CatalogOptions{IfMatch: preview.ETag})
+	applied, err := resource.Apply(ctx, def, scopedb.CatalogOptions{ExpectedVersion: preview.Version})
 	check(err)
 	snap, err := resource.Get(ctx)
 	check(err)
-	if snap.ETag != applied.ETag {
-		t.Fatal("etag mismatch")
+	if snap.Version != applied.Version {
+		t.Fatal("version mismatch")
 	}
-	_, err = resource.Apply(ctx, def, scopedb.CatalogOptions{IfMatch: preview.ETag})
+	_, err = resource.Apply(ctx, def, scopedb.CatalogOptions{ExpectedVersion: preview.Version})
 	if !errors.As(err, &api) || api.HTTPStatus != 412 {
-		t.Fatalf("stale ETag: %v", err)
+		t.Fatalf("stale Version: %v", err)
 	}
-	t.Logf("STALE_ETAG code=%s\n", api.Code)
+	t.Logf("STALE_VERSION code=%s\n", api.Code)
 	table := c.Table("events")
 	table.Schema = name
 	inserted, err := table.AppendNDJSON(ctx, []byte("{\"id\":1,\"source\":\"go\"}\n{\"id\":2,\"source\":\"go\"}"))

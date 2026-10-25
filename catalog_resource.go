@@ -53,11 +53,11 @@ func (c *CatalogResource[T]) Get(ctx context.Context) (CatalogSnapshot[T], error
 	if err := decodeCatalogDefinition(data, &definition); err != nil {
 		return CatalogSnapshot[T]{}, responseMetadataError(resp, ErrorKindCatalogFailed, err.Error(), err)
 	}
-	return CatalogSnapshot[T]{Definition: definition, ETag: resp.Header.Get("ETag")}, nil
+	return CatalogSnapshot[T]{Definition: definition, Version: resp.Header.Get("ETag")}, nil
 }
 
 // Apply replaces the resource with definition. Omitted fields and objects are
-// cleared. With no options, changes apply without an ETag precondition and
+// cleared. With no options, changes apply without a version precondition and
 // potentially destructive changes are rejected. DryRun validates and rolls back.
 // Catalog writes are never automatically retried.
 func (c *CatalogResource[T]) Apply(ctx context.Context, definition T, options ...CatalogOptions) (CatalogResult[T], error) {
@@ -92,15 +92,15 @@ func (c *CatalogResource[T]) mutate(ctx context.Context, method string, data []b
 		Destructive *bool           `json:"destructive"`
 	}
 	err = json.Unmarshal(data, &raw)
-	etag := resp.Header.Get("ETag")
-	if err != nil || len(raw.Before) == 0 || len(raw.After) == 0 || raw.Destructive == nil || etag == "" {
+	version := resp.Header.Get("ETag")
+	if err != nil || len(raw.Before) == 0 || len(raw.After) == 0 || raw.Destructive == nil || version == "" {
 		failure := responseMetadataError(resp, ErrorKindCatalogFailed, "invalid catalog response", err)
 		if !controls.DryRun {
 			failure.Code = "catalog_commit_outcome_unknown"
 		}
 		return CatalogResult[T]{}, failure
 	}
-	result := CatalogResult[T]{Destructive: *raw.Destructive, ETag: etag}
+	result := CatalogResult[T]{Destructive: *raw.Destructive, Version: version}
 	err = decodeCatalogDefinition(raw.Before, &result.Before)
 	if err == nil {
 		err = decodeCatalogDefinition(raw.After, &result.After)
@@ -148,8 +148,8 @@ func (c *CatalogResource[T]) request(ctx context.Context, method string, data []
 	if method == http.MethodPut {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	if options.IfMatch != "" {
-		req.Header.Set("If-Match", options.IfMatch)
+	if options.ExpectedVersion != "" {
+		req.Header.Set("If-Match", options.ExpectedVersion)
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, nil, err
