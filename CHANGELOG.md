@@ -4,6 +4,10 @@ All significant changes to the ScopeDB Go SDK are documented in this file.
 
 ## Unreleased
 
+### Breaking Changes
+
+* Require Go 1.27.3 or later to include its `crypto/x509` security update. Upgrade the Go toolchain before updating the SDK.
+
 ## v0.7.1 (2026-10-26)
 
 ### Bug Fixes

@@ -8,7 +8,7 @@ Upgrading from v0.6? Follow the [v0.7 migration guide](#migrate-from-v06-to-v07)
 
 ## Runtime support
 
-Requires Go 1.26 or later. Use the SDK in a trusted server-side process and keep API keys out of source control.
+Requires Go 1.27.3 or later. Use the SDK in a trusted server-side process and keep API keys out of source control.
 
 ## Installation
 
@@ -372,7 +372,7 @@ See the examples for [streaming writes](examples/append_stream), [file imports](
 
 ## Migrate from v0.6 to v0.7
 
-Upgrade to Go 1.26 or later before updating the SDK. The module and import paths remain `github.com/scopedb/goscopedb`. These changes are relative to the published v0.6.3 SDK.
+Upgrade to Go 1.27.3 or later before updating the SDK. The module and import paths remain `github.com/scopedb/goscopedb`. These changes are relative to the published v0.6.3 SDK.
 
 ### Write timeouts
 
