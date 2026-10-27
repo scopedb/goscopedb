@@ -121,7 +121,7 @@ func (c *Client) appendNDJSONWithTimeout(
 	if err != nil {
 		return AppendRowsResult{}, err
 	}
-	compressedBody, contentEncoding, err := compressRequestBody(ndjson, c.http.compression)
+	compressedBody, err := compressRequestBody(ndjson, c.compression)
 	if err != nil {
 		return AppendRowsResult{}, newError(
 			ErrorKindUnexpected,
@@ -135,7 +135,7 @@ func (c *Client) appendNDJSONWithTimeout(
 		return AppendRowsResult{}, newError(ErrorKindUnexpected, "failed to build table append request", err)
 	}
 	req.Header.Set("Content-Type", "application/x-ndjson")
-	req.Header.Set("Content-Encoding", string(contentEncoding))
+	req.Header.Set("Content-Encoding", string(c.compression))
 	if err := ctx.Err(); err != nil {
 		return AppendRowsResult{}, err
 	}
@@ -150,7 +150,7 @@ func (c *Client) appendNDJSONWithTimeout(
 		GetConn: func(string) { acquiring.Store(true) },
 		GotConn: func(httptrace.GotConnInfo) { connected.Store(true) },
 	})
-	resp, err := c.http.do(req.WithContext(ctx))
+	resp, err := c.do(req.WithContext(ctx))
 	if err != nil {
 		apiErr := appendUnknownError(err.Error(), err, nil).withWriteContext(ctx)
 		// Keep connection evidence across redirects. A later dial failure cannot
@@ -166,14 +166,14 @@ func (c *Client) appendNDJSONWithTimeout(
 		}
 		return AppendRowsResult{}, apiErr
 	}
-	defer sneakyBodyClose(resp.Body)
+	defer closeResponseBody(resp.Body)
 
-	responseBody, err := readResponseBody(resp.Body, maxErrorResponseBodyBytes)
+	responseBody, err := readResponseBody(resp.Body, maxDiagnosticBodyBytes)
 	if err != nil && resp.StatusCode != http.StatusTooManyRequests {
 		return AppendRowsResult{}, appendUnknownError(err.Error(), err, resp).withWriteContext(ctx)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		apiErr := responseError(resp, responseBody, ErrorKindAppendRowsFailed)
+		apiErr := decodeResponseError(resp, responseBody, ErrorKindAppendRowsFailed)
 		apiErr.cause = err
 		if errors.Is(err, ErrResponseTooLarge) {
 			apiErr.Message = ErrResponseTooLarge.Error()
