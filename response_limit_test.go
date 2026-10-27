@@ -53,7 +53,7 @@ func TestOversizedResponsesBoundReadsAndRetainedErrors(t *testing.T) {
 			body := &observedResponseBody{Reader: strings.NewReader(data)}
 			client, err := NewClient(Config{
 				Endpoint: "https://example.com", Compression: CompressionGzip,
-				HTTPClient: &http.Client{Transport: clientRoundTripFunc(func(*http.Request) (*http.Response, error) {
+				HTTPClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
 					return &http.Response{StatusCode: test.status, Header: http.Header{"X-Request-Id": {"bounded-response"}, "Retry-After": {"2"}}, Body: body, ContentLength: -1}, nil
 				})},
 			})
@@ -108,7 +108,7 @@ func TestResponseLimitPreservesCompleteDiagnosticsAndLargeResults(t *testing.T) 
 		t.Run(operation, func(t *testing.T) {
 			client, err := NewClient(Config{
 				Endpoint: "https://example.com", Compression: CompressionGzip,
-				HTTPClient: &http.Client{Transport: clientRoundTripFunc(func(*http.Request) (*http.Response, error) {
+				HTTPClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
 					status := http.StatusOK
 					data := ""
 					switch operation {

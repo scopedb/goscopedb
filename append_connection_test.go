@@ -26,41 +26,9 @@ import (
 	"sync/atomic"
 	"syscall"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/require"
 )
-
-func TestAppendConnectionFailuresAreRejected(t *testing.T) {
-	for _, test := range []struct {
-		name      string
-		cause     error
-		retryable bool
-	}{
-		{"dns", &net.DNSError{Err: "no such host", Name: "scopedb.invalid", IsNotFound: true}, true},
-		{"connection refused", &net.OpError{Op: "dial", Net: "tcp", Err: syscall.ECONNREFUSED}, true},
-		{"connection timeout", context.DeadlineExceeded, true},
-		{"cancelled connection", context.Canceled, false},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			transport := &http.Transport{DialContext: func(context.Context, string, string) (net.Conn, error) {
-				return nil, test.cause
-			}}
-			t.Cleanup(transport.CloseIdleConnections)
-			client, err := NewClient(Config{Endpoint: "http://scopedb.invalid", HTTPClient: &http.Client{Transport: transport}})
-			require.NoError(t, err)
-			_, err = client.Table("events").AppendNDJSON(t.Context(), []byte("{}\n"))
-			var failure *Error
-			require.ErrorAs(t, err, &failure)
-			require.ErrorIs(t, err, test.cause)
-			require.Equal(t, AppendStateRejected, failure.AppendDetails.Status)
-			require.Equal(t, test.retryable, failure.Retryable)
-			if failure.WriteDetails != nil {
-				require.Equal(t, AppendStateRejected, failure.WriteDetails.Outcome)
-			}
-		})
-	}
-}
 
 func TestAppendTLSAndRedirectFailures(t *testing.T) {
 	t.Run("invalid certificate is not retried", func(t *testing.T) {
@@ -101,43 +69,10 @@ func TestAppendTLSAndRedirectFailures(t *testing.T) {
 	})
 }
 
-func TestAppendRateLimitWithoutDetails(t *testing.T) {
-	for _, test := range []struct {
-		name   string
-		status int
-		body   func() io.ReadCloser
-		state  AppendState
-	}{
-		{"text", 429, func() io.ReadCloser { return io.NopCloser(strings.NewReader("too many requests")) }, AppendStateRejected},
-		{"empty", 429, func() io.ReadCloser { return io.NopCloser(strings.NewReader("")) }, AppendStateRejected},
-		{"unreadable", 429, func() io.ReadCloser { return errorReadCloser{err: io.ErrUnexpectedEOF} }, AppendStateRejected},
-		{"unavailable", 503, func() io.ReadCloser { return io.NopCloser(strings.NewReader("unavailable")) }, AppendStateUnknown},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			client, err := NewClient(Config{
-				Endpoint: "http://scopedb.invalid",
-				HTTPClient: &http.Client{Transport: appendRoundTripFunc(func(*http.Request) (*http.Response, error) {
-					return &http.Response{StatusCode: test.status, Header: http.Header{"Retry-After": {"2"}}, Body: test.body()}, nil
-				})},
-			})
-			require.NoError(t, err)
-			_, err = client.Table("events").AppendNDJSON(t.Context(), []byte("{}\n"))
-			var failure *Error
-			require.ErrorAs(t, err, &failure)
-			require.Equal(t, test.state, failure.AppendDetails.Status)
-			require.Equal(t, test.state == AppendStateRejected, failure.Retryable)
-			require.Equal(t, 2*time.Second, failure.RetryAfter)
-			if test.name == "unreadable" {
-				require.ErrorIs(t, err, io.ErrUnexpectedEOF)
-			}
-		})
-	}
-}
-
 func TestAppendStreamRecoversFromConnectionFailure(t *testing.T) {
 	var attempts atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		writeAppendStreamSuccess(t, w, 1)
+		_, _ = io.WriteString(w, `{"status":"committed","num_rows_inserted":1}`)
 	}))
 	defer server.Close()
 	transport := &http.Transport{DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {

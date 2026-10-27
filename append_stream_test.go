@@ -17,935 +17,353 @@
 package scopedb
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
-	"net/http/httptest"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/require"
 )
 
-func TestAppendStreamDefaultAndMaximumBatchTarget(t *testing.T) {
-	for _, target := range []int{0, 8 * 1024 * 1024} {
-		t.Run(fmt.Sprint(target), func(t *testing.T) {
-			table := newAppendStreamTestTable(t, func(w http.ResponseWriter, r *http.Request) {
-				body, err := io.ReadAll(r.Body)
-				require.NoError(t, err)
-				writeAppendStreamSuccess(t, w, countAppendRows(body))
-			})
-			stream, err := table.AppendStream(AppendStreamOptions{
-				TargetBatchBytes:     target,
-				FlushInterval:        time.Hour,
-				MaxConcurrentBatches: 1,
-			})
-			require.NoError(t, err)
-			row := map[string]any{"payload": strings.Repeat("x", 2*1024*1024)}
-			require.NoError(t, stream.Send(context.Background(), row))
-			require.NoError(t, stream.Send(context.Background(), row))
-			report, err := stream.Shutdown(context.Background())
-			require.NoError(t, err)
-			require.Equal(t, uint64(2), report.CommittedRows)
-			if target == 0 {
-				require.Equal(t, uint64(2), report.CommittedBatches)
-			} else {
-				require.Equal(t, uint64(1), report.CommittedBatches)
-			}
-		})
-	}
+type streamResult struct {
+	report AppendDeliveryReport
+	err    error
 }
 
-func TestAppendStreamBatchesByRowsAndBarrier(t *testing.T) {
-	var mu sync.Mutex
-	var bodies []string
-	table := newAppendStreamTestTable(t, func(w http.ResponseWriter, r *http.Request) {
-		body, err := io.ReadAll(r.Body)
-		require.NoError(t, err)
-		mu.Lock()
-		bodies = append(bodies, string(body))
-		mu.Unlock()
-		writeAppendStreamSuccess(t, w, countAppendRows(body))
-	})
-	stream, err := table.AppendStream(AppendStreamOptions{
-		MaxBatchRows:         2,
-		FlushInterval:        time.Hour,
-		MaxConcurrentBatches: 1,
-	})
-	require.NoError(t, err)
-
-	for id := 1; id <= 3; id++ {
-		require.NoError(t, stream.Send(context.Background(), map[string]any{"id": id}))
-	}
-	report, err := stream.Shutdown(context.Background())
-	require.NoError(t, err)
-	require.Equal(t, uint64(3), report.AcceptedRows)
-	require.Equal(t, uint64(3), report.CommittedRows)
-	require.Equal(t, uint64(2), report.CommittedBatches)
-	require.Equal(t, AppendDeliveryOK, report.Outcome)
-
-	mu.Lock()
-	defer mu.Unlock()
-	require.Equal(t, []string{
-		"{\"id\":1}\n{\"id\":2}",
-		"{\"id\":3}",
-	}, bodies)
-}
-
-func TestAppendStreamSerializesTypedStructRows(t *testing.T) {
-	type event struct {
-		EventID    string    `json:"event_id"`
-		OccurredAt time.Time `json:"occurred_at"`
-		Name       string    `json:"name"`
-		Ignored    string    `json:"-"`
-	}
-
-	received := make(chan string, 1)
-	table := newAppendStreamTestTable(t, func(w http.ResponseWriter, r *http.Request) {
-		body, err := io.ReadAll(r.Body)
-		require.NoError(t, err)
-		received <- string(body)
-		writeAppendStreamSuccess(t, w, countAppendRows(body))
-	})
-	stream, err := table.AppendStream(AppendStreamOptions{
-		MaxBatchRows:         2,
-		FlushInterval:        time.Hour,
-		MaxConcurrentBatches: 1,
-	})
-	require.NoError(t, err)
-
-	occurredAt := time.Date(2026, time.August, 8, 12, 34, 56, 123456789, time.UTC)
-	first := event{
-		EventID:    "evt-1",
-		OccurredAt: occurredAt,
-		Name:       "checkout.completed",
-		Ignored:    "not-on-the-wire",
-	}
-	second := first
-	second.EventID = "evt-2"
-	require.NoError(t, stream.Send(context.Background(), first))
-	require.NoError(t, stream.Send(context.Background(), &second))
-
-	report, err := stream.Shutdown(context.Background())
-	require.NoError(t, err)
-	require.Equal(t, uint64(2), report.CommittedRows)
-	require.Equal(t,
-		"{\"event_id\":\"evt-1\",\"occurred_at\":\"2026-08-08T12:34:56.123456789Z\",\"name\":\"checkout.completed\"}\n"+
-			"{\"event_id\":\"evt-2\",\"occurred_at\":\"2026-08-08T12:34:56.123456789Z\",\"name\":\"checkout.completed\"}",
-		<-received,
-	)
-}
-
-func TestAppendStreamFlushInterval(t *testing.T) {
-	requestStarted := make(chan struct{}, 1)
-	table := newAppendStreamTestTable(t, func(w http.ResponseWriter, r *http.Request) {
-		body, err := io.ReadAll(r.Body)
-		require.NoError(t, err)
-		requestStarted <- struct{}{}
-		writeAppendStreamSuccess(t, w, countAppendRows(body))
-	})
-	stream, err := table.AppendStream(AppendStreamOptions{
-		FlushInterval: 10 * time.Millisecond,
-	})
-	require.NoError(t, err)
-	require.NoError(t, stream.Send(context.Background(), map[string]int{"id": 1}))
-	select {
-	case <-requestStarted:
-	case <-time.After(time.Second):
-		t.Fatal("timer did not dispatch the buffered row")
-	}
-	report, err := stream.Shutdown(context.Background())
-	require.NoError(t, err)
-	require.Equal(t, uint64(1), report.CommittedRows)
-}
-
-func TestAppendStreamBoundsConcurrency(t *testing.T) {
-	started := make(chan struct{}, 8)
-	release := make(chan struct{})
-	var inFlight atomic.Int64
-	var maximum atomic.Int64
-	table := newAppendStreamTestTable(t, func(w http.ResponseWriter, r *http.Request) {
-		body, err := io.ReadAll(r.Body)
-		require.NoError(t, err)
-		current := inFlight.Add(1)
-		for {
-			seen := maximum.Load()
-			if current <= seen || maximum.CompareAndSwap(seen, current) {
-				break
-			}
-		}
-		started <- struct{}{}
-		<-release
-		inFlight.Add(-1)
-		writeAppendStreamSuccess(t, w, countAppendRows(body))
-	})
-	stream, err := table.AppendStream(AppendStreamOptions{
-		TargetBatchBytes:     1,
-		FlushInterval:        time.Hour,
-		MaxConcurrentBatches: 2,
-	})
-	require.NoError(t, err)
-	for id := 0; id < 4; id++ {
-		require.NoError(t, stream.Send(context.Background(), map[string]int{"id": id}))
-	}
-	for range 2 {
-		select {
-		case <-started:
-		case <-time.After(time.Second):
-			t.Fatal("expected two concurrent append requests")
-		}
-	}
-	select {
-	case <-started:
-		t.Fatal("started more than two concurrent append requests")
-	case <-time.After(30 * time.Millisecond):
-	}
-	close(release)
-	report, err := stream.Shutdown(context.Background())
-	require.NoError(t, err)
-	require.Equal(t, uint64(4), report.CommittedRows)
-	require.Equal(t, int64(2), maximum.Load())
-}
-
-func TestAppendStreamBackpressureAndTrySend(t *testing.T) {
-	requestStarted := make(chan struct{}, 1)
-	release := make(chan struct{})
-	table := newAppendStreamTestTable(t, func(w http.ResponseWriter, r *http.Request) {
-		body, err := io.ReadAll(r.Body)
-		require.NoError(t, err)
-		requestStarted <- struct{}{}
-		<-release
-		writeAppendStreamSuccess(t, w, countAppendRows(body))
-	})
-	payload, err := marshalAppendRecord(map[string]int{"id": 1})
-	require.NoError(t, err)
-	stream, err := table.AppendStream(AppendStreamOptions{
-		TargetBatchBytes:     1,
-		FlushInterval:        time.Hour,
-		MaxBufferedBytes:     len(payload) + 1,
-		MaxConcurrentBatches: 1,
-	})
-	require.NoError(t, err)
-	require.NoError(t, stream.Send(context.Background(), map[string]int{"id": 1}))
-	select {
-	case <-requestStarted:
-	case <-time.After(time.Second):
-		t.Fatal("append request did not start")
-	}
-	require.ErrorIs(t, stream.TrySend(map[string]int{"id": 2}), ErrAppendStreamFull)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
-	defer cancel()
-	require.ErrorIs(t, stream.Send(ctx, map[string]int{"id": 2}), context.DeadlineExceeded)
-	stats := stream.Stats()
-	require.Equal(t, uint64(1), stats.AcceptedRows)
-	require.Equal(t, uint64(1), stats.DroppedByReason.BufferFull)
-	require.Equal(t, 1, stats.InFlightBatches)
-
-	close(release)
-	_, err = stream.Shutdown(context.Background())
-	require.NoError(t, err)
-}
-
-func TestAppendByteBudgetPreservesWaiterOrder(t *testing.T) {
-	budget := newAppendByteBudget(8)
-	require.NoError(t, budget.acquire(context.Background(), 4))
-
-	large := make(chan error, 1)
-	go func() {
-		large <- budget.acquire(context.Background(), 8)
-	}()
-	require.Eventually(t, func() bool {
-		budget.mu.Lock()
-		defer budget.mu.Unlock()
-		return len(budget.waiters) == 1
-	}, time.Second, time.Millisecond)
-
-	// Four bytes are currently available, but immediate admission must not jump
-	// ahead of the older waiter that needs all eight.
-	require.False(t, budget.tryAcquire(4))
-	small := make(chan error, 1)
-	go func() {
-		small <- budget.acquire(context.Background(), 4)
-	}()
-	require.Eventually(t, func() bool {
-		budget.mu.Lock()
-		defer budget.mu.Unlock()
-		return len(budget.waiters) == 2
-	}, time.Second, time.Millisecond)
-
-	budget.release(4)
-	require.NoError(t, <-large)
-	select {
-	case err := <-small:
-		require.Failf(t, "small waiter jumped the queue", "unexpected result: %v", err)
-	default:
-	}
-
-	budget.release(8)
-	require.NoError(t, <-small)
-	budget.release(4)
-}
-
-func TestAppendStreamTrySendReportsConcurrentClose(t *testing.T) {
-	table := newAppendStreamTestTable(t, func(http.ResponseWriter, *http.Request) {
-		t.Fatal("a row rejected during shutdown must not reach the server")
-	})
-	stream, err := table.AppendStream(AppendStreamOptions{})
-	require.NoError(t, err)
-	row := blockingAppendStreamRow{
-		started: make(chan struct{}),
-		release: make(chan struct{}),
-	}
-	result := make(chan error, 1)
-	go func() {
-		result <- stream.TrySend(row)
-	}()
-	<-row.started
-
-	_, err = stream.Shutdown(context.Background())
-	require.NoError(t, err)
-	close(row.release)
-	require.ErrorIs(t, <-result, ErrAppendStreamClosed)
-	stats := stream.Stats()
-	require.Equal(t, uint64(1), stats.DroppedByReason.Closed)
-	require.Zero(t, stats.DroppedByReason.BufferFull)
-}
-
-func TestAppendStreamRejectsNonObjectRows(t *testing.T) {
-	table := newAppendStreamTestTable(t, func(_ http.ResponseWriter, _ *http.Request) {
-		t.Fatal("invalid rows must not reach the server")
-	})
-	stream, err := table.AppendStream(AppendStreamOptions{})
-	require.NoError(t, err)
-
-	require.ErrorIs(t, stream.TrySend([]int{1}), ErrAppendRowInvalid)
-	require.ErrorIs(t, stream.TrySend(nil), ErrAppendRowInvalid)
-	sendErr := stream.Send(context.Background(), "scalar")
-	require.ErrorIs(t, sendErr, ErrAppendRowInvalid)
-	var scopeErr *Error
-	require.ErrorAs(t, sendErr, &scopeErr)
-	require.Equal(t, ErrorKindAppendRowsFailed, scopeErr.Kind)
-
-	tooLargeRow := map[string]string{"payload": strings.Repeat("x", maxAppendBodyBytes)}
-	require.ErrorIs(t, stream.TrySend(tooLargeRow), ErrAppendRowTooLarge)
-	tooLargeErr := stream.Send(context.Background(), tooLargeRow)
-	require.ErrorIs(t, tooLargeErr, ErrAppendRowTooLarge)
-	require.ErrorAs(t, tooLargeErr, &scopeErr)
-	require.Equal(t, ErrorKindAppendRowsFailed, scopeErr.Kind)
-
-	report, err := stream.Shutdown(context.Background())
-	require.NoError(t, err)
-	require.Equal(t, uint64(0), report.AcceptedRows)
-	require.Equal(t, uint64(3), report.DroppedRows)
-	require.Equal(t, AppendDeliveryFailed, report.Outcome)
-	require.Equal(t, uint64(2), stream.Stats().DroppedByReason.InvalidRow)
-	require.Equal(t, uint64(1), stream.Stats().DroppedByReason.RowTooLarge)
-}
-
-func TestAppendStreamFlushIsPrefixBarrier(t *testing.T) {
-	requests := make(chan string, 2)
-	releaseFirst := make(chan struct{})
-	var call atomic.Int64
-	table := newAppendStreamTestTable(t, func(w http.ResponseWriter, r *http.Request) {
-		body, err := io.ReadAll(r.Body)
-		require.NoError(t, err)
-		requests <- string(body)
-		if call.Add(1) == 1 {
-			<-releaseFirst
-		}
-		writeAppendStreamSuccess(t, w, countAppendRows(body))
-	})
-	stream, err := table.AppendStream(AppendStreamOptions{
-		TargetBatchBytes:     1,
-		MaxConcurrentBatches: 1,
-	})
-	require.NoError(t, err)
-	require.NoError(t, stream.Send(context.Background(), map[string]int{"id": 1}))
-	select {
-	case <-requests:
-	case <-time.After(time.Second):
-		t.Fatal("first append did not start")
-	}
-
-	stream.commandSlots <- struct{}{}
-	stream.admissionMu.Lock()
-	barrier := &appendBarrier{startedAt: time.Now(), ack: make(chan appendBarrierResult, 1)}
-	stream.shared.mu.Lock()
-	barrier.acceptedRows = stream.shared.counters.acceptedRows
-	barrier.droppedRows = stream.shared.counters.droppedRows
-	stream.shared.mu.Unlock()
-	stream.commands <- appendCommand{barrier: barrier}
-	stream.admissionMu.Unlock()
-	require.NoError(t, stream.Send(context.Background(), map[string]int{"id": 2}))
-	close(releaseFirst)
-
-	first := <-barrier.ack
-	require.NoError(t, first.err)
-	require.Equal(t, uint64(1), first.report.AcceptedRows)
-	require.Equal(t, uint64(1), first.report.CommittedRows)
-	select {
-	case <-requests:
-		t.Fatal("a row admitted after the barrier was dispatched before it completed")
-	default:
-	}
-
-	final, err := stream.Shutdown(context.Background())
-	require.NoError(t, err)
-	require.Equal(t, uint64(1), final.AcceptedRows)
-	require.Equal(t, uint64(1), final.CommittedRows)
-	select {
-	case body := <-requests:
-		require.Equal(t, "{\"id\":2}", body)
-	case <-time.After(time.Second):
-		t.Fatal("second append did not run after the barrier")
-	}
-}
-
-func TestAppendStreamStopFailureKeepsBarrierPrefix(t *testing.T) {
-	requestStarted := make(chan struct{}, 1)
-	releaseFirst := make(chan struct{})
-	var calls atomic.Int64
-	table := newAppendStreamTestTable(t, func(w http.ResponseWriter, r *http.Request) {
-		_, err := io.ReadAll(r.Body)
-		require.NoError(t, err)
-		calls.Add(1)
-		requestStarted <- struct{}{}
-		<-releaseFirst
-		writeAppendStreamFailure(t, w, http.StatusUnprocessableEntity, AppendStateRejected, false)
-	})
-	stream, err := table.AppendStream(AppendStreamOptions{
-		TargetBatchBytes:     1,
-		MaxConcurrentBatches: 1,
-	})
-	require.NoError(t, err)
-	require.NoError(t, stream.Send(context.Background(), map[string]int{"id": 1}))
-	select {
-	case <-requestStarted:
-	case <-time.After(time.Second):
-		t.Fatal("first append did not start")
-	}
-
-	stream.commandSlots <- struct{}{}
-	stream.admissionMu.Lock()
-	barrier := &appendBarrier{startedAt: time.Now(), ack: make(chan appendBarrierResult, 1)}
-	stream.shared.mu.Lock()
-	barrier.acceptedRows = stream.shared.counters.acceptedRows
-	barrier.droppedRows = stream.shared.counters.droppedRows
-	stream.shared.mu.Unlock()
-	stream.commands <- appendCommand{barrier: barrier}
-	stream.admissionMu.Unlock()
-	require.NoError(t, stream.Send(context.Background(), map[string]int{"id": 2}))
-	close(releaseFirst)
-
-	first := <-barrier.ack
-	require.Error(t, first.err)
-	require.Equal(t, uint64(1), first.report.AcceptedRows)
-	require.Equal(t, uint64(1), first.report.FailedRows)
-
-	final, err := stream.Shutdown(context.Background())
-	require.Error(t, err)
-	require.Equal(t, uint64(1), final.AcceptedRows)
-	require.Equal(t, uint64(1), final.FailedRows)
-	require.Equal(t, int64(1), calls.Load())
-}
-
-func TestAppendStreamFailurePolicies(t *testing.T) {
-	t.Run("stop", func(t *testing.T) {
-		var calls atomic.Int64
-		table := newAppendStreamTestTable(t, func(w http.ResponseWriter, _ *http.Request) {
-			calls.Add(1)
-			writeAppendStreamFailure(t, w, http.StatusUnprocessableEntity, AppendStateRejected, false)
-		})
-		stream, err := table.AppendStream(AppendStreamOptions{
-			TargetBatchBytes:     1,
-			MaxConcurrentBatches: 1,
-		})
-		require.NoError(t, err)
-		require.NoError(t, stream.Send(context.Background(), map[string]int{"id": 1}))
-		require.NoError(t, stream.Send(context.Background(), map[string]int{"id": 2}))
-		report, err := stream.Shutdown(context.Background())
-		require.Error(t, err)
-		require.Equal(t, AppendDeliveryFailed, report.Outcome)
-		require.Equal(t, uint64(2), report.AcceptedRows)
-		require.Equal(t, uint64(2), report.FailedRows)
-		require.Equal(t, int64(1), calls.Load())
-		require.Error(t, stream.TrySend(map[string]int{"id": 3}))
-		require.Equal(t, AppendStreamFailed, stream.Stats().State)
-	})
-
-	t.Run("continue", func(t *testing.T) {
-		var calls atomic.Int64
-		table := newAppendStreamTestTable(t, func(w http.ResponseWriter, r *http.Request) {
-			body, err := io.ReadAll(r.Body)
-			require.NoError(t, err)
-			if calls.Add(1) == 1 {
-				writeAppendStreamFailure(t, w, http.StatusUnprocessableEntity, AppendStateRejected, false)
-				return
-			}
-			writeAppendStreamSuccess(t, w, countAppendRows(body))
-		})
-		stream, err := table.AppendStream(AppendStreamOptions{
-			FailurePolicy:        AppendFailureContinue,
-			TargetBatchBytes:     1,
-			MaxConcurrentBatches: 1,
-		})
-		require.NoError(t, err)
-		require.NoError(t, stream.Send(context.Background(), map[string]int{"id": 1}))
-		require.NoError(t, stream.Send(context.Background(), map[string]int{"id": 2}))
-		report, err := stream.Shutdown(context.Background())
-		require.NoError(t, err)
-		require.Equal(t, AppendDeliveryPartial, report.Outcome)
-		require.Equal(t, uint64(2), report.AcceptedRows)
-		require.Equal(t, uint64(1), report.CommittedRows)
-		require.Equal(t, uint64(1), report.FailedRows)
-		require.Equal(t, AppendStreamClosed, stream.Stats().State)
-	})
-}
-
-func TestAppendStreamContinuePreservesStructuredLastFailure(t *testing.T) {
-	const details = `{"status":"rejected","row_errors":[{"row_index":0,"column":"occurred_at","message":"invalid timestamp"}],"row_errors_truncated":true}`
-	var calls atomic.Int64
-	table := newAppendStreamTestTable(t, func(w http.ResponseWriter, r *http.Request) {
-		body, err := io.ReadAll(r.Body)
-		require.NoError(t, err)
-		if calls.Add(1) == 1 {
-			w.Header().Set("Content-Type", "application/json")
-			w.Header().Set("X-Request-ID", "append-request-123")
-			w.Header().Set("Retry-After", "2")
-			w.WriteHeader(http.StatusUnprocessableEntity)
-			require.NoError(t, json.NewEncoder(w).Encode(map[string]any{
-				"code":    "invalid_schema",
-				"message": "invalid timestamp",
-				"details": json.RawMessage(details),
-			}))
-			return
-		}
-		writeAppendStreamSuccess(t, w, countAppendRows(body))
-	})
-	stream, err := table.AppendStream(AppendStreamOptions{
-		FailurePolicy:        AppendFailureContinue,
-		TargetBatchBytes:     1,
-		MaxConcurrentBatches: 1,
-	})
-	require.NoError(t, err)
-	require.NoError(t, stream.Send(context.Background(), map[string]int{"id": 1}))
-	require.NoError(t, stream.Send(context.Background(), map[string]int{"id": 2}))
-
-	report, err := stream.Shutdown(context.Background())
-	require.NoError(t, err)
-	require.Equal(t, AppendDeliveryPartial, report.Outcome)
-	failure := stream.Stats().LastFailure
-	require.NotNil(t, failure)
-	require.Equal(t, "invalid timestamp", failure.Message)
-	require.Equal(t, "invalid_schema", failure.Code)
-	require.JSONEq(t, details, string(failure.Details))
-	require.Equal(t, AppendStateRejected, failure.Status)
-	require.Equal(t, http.StatusUnprocessableEntity, failure.HTTPStatus)
-	require.Equal(t, "append-request-123", failure.RequestID)
-	require.Equal(t, 2*time.Second, failure.RetryAfter)
-	require.False(t, failure.Retryable)
-	require.True(t, failure.RowErrorsTruncated)
-	require.Equal(t, []AppendRowError{{
-		RowIndex: 0,
-		Column:   "occurred_at",
-		Message:  "invalid timestamp",
-	}}, failure.RowErrors)
-
-	// Stats snapshots must not share caller-mutable error details.
-	failure.Details[0] = '['
-	failure.RowErrors[0].Message = "mutated"
-	require.JSONEq(t, details, string(stream.Stats().LastFailure.Details))
-	require.Equal(t, "invalid timestamp", stream.Stats().LastFailure.RowErrors[0].Message)
-}
-
-func TestAppendStreamRetryPolicies(t *testing.T) {
-	t.Run("rejected temporary", func(t *testing.T) {
-		var calls atomic.Int64
-		table := newAppendStreamTestTable(t, func(w http.ResponseWriter, r *http.Request) {
-			body, err := io.ReadAll(r.Body)
-			require.NoError(t, err)
-			if calls.Add(1) == 1 {
-				writeAppendStreamFailure(t, w, http.StatusServiceUnavailable, AppendStateRejected, true)
-				return
-			}
-			writeAppendStreamSuccess(t, w, countAppendRows(body))
-		})
-		stream, err := table.AppendStream(AppendStreamOptions{TargetBatchBytes: 1})
-		require.NoError(t, err)
-		require.NoError(t, stream.Send(context.Background(), map[string]int{"id": 1}))
-		report, err := stream.Shutdown(context.Background())
-		require.NoError(t, err)
-		require.Equal(t, int64(2), calls.Load())
-		require.Equal(t, uint64(1), report.Retries)
-		require.Equal(t, uint64(1), report.CommittedRows)
-	})
-
-	t.Run("unknown with retries disabled", func(t *testing.T) {
-		var calls atomic.Int64
-		table := newAppendStreamTestTable(t, func(w http.ResponseWriter, _ *http.Request) {
-			calls.Add(1)
-			writeAppendStreamFailure(t, w, http.StatusServiceUnavailable, AppendStateUnknown, true)
-		})
-		stream, err := table.AppendStream(AppendStreamOptions{
-			Retry:            &AppendRetryOptions{MaxRetries: 0},
-			FailurePolicy:    AppendFailureContinue,
-			TargetBatchBytes: 1,
-		})
-		require.NoError(t, err)
-		require.NoError(t, stream.Send(context.Background(), map[string]int{"id": 1}))
-		report, err := stream.Shutdown(context.Background())
-		require.NoError(t, err)
-		require.Equal(t, int64(1), calls.Load())
-		require.Zero(t, report.Retries)
-		require.Equal(t, uint64(1), report.UnknownRows)
-		require.Equal(t, AppendDeliveryUnknown, report.Outcome)
-	})
-
-	t.Run("attempt timeout", func(t *testing.T) {
-		var calls atomic.Int64
-		client, err := NewClient(Config{
-			Endpoint: "http://scopedb.invalid",
-			HTTPClient: &http.Client{Transport: appendRoundTripFunc(func(r *http.Request) (*http.Response, error) {
-				calls.Add(1)
-				<-r.Context().Done()
-				return nil, r.Context().Err()
-			})},
-		})
-		require.NoError(t, err)
-		table := client.Table("events")
-		stream, err := table.AppendStream(AppendStreamOptions{
-			Retry:            &AppendRetryOptions{MaxRetries: 0},
-			FailurePolicy:    AppendFailureContinue,
-			TargetBatchBytes: 1,
-			AttemptTimeout:   new(10 * time.Millisecond),
-		})
-		require.NoError(t, err)
-		require.NoError(t, stream.Send(context.Background(), map[string]int{"id": 1}))
-		report, err := stream.Shutdown(context.Background())
-		require.NoError(t, err)
-		// Without transport trace evidence, an interrupted attempt remains unknown.
-		require.Equal(t, int64(1), calls.Load())
-		require.Zero(t, report.Retries)
-		require.Equal(t, uint64(1), report.UnknownRows)
-	})
-}
-
-func TestAppendStreamStopPreservesUnknownAsPrimaryFailure(t *testing.T) {
-	var started atomic.Int64
-	bothStarted := make(chan struct{})
-	table := newAppendStreamTestTable(t, func(w http.ResponseWriter, r *http.Request) {
-		body, err := io.ReadAll(r.Body)
-		require.NoError(t, err)
-		if started.Add(1) == 2 {
-			close(bothStarted)
-		}
-		<-bothStarted
-		if strings.Contains(string(body), "\"id\":1") {
-			writeAppendStreamFailure(t, w, http.StatusUnprocessableEntity, AppendStateRejected, false)
-			return
-		}
-		writeAppendStreamFailure(t, w, http.StatusServiceUnavailable, AppendStateUnknown, true)
-	})
-	stream, err := table.AppendStream(AppendStreamOptions{
-		TargetBatchBytes:     1,
-		MaxConcurrentBatches: 2,
-	})
-	require.NoError(t, err)
-	require.NoError(t, stream.Send(context.Background(), map[string]int{"id": 1}))
-	require.NoError(t, stream.Send(context.Background(), map[string]int{"id": 2}))
-	report, err := stream.Shutdown(context.Background())
-	require.Error(t, err)
-	require.Equal(t, AppendStateUnknown, appendErrorState(err))
-	require.Equal(t, uint64(2), report.AcceptedRows)
-	require.Equal(t, uint64(1), report.FailedRows)
-	require.Equal(t, uint64(1), report.UnknownRows)
-	require.Equal(t, AppendDeliveryUnknown, report.Outcome)
-}
-
-func TestAppendStreamShutdownContextAndIdempotency(t *testing.T) {
-	started := make(chan struct{}, 1)
-	release := make(chan struct{})
-	table := newAppendStreamTestTable(t, func(w http.ResponseWriter, r *http.Request) {
-		body, err := io.ReadAll(r.Body)
-		require.NoError(t, err)
-		started <- struct{}{}
-		<-release
-		writeAppendStreamSuccess(t, w, countAppendRows(body))
-	})
-	stream, err := table.AppendStream(AppendStreamOptions{TargetBatchBytes: 1})
-	require.NoError(t, err)
-	require.NoError(t, stream.Send(context.Background(), map[string]int{"id": 1}))
-	select {
-	case <-started:
-	case <-time.After(time.Second):
-		t.Fatal("append did not start")
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
-	defer cancel()
-	report, err := stream.Shutdown(ctx)
-	require.Zero(t, report)
-	require.ErrorIs(t, err, context.DeadlineExceeded)
-	require.Equal(t, AppendStreamClosing, stream.Stats().State)
-	require.Error(t, stream.TrySend(map[string]int{"id": 2}))
-
-	close(release)
-	first, err := stream.Shutdown(context.Background())
-	require.NoError(t, err)
-	second, err := stream.Shutdown(context.Background())
-	require.NoError(t, err)
-	require.Equal(t, first, second)
-	require.Equal(t, uint64(1), first.CommittedRows)
-
-	canceled, cancelAgain := context.WithCancel(context.Background())
-	cancelAgain()
-	terminal, err := stream.Shutdown(canceled)
-	require.NoError(t, err)
-	require.Equal(t, first, terminal)
-}
-
-func TestAppendStreamShutdownLinearizesWithSend(t *testing.T) {
-	table := newAppendStreamTestTable(t, func(w http.ResponseWriter, r *http.Request) {
-		body, err := io.ReadAll(r.Body)
-		require.NoError(t, err)
-		writeAppendStreamSuccess(t, w, countAppendRows(body))
-	})
-	stream, err := table.AppendStream(AppendStreamOptions{
-		TargetBatchBytes:     1,
-		MaxConcurrentBatches: 4,
-	})
-	require.NoError(t, err)
-
-	stream.admissionMu.Lock()
-	const producerCount = 64
-	sendResults := make(chan error, producerCount)
-	for id := range producerCount {
-		go func() {
-			sendResults <- stream.Send(context.Background(), map[string]int{"id": id})
-		}()
-	}
-	type shutdownResult struct {
-		report AppendDeliveryReport
-		err    error
-	}
-	shutdownResults := make(chan shutdownResult, 1)
-	go func() {
-		report, err := stream.Shutdown(context.Background())
-		shutdownResults <- shutdownResult{report: report, err: err}
-	}()
-	stream.admissionMu.Unlock()
-
-	var accepted uint64
-	for range producerCount {
-		err := <-sendResults
-		if err == nil {
-			accepted++
-			continue
-		}
-		require.ErrorIs(t, err, ErrAppendStreamClosed)
-	}
-	result := <-shutdownResults
-	require.NoError(t, result.err)
-	require.Equal(t, accepted, result.report.AcceptedRows)
-	require.Equal(t, accepted, result.report.CommittedRows)
-	require.Equal(t, AppendStreamClosed, stream.Stats().State)
-}
-
-func TestAppendStreamCanceledFlushKeepsSettling(t *testing.T) {
-	started := make(chan struct{}, 1)
-	release := make(chan struct{})
-	table := newAppendStreamTestTable(t, func(w http.ResponseWriter, r *http.Request) {
-		body, err := io.ReadAll(r.Body)
-		require.NoError(t, err)
-		started <- struct{}{}
-		<-release
-		writeAppendStreamSuccess(t, w, countAppendRows(body))
-	})
-	stream, err := table.AppendStream(AppendStreamOptions{TargetBatchBytes: 1})
-	require.NoError(t, err)
-	require.NoError(t, stream.Send(context.Background(), map[string]int{"id": 1}))
-	select {
-	case <-started:
-	case <-time.After(time.Second):
-		t.Fatal("append did not start")
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
-	defer cancel()
-	report, err := stream.Flush(ctx)
-	require.Zero(t, report)
-	require.ErrorIs(t, err, context.DeadlineExceeded)
-	close(release)
-	require.Eventually(t, func() bool {
-		stats := stream.Stats()
-		return stats.LastReport != nil && stats.LastReport.CommittedRows == 1
-	}, time.Second, time.Millisecond)
-
-	final, err := stream.Shutdown(context.Background())
-	require.NoError(t, err)
-	require.Zero(t, final.AcceptedRows)
-	require.Equal(t, uint64(1), stream.Stats().CommittedRows)
-}
-
-func TestAppendStreamSnapshotsDestinationAndHonorsPreCanceledSend(t *testing.T) {
-	var pathsMu sync.Mutex
-	var paths []string
-	table := newAppendStreamTestTable(t, func(w http.ResponseWriter, r *http.Request) {
-		body, err := io.ReadAll(r.Body)
-		require.NoError(t, err)
-		pathsMu.Lock()
-		paths = append(paths, r.URL.EscapedPath())
-		pathsMu.Unlock()
-		writeAppendStreamSuccess(t, w, countAppendRows(body))
-	})
-	table.Database = "before/db"
-	table.Schema = "before schema"
-	stream, err := table.AppendStream(AppendStreamOptions{TargetBatchBytes: 1})
-	require.NoError(t, err)
-	table.Database = "after"
-	table.Schema = "after"
-	table.Name = "after"
-
-	canceled, cancel := context.WithCancel(context.Background())
-	cancel()
-	require.ErrorIs(t, stream.Send(canceled, map[string]int{"id": 0}), context.Canceled)
-	require.Zero(t, stream.Stats().AcceptedRows)
-
-	require.NoError(t, stream.Send(context.Background(), map[string]int{"id": 1}))
-	_, err = stream.Shutdown(context.Background())
-	require.NoError(t, err)
-	pathsMu.Lock()
-	defer pathsMu.Unlock()
-	require.Len(t, paths, 1)
-	require.Contains(t, paths[0], "/databases/before%2Fdb/schemas/before%20schema/tables/events/ingest")
-}
-
-func TestAppendStreamConcurrentProducersAndStats(t *testing.T) {
-	table := newAppendStreamTestTable(t, func(w http.ResponseWriter, r *http.Request) {
-		body, err := io.ReadAll(r.Body)
-		require.NoError(t, err)
-		writeAppendStreamSuccess(t, w, countAppendRows(body))
-	})
-	stream, err := table.AppendStream(AppendStreamOptions{
-		TargetBatchBytes:     64,
-		MaxConcurrentBatches: 4,
-	})
-	require.NoError(t, err)
-
-	var producers sync.WaitGroup
-	for id := range 100 {
-		producers.Add(1)
-		go func() {
-			defer producers.Done()
-			require.NoError(t, stream.Send(context.Background(), map[string]int{"id": id}))
-		}()
-	}
-	statsDone := make(chan struct{})
-	go func() {
-		defer close(statsDone)
-		for stream.Stats().AcceptedRows < 100 {
-			time.Sleep(time.Microsecond)
-		}
-	}()
-	producers.Wait()
-	<-statsDone
-	report, err := stream.Shutdown(context.Background())
-	require.NoError(t, err)
-	require.Equal(t, uint64(100), report.AcceptedRows)
-	require.Equal(t, uint64(100), report.CommittedRows)
-	stats := stream.Stats()
-	require.Zero(t, stats.PendingRows)
-	require.Zero(t, stats.PendingBytes)
-}
-
-func TestAppendStreamOptionValidation(t *testing.T) {
-	table := newTestClient(t, "https://example.invalid").Table("events")
-	invalid := []AppendStreamOptions{
-		{FailurePolicy: AppendFailurePolicy(9)},
-		{TargetBatchBytes: -1},
-		{TargetBatchBytes: maxAppendBodyBytes + 1},
-		{MaxBatchRows: -1},
-		{MaxBatchRows: maxAppendRows + 1},
-		{FlushInterval: -1},
-		{MaxBufferedBytes: -1},
-		{MaxConcurrentBatches: -1},
-		{MaxConcurrentBatches: maxAppendConcurrentBatches + 1},
-		{AttemptTimeout: new(-time.Nanosecond)},
-		{Retry: &AppendRetryOptions{MaxRetries: -1}},
-		{Retry: &AppendRetryOptions{InitialBackoff: -1}},
-		{Retry: &AppendRetryOptions{MaxBackoff: -1}},
-		{Retry: &AppendRetryOptions{MaxElapsedTime: -1}},
-		{Retry: &AppendRetryOptions{InitialBackoff: time.Second, MaxBackoff: time.Millisecond}},
-	}
-	for _, options := range invalid {
-		_, err := table.AppendStream(options)
-		require.Error(t, err)
-		var scopeErr *Error
-		require.ErrorAs(t, err, &scopeErr)
-		require.Equal(t, ErrorKindConfigInvalid, scopeErr.Kind)
-	}
-	for range 100 {
-		delay := appendRetryDelay(time.Second, 0)
-		require.GreaterOrEqual(t, delay, 500*time.Millisecond)
-		require.Less(t, delay, time.Second)
-	}
-	require.Equal(t, 2*time.Second, appendRetryDelay(time.Second, 2*time.Second))
-	require.Equal(t, time.Hour, appendRetryDelay(time.Second, time.Hour))
-}
-
-func newAppendStreamTestTable(t *testing.T, handler http.HandlerFunc) *Table {
+func testStream(t *testing.T, options AppendStreamOptions, transport roundTripFunc) *AppendStream {
 	t.Helper()
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		require.Equal(t, string(CompressionZstd), r.Header.Get("Content-Encoding"))
+	stream, err := testClient(t, transport).Table("events").AppendStream(options)
+	require.NoError(t, err)
+	return stream
+}
+
+func appendSuccess(rows int) *http.Response {
+	return jsonResponse(200, fmt.Sprintf(`{"status":"committed","num_rows_inserted":%d}`, rows))
+}
+
+func appendFailure(status int, state AppendState, retryable bool) *http.Response {
+	return jsonResponse(status, fmt.Sprintf(`{"code":"append_failed","message":"append failed","retryable":%t,"details":{"status":%q,"row_errors":[{"row_index":0,"column":"id","message":"invalid integer"}]}}`, retryable, state))
+}
+
+func TestStreamBatchBoundaries(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		options AppendStreamOptions
+	}{
+		{"rows", AppendStreamOptions{MaxBatchRows: 2}},
+		{"bytes", AppendStreamOptions{TargetBatchBytes: 17}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var bodies []string
+			tc.options.MaxConcurrentBatches, tc.options.FlushInterval = 1, time.Hour
+			stream := testStream(t, tc.options, func(r *http.Request) (*http.Response, error) {
+				data, err := decodeCompressedRequestBody(r)
+				require.NoError(t, err)
+				bodies = append(bodies, string(data))
+				return appendSuccess(len(strings.Split(string(data), "\n"))), nil
+			})
+			for id := range 3 {
+				row := map[string]int{"id": id}
+				require.NoError(t, stream.Send(t.Context(), row))
+				row["id"] = 99 // Admitted data must no longer depend on the caller's value.
+			}
+			report, err := stream.Shutdown(t.Context())
+			require.NoError(t, err)
+			require.EqualValues(t, 3, report.CommittedRows)
+			require.Equal(t, []string{"{\"id\":0}\n{\"id\":1}", "{\"id\":2}"}, bodies)
+		})
+	}
+}
+
+func TestStreamFlushesPartialBatchOnTimer(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var calls atomic.Int32
+		stream := testStream(t, AppendStreamOptions{FlushInterval: time.Second}, func(*http.Request) (*http.Response, error) {
+			calls.Add(1)
+			return appendSuccess(1), nil
+		})
+		require.NoError(t, stream.Send(t.Context(), map[string]int{"id": 1}))
+		synctest.Wait()
+		require.Zero(t, calls.Load())
+		time.Sleep(time.Second)
+		synctest.Wait()
+		require.EqualValues(t, 1, calls.Load())
+		_, err := stream.Shutdown(t.Context())
+		require.NoError(t, err)
+	})
+}
+
+func TestStreamBackpressureAndCanceledSend(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		release := make(chan struct{})
+		unblock := sync.OnceFunc(func() { close(release) })
+		defer unblock()
+		stream := testStream(t, AppendStreamOptions{TargetBatchBytes: 1, MaxBufferedBytes: 9}, func(*http.Request) (*http.Response, error) {
+			<-release
+			return appendSuccess(1), nil
+		})
+		require.NoError(t, stream.Send(t.Context(), map[string]int{"id": 1}))
+		synctest.Wait()
+		require.ErrorIs(t, stream.TrySend(map[string]int{"id": 2}), ErrAppendStreamFull)
+		ctx, cancel := context.WithCancel(t.Context())
+		done := make(chan error, 1)
+		go func() { done <- stream.Send(ctx, map[string]int{"id": 2}) }()
+		synctest.Wait()
+		select {
+		case err := <-done:
+			t.Fatalf("full stream admitted a row: %v", err)
+		default:
+		}
+		cancel()
+		require.ErrorIs(t, <-done, context.Canceled)
+		unblock()
+		require.NoError(t, stream.Send(t.Context(), map[string]int{"id": 3}))
+		report, err := stream.Shutdown(t.Context())
+		require.NoError(t, err)
+		require.EqualValues(t, 2, report.CommittedRows)
+		require.EqualValues(t, 1, report.DroppedRows)
+		require.Zero(t, stream.Stats().PendingBytes)
+	})
+}
+
+func TestStreamFlushAccountsOnlyItsPrefix(t *testing.T) {
+	for _, mode := range []string{"success", "stop on failure", "canceled wait"} {
+		t.Run(mode, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				release := make(chan struct{})
+				unblock := sync.OnceFunc(func() { close(release) })
+				defer unblock()
+				calls := 0
+				stream := testStream(t, AppendStreamOptions{TargetBatchBytes: 1, MaxConcurrentBatches: 1, FlushInterval: time.Hour}, func(*http.Request) (*http.Response, error) {
+					calls++
+					<-release
+					if mode == "stop on failure" {
+						return appendFailure(422, AppendStateRejected, false), nil
+					}
+					return appendSuccess(1), nil
+				})
+				require.NoError(t, stream.Send(t.Context(), map[string]int{"id": 1}))
+				ctx, cancel := context.WithCancel(t.Context())
+				defer cancel()
+				done := make(chan streamResult, 1)
+				go func() { report, err := stream.Flush(ctx); done <- streamResult{report: report, err: err} }()
+				synctest.Wait() // Flush has enqueued its barrier and is waiting for the first batch.
+				require.NoError(t, stream.Send(t.Context(), map[string]int{"id": 2}))
+				if mode == "canceled wait" {
+					cancel()
+					result := <-done
+					require.ErrorIs(t, result.err, context.Canceled)
+					require.Zero(t, result.report)
+				}
+				unblock()
+				synctest.Wait()
+				if mode != "canceled wait" {
+					result := <-done
+					require.Equal(t, mode == "stop on failure", result.err != nil)
+					require.EqualValues(t, 1, result.report.AcceptedRows)
+				} else {
+					require.EqualValues(t, 1, stream.Stats().LastReport.CommittedRows)
+				}
+				final, err := stream.Shutdown(t.Context())
+				require.Equal(t, mode == "stop on failure", err != nil)
+				require.EqualValues(t, 1, final.AcceptedRows)
+				if mode == "stop on failure" {
+					require.EqualValues(t, 1, final.FailedRows)
+					require.Equal(t, 1, calls)
+				} else {
+					require.EqualValues(t, 1, final.CommittedRows)
+				}
+				require.Zero(t, stream.Stats().PendingRows)
+			})
+		})
+	}
+}
+
+func TestStreamFailurePoliciesAndDiagnosticOwnership(t *testing.T) {
+	for _, policy := range []AppendFailurePolicy{AppendFailureStop, AppendFailureContinue} {
+		t.Run(fmt.Sprint(policy), func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				release := make(chan struct{})
+				unblock := sync.OnceFunc(func() { close(release) })
+				defer unblock()
+				calls := 0
+				stream := testStream(t, AppendStreamOptions{FailurePolicy: policy, TargetBatchBytes: 1, MaxConcurrentBatches: 1}, func(*http.Request) (*http.Response, error) {
+					<-release
+					calls++
+					if calls == 1 {
+						return appendFailure(422, AppendStateRejected, false), nil
+					}
+					return appendSuccess(1), nil
+				})
+				for id := range 3 {
+					require.NoError(t, stream.Send(t.Context(), map[string]int{"id": id}))
+				}
+				unblock()
+				report, err := stream.Shutdown(t.Context())
+				if policy == AppendFailureStop {
+					require.Error(t, err)
+					require.Equal(t, 1, calls)
+					require.EqualValues(t, 3, report.FailedRows)
+				} else {
+					require.NoError(t, err)
+					require.Equal(t, AppendDeliveryPartial, report.Outcome)
+					require.EqualValues(t, 2, report.CommittedRows)
+					require.EqualValues(t, 1, report.FailedRows)
+				}
+				failure := stream.Stats().LastFailure
+				require.Equal(t, "append_failed", failure.Code)
+				require.Equal(t, "invalid integer", failure.RowErrors[0].Message)
+				failure.Details[0], failure.RowErrors[0].Message = '[', "changed"
+				require.True(t, json.Valid(stream.Stats().LastFailure.Details))
+				require.Equal(t, "invalid integer", stream.Stats().LastFailure.RowErrors[0].Message)
+				require.Zero(t, stream.Stats().PendingBytes)
+			})
+		})
+	}
+}
+
+func TestStreamConcurrencyAndShutdownSettlement(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		rejected, unknown := make(chan struct{}), make(chan struct{})
+		releaseRejected := sync.OnceFunc(func() { close(rejected) })
+		releaseUnknown := sync.OnceFunc(func() { close(unknown) })
+		defer releaseRejected()
+		defer releaseUnknown()
+		var calls atomic.Int32
+		stream := testStream(t, AppendStreamOptions{TargetBatchBytes: 1, MaxConcurrentBatches: 2}, func(r *http.Request) (*http.Response, error) {
+			calls.Add(1)
+			body, err := decodeCompressedRequestBody(r)
+			require.NoError(t, err)
+			if strings.Contains(string(body), `"id":0`) {
+				<-rejected
+				return appendFailure(422, AppendStateRejected, false), nil
+			}
+			<-unknown
+			return appendFailure(503, AppendStateUnknown, true), nil
+		})
+		for id := range 3 {
+			require.NoError(t, stream.Send(t.Context(), map[string]int{"id": id}))
+		}
+		synctest.Wait()
+		require.EqualValues(t, 2, calls.Load(), "the third batch must remain queued")
+		releaseRejected()
+		synctest.Wait()
+		ctx, cancel := context.WithCancel(t.Context())
+		done := make(chan streamResult, 1)
+		go func() { report, err := stream.Shutdown(ctx); done <- streamResult{report: report, err: err} }()
+		synctest.Wait()
+		select {
+		case <-done:
+			t.Fatal("shutdown did not wait for the in-flight batch")
+		default:
+		}
+		cancel()
+		waiting := <-done
+		require.ErrorIs(t, waiting.err, context.Canceled)
+		require.Zero(t, waiting.report)
+		releaseUnknown()
+		report, err := stream.Shutdown(t.Context())
+		require.Equal(t, AppendStateUnknown, apiError(t, err).AppendDetails.Status)
+		require.EqualValues(t, 1, report.UnknownRows)
+		require.EqualValues(t, 2, report.FailedRows)
+		require.Equal(t, AppendDeliveryUnknown, report.Outcome)
+		require.EqualValues(t, 2, calls.Load())
+		require.Zero(t, stream.Stats().PendingBytes)
+	})
+}
+
+func TestStreamConcurrentSendAndShutdown(t *testing.T) {
+	var mu sync.Mutex
+	seen := make(map[int]bool)
+	stream := testStream(t, AppendStreamOptions{MaxBatchRows: 1}, func(r *http.Request) (*http.Response, error) {
 		body, err := decodeCompressedRequestBody(r)
 		require.NoError(t, err)
-		r.Body = io.NopCloser(bytes.NewReader(body))
-		handler(w, r)
-	}))
-	t.Cleanup(server.Close)
-	client, err := NewClient(Config{Endpoint: server.URL})
+		var row map[string]int
+		require.NoError(t, json.Unmarshal(body, &row))
+		mu.Lock()
+		if seen[row["id"]] {
+			t.Errorf("duplicate row %d", row["id"])
+		}
+		seen[row["id"]] = true
+		mu.Unlock()
+		return appendSuccess(1), nil
+	})
+	require.NoError(t, stream.Send(t.Context(), map[string]int{"id": 100}))
+	start := make(chan struct{})
+	results := make(chan error, 32)
+	var producers sync.WaitGroup
+	for id := range 32 {
+		producers.Go(func() { <-start; results <- stream.Send(t.Context(), map[string]int{"id": id}) })
+	}
+	done := make(chan streamResult, 1)
+	go func() {
+		<-start
+		report, err := stream.Shutdown(t.Context())
+		done <- streamResult{report: report, err: err}
+	}()
+	close(start)
+	producers.Wait()
+	accepted := 1
+	for range 32 {
+		if err := <-results; err == nil {
+			accepted++
+		} else {
+			require.ErrorIs(t, err, ErrAppendStreamClosed)
+		}
+	}
+	final := <-done
+	require.NoError(t, final.err)
+	require.EqualValues(t, accepted, final.report.AcceptedRows)
+	require.EqualValues(t, accepted, final.report.CommittedRows)
+	mu.Lock()
+	require.Len(t, seen, accepted)
+	mu.Unlock()
+	again, err := stream.Shutdown(t.Context())
 	require.NoError(t, err)
-	t.Cleanup(client.Close)
-	return client.Table("events")
+	require.Equal(t, final.report, again)
+	require.ErrorIs(t, stream.TrySend(map[string]int{"id": 99}), ErrAppendStreamClosed)
 }
 
-func writeAppendStreamSuccess(t *testing.T, w http.ResponseWriter, rows int) {
-	t.Helper()
-	w.Header().Set("Content-Type", "application/json")
-	require.NoError(t, json.NewEncoder(w).Encode(map[string]any{
-		"status": "committed", "num_rows_inserted": rows,
-	}))
+func TestStreamRejectsUnsendableRows(t *testing.T) {
+	stream := testStream(t, AppendStreamOptions{}, func(*http.Request) (*http.Response, error) {
+		t.Error("invalid row was dispatched")
+		return appendSuccess(0), nil
+	})
+	require.ErrorIs(t, stream.TrySend([]int{1}), ErrAppendRowInvalid)
+	require.ErrorIs(t, stream.Send(t.Context(), nil), ErrAppendRowInvalid)
+	require.ErrorIs(t, stream.TrySend(map[string]string{"data": strings.Repeat("x", 8*1024*1024)}), ErrAppendRowTooLarge)
+	report, err := stream.Shutdown(t.Context())
+	require.NoError(t, err)
+	require.Zero(t, report.AcceptedRows)
+	require.EqualValues(t, 2, report.DroppedRows, "Send failures do not count as TrySend drops")
 }
 
-func writeAppendStreamFailure(
-	t *testing.T,
-	w http.ResponseWriter,
-	status int,
-	state AppendState,
-	retryable bool,
-) {
-	t.Helper()
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	require.NoError(t, json.NewEncoder(w).Encode(map[string]any{
-		"code": "unavailable", "message": "append failed", "retryable": retryable,
-		"details": map[string]any{"status": state, "row_errors": []AppendRowError{}, "row_errors_truncated": false},
-	}))
+func TestStreamShutdownDuringRowEncoding(t *testing.T) {
+	stream := testStream(t, AppendStreamOptions{}, func(*http.Request) (*http.Response, error) {
+		t.Error("a row rejected during shutdown reached transport")
+		return appendSuccess(0), nil
+	})
+	row := blockedRow{started: make(chan struct{}), release: make(chan struct{})}
+	done := make(chan error, 1)
+	go func() { done <- stream.TrySend(row) }()
+	<-row.started
+	_, err := stream.Shutdown(t.Context())
+	close(row.release)
+	require.NoError(t, err)
+	require.ErrorIs(t, <-done, ErrAppendStreamClosed)
+	require.Zero(t, stream.Stats().AcceptedRows)
+	require.Zero(t, stream.Stats().DroppedByReason.BufferFull)
 }
 
-type blockingAppendStreamRow struct {
-	started chan struct{}
-	release chan struct{}
-}
+type blockedRow struct{ started, release chan struct{} }
 
-func (row blockingAppendStreamRow) MarshalJSON() ([]byte, error) {
+func (row blockedRow) MarshalJSON() ([]byte, error) {
 	close(row.started)
 	<-row.release
 	return []byte(`{"id":1}`), nil

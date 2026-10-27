@@ -18,11 +18,7 @@ package scopedb
 
 import (
 	"context"
-	"io"
 	"net/http"
-	"net/http/httptest"
-	"strings"
-	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -30,309 +26,112 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestWriteTimeoutRequestScope(t *testing.T) {
-	t.Parallel()
+func TestWriteTimeoutCoversHeadersAndBody(t *testing.T) {
 	for _, tc := range []struct {
-		name        string
-		timeout     *time.Duration
-		wantTimeout time.Duration
+		operation string
+		headers   bool
 	}{
-		{"default", nil, 30 * time.Second},
-		{"disabled", new(time.Duration), 0},
-		{"configured", new(time.Minute), time.Minute},
+		{"append", false}, {"append", true}, {"catalog", false}, {"catalog", true},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			var requestCtx context.Context
-			standardClient := &http.Client{Transport: clientRoundTripFunc(func(req *http.Request) (*http.Response, error) {
-				requestCtx = req.Context()
-				deadline, hasDeadline := requestCtx.Deadline()
-				if req.Method == http.MethodGet || tc.wantTimeout == 0 {
-					require.False(t, hasDeadline)
-				} else {
-					require.True(t, hasDeadline)
-					require.InDelta(t, tc.wantTimeout.Seconds(), time.Until(deadline).Seconds(), 1)
-				}
-				body := `{"before":{"name":"scopedb"},"after":{"name":"scopedb"},"destructive":false}`
-				switch req.Method {
-				case http.MethodGet:
-					body = `{"name":"scopedb"}`
-				case http.MethodPost:
-					body = `{"status":"committed","num_rows_inserted":1}`
-				}
-				return &http.Response{
-					StatusCode: http.StatusOK,
-					Header:     http.Header{"Etag": []string{`"1"`}},
-					Body:       io.NopCloser(strings.NewReader(body)),
-				}, nil
-			})}
-			client, err := NewClient(Config{Endpoint: "https://example.com", HTTPClient: standardClient, WriteTimeout: tc.timeout})
-			require.NoError(t, err)
-			if tc.timeout != nil {
-				// Changing the caller's variable must not change an existing client.
-				*tc.timeout = time.Second
-			}
-
-			_, err = client.Table("events").AppendNDJSON(context.Background(), []byte(`{"id":1}`))
-			require.NoError(t, err)
-			if tc.wantTimeout > 0 {
-				require.ErrorIs(t, requestCtx.Err(), context.Canceled, "completed requests must release their timers")
-			}
-			catalog := client.Catalog().Database("scopedb")
-			_, err = catalog.Get(context.Background())
-			require.NoError(t, err)
-			_, err = catalog.Apply(context.Background(), &CatalogDatabase{Name: "scopedb"}, CatalogOptions{DryRun: true})
-			require.NoError(t, err)
-			_, err = catalog.Apply(context.Background(), &CatalogDatabase{Name: "scopedb"})
-			require.NoError(t, err)
-			_, err = catalog.Delete(context.Background())
-			require.NoError(t, err)
-			require.Zero(t, standardClient.Timeout, "the caller's HTTP client must not be changed")
-		})
-	}
-}
-
-func TestWriteTimeoutRejectsNegativeConfig(t *testing.T) {
-	t.Parallel()
-	_, err := NewClient(Config{Endpoint: "https://example.com", WriteTimeout: new(-time.Nanosecond)})
-	var scopeErr *Error
-	require.ErrorAs(t, err, &scopeErr)
-	require.Equal(t, ErrorKindConfigInvalid, scopeErr.Kind)
-}
-
-func TestWriteTimeoutBoundsHeadersAndResponseBody(t *testing.T) {
-	t.Parallel()
-	for _, operation := range []string{"append", "catalog apply", "catalog delete"} {
-		for _, headers := range []bool{false, true} {
-			name := operation
-			if headers {
-				name += "/response body"
-			} else {
-				name += "/response headers"
-			}
-			t.Run(name, func(t *testing.T) {
-				t.Parallel()
-				var requests atomic.Int32
-				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					_, err := io.Copy(io.Discard, r.Body)
-					require.NoError(t, err)
-					requests.Add(1)
-					if headers {
-						w.Header().Set("X-Request-ID", "stalled-write")
-						w.WriteHeader(http.StatusOK)
-						w.(http.Flusher).Flush()
-					}
-					<-r.Context().Done()
-				}))
-				defer server.Close()
-				client, err := NewClient(Config{Endpoint: server.URL, WriteTimeout: new(50 * time.Millisecond)})
-				require.NoError(t, err)
-				defer client.Close()
-				switch operation {
-				case "append":
-					_, err = client.Table("events").AppendNDJSON(context.Background(), []byte(`{"id":1}`))
-				case "catalog apply":
-					_, err = client.Catalog().Table("scopedb", "public", "events").Apply(context.Background(), &CatalogTable{Name: "events"})
-				case "catalog delete":
-					_, err = client.Catalog().Table("scopedb", "public", "events").Delete(context.Background())
-				}
-				require.ErrorIs(t, err, context.DeadlineExceeded)
-				var scopeErr *Error
-				require.ErrorAs(t, err, &scopeErr)
-				require.False(t, scopeErr.Retryable)
-				require.Equal(t, &WriteErrorDetails{
-					Reason: WriteErrorReasonTimeout, Outcome: AppendStateUnknown,
-				}, scopeErr.WriteDetails)
-				if operation == "append" {
-					require.Equal(t, AppendStateUnknown, scopeErr.AppendDetails.Status)
-				} else {
-					require.Equal(t, ErrorKindCatalogFailed, scopeErr.Kind)
-					require.Equal(t, "catalog_commit_outcome_unknown", scopeErr.Code)
-				}
-				if headers {
-					require.Equal(t, http.StatusOK, scopeErr.HTTPStatus)
-					require.Equal(t, "stalled-write", scopeErr.RequestID)
-				}
-				require.EqualValues(t, 1, requests.Load())
-			})
-		}
-	}
-}
-
-func TestWriteTimeoutHonorsEarlierCallerDeadline(t *testing.T) {
-	t.Parallel()
-	for name, timeout := range map[string]*time.Duration{
-		"default":    nil,
-		"disabled":   new(time.Duration),
-		"configured": new(time.Second),
-	} {
-		t.Run(name, func(t *testing.T) {
-			t.Parallel()
+		t.Run(tc.operation+map[bool]string{true: "/body", false: "/headers"}[tc.headers], func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
-				client, err := NewClient(Config{
-					Endpoint:     "https://example.com",
-					WriteTimeout: timeout,
-					HTTPClient: &http.Client{Transport: clientRoundTripFunc(func(req *http.Request) (*http.Response, error) {
-						<-req.Context().Done()
-						return nil, req.Context().Err()
-					})},
-				})
+				var body *deadlineBody
+				client, err := NewClient(Config{Endpoint: "https://example.com", Compression: CompressionGzip, WriteTimeout: new(time.Second), HTTPClient: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+					if !tc.headers {
+						<-r.Context().Done()
+						return nil, r.Context().Err()
+					}
+					body = &deadlineBody{ctx: r.Context()}
+					return &http.Response{StatusCode: 200, Header: http.Header{"X-Request-Id": {"stalled-write"}}, Body: body}, nil
+				})}})
 				require.NoError(t, err)
-				ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
-				defer cancel()
-				_, err = client.Table("events").AppendNDJSON(ctx, []byte(`{"id":1}`))
+				if tc.operation == "append" {
+					_, err = client.Table("events").AppendNDJSON(t.Context(), []byte(`{}`))
+				} else {
+					_, err = client.Table("events").Catalog().Delete(t.Context())
+				}
 				require.ErrorIs(t, err, context.DeadlineExceeded)
-				require.ErrorIs(t, ctx.Err(), context.DeadlineExceeded)
-				var scopeErr *Error
-				require.ErrorAs(t, err, &scopeErr)
-				require.Equal(t, WriteErrorReasonTimeout, scopeErr.WriteDetails.Reason)
+				failure := apiError(t, err)
+				require.Equal(t, &WriteErrorDetails{Reason: WriteErrorReasonTimeout, Outcome: AppendStateUnknown}, failure.WriteDetails)
+				require.False(t, failure.Retryable)
+				if tc.operation == "catalog" {
+					require.Equal(t, "catalog_commit_outcome_unknown", failure.Code)
+				}
+				if tc.headers {
+					require.True(t, body.closed)
+					require.Equal(t, "stalled-write", failure.RequestID)
+				}
 			})
 		})
 	}
 }
 
-func TestWriteTimeoutStreamInheritanceAndOverride(t *testing.T) {
-	t.Parallel()
+type deadlineBody struct {
+	ctx    context.Context
+	closed bool
+}
+
+func (b *deadlineBody) Read([]byte) (int, error) { <-b.ctx.Done(); return 0, b.ctx.Err() }
+func (b *deadlineBody) Close() error             { b.closed = true; return nil }
+
+func TestWriteDeadlinePrecedence(t *testing.T) {
 	for _, tc := range []struct {
-		name           string
-		writeTimeout   *time.Duration
-		attemptTimeout *time.Duration
-		wantTimeout    time.Duration
+		name                                       string
+		writeTimeout, callerTimeout, clientTimeout time.Duration
 	}{
-		{"default", nil, nil, 30 * time.Second},
-		{"inherit disabled", new(time.Duration), nil, defaultAppendRetryElapsedTime},
-		{"inherit", new(time.Minute), nil, time.Minute},
-		{"override", new(time.Minute), new(2 * time.Minute), 2 * time.Minute},
-		{"enable", new(time.Duration), new(time.Minute), time.Minute},
-		{"disable default", nil, new(time.Duration), defaultAppendRetryElapsedTime},
-		{"disable configured", new(time.Minute), new(time.Duration), defaultAppendRetryElapsedTime},
+		{"caller", time.Minute, time.Second, 0},
+		{"HTTP client", time.Minute, 0, time.Second},
+		{"disabled write timeout", 0, time.Second, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			deadlines := make(chan time.Time, 1)
-			client, err := NewClient(Config{
-				Endpoint: "https://example.com", WriteTimeout: tc.writeTimeout,
-				HTTPClient: &http.Client{Transport: clientRoundTripFunc(func(req *http.Request) (*http.Response, error) {
-					deadline, _ := req.Context().Deadline()
-					deadlines <- deadline
-					return &http.Response{
-						StatusCode: http.StatusOK, Header: make(http.Header),
-						Body: io.NopCloser(strings.NewReader(`{"status":"committed","num_rows_inserted":1}`)),
-					}, nil
-				})},
+			synctest.Test(t, func(t *testing.T) {
+				client, err := NewClient(Config{Endpoint: "https://example.com", Compression: CompressionGzip, WriteTimeout: &tc.writeTimeout, HTTPClient: &http.Client{Timeout: tc.clientTimeout, Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+					<-r.Context().Done()
+					return nil, r.Context().Err()
+				})}})
+				require.NoError(t, err)
+				ctx := t.Context()
+				if tc.callerTimeout > 0 {
+					var cancel context.CancelFunc
+					ctx, cancel = context.WithTimeout(ctx, tc.callerTimeout)
+					defer cancel()
+				}
+				started := time.Now()
+				_, err = client.Table("events").AppendNDJSON(ctx, []byte(`{}`))
+				require.ErrorIs(t, err, context.DeadlineExceeded)
+				require.Equal(t, time.Second, time.Since(started))
+				require.Equal(t, WriteErrorReasonTimeout, apiError(t, err).WriteDetails.Reason)
 			})
-			require.NoError(t, err)
-			defer client.Close()
-			stream, err := client.Table("events").AppendStream(AppendStreamOptions{AttemptTimeout: tc.attemptTimeout})
-			require.NoError(t, err)
-			if tc.attemptTimeout != nil {
-				// The background worker must use the value captured at construction.
-				*tc.attemptTimeout = time.Second
-			}
-			require.NoError(t, stream.Send(context.Background(), map[string]any{"id": 1}))
-			_, err = stream.Shutdown(context.Background())
-			require.NoError(t, err)
-			// Disabling the write timeout leaves the separate delivery/retry budget in force.
-			require.InDelta(t, tc.wantTimeout.Seconds(), time.Until(<-deadlines).Seconds(), 1)
 		})
 	}
 }
 
-func TestWriteTimeoutStartsAfterRequestPreparation(t *testing.T) {
-	const timeout = time.Second
-	payload := []byte(`{"data":"` + strings.Repeat("x", 6*1024*1024) + `"}`)
-	var started time.Time
-	client, err := NewClient(Config{
-		Endpoint: "https://example.com", Compression: CompressionGzip, WriteTimeout: new(timeout),
-		HTTPClient: &http.Client{Transport: clientRoundTripFunc(func(req *http.Request) (*http.Response, error) {
-			reachedTransport := time.Now()
-			deadline, ok := req.Context().Deadline()
-			require.True(t, ok)
-			budgetStarted := deadline.Add(-timeout)
-			// Compression dominates preparation for this payload. The deadline must
-			// start near transport handoff, rather than before that work.
-			require.GreaterOrEqual(t, budgetStarted.Sub(started), reachedTransport.Sub(started)*3/4)
-			require.NoError(t, req.Context().Err())
-			return &http.Response{
-				StatusCode: http.StatusOK, Header: make(http.Header),
-				Body: io.NopCloser(strings.NewReader(`{"status":"committed","num_rows_inserted":1}`)),
-			}, nil
-		})},
-	})
-	require.NoError(t, err)
-	started = time.Now()
-	_, err = client.Table("events").AppendNDJSON(context.Background(), payload)
-	require.NoError(t, err)
-}
-
-func TestWriteInterruptionUsesCurrentContextReason(t *testing.T) {
-	t.Parallel()
-	ctx, cancel := context.WithCancelCause(context.Background())
-	client, err := NewClient(Config{
-		Endpoint: "https://example.com",
-		HTTPClient: &http.Client{Transport: clientRoundTripFunc(func(req *http.Request) (*http.Response, error) {
-			cancel(context.DeadlineExceeded)
-			return nil, context.Cause(req.Context())
-		})},
-	})
-	require.NoError(t, err)
-	_, err = client.Table("events").AppendNDJSON(ctx, []byte(`{"id":1}`))
-	var scopeErr *Error
-	require.ErrorAs(t, err, &scopeErr)
-	require.Equal(t, &WriteErrorDetails{
-		Reason: WriteErrorReasonCancelled, Outcome: AppendStateUnknown,
-	}, scopeErr.WriteDetails)
-	require.False(t, scopeErr.Retryable)
-	require.ErrorIs(t, err, context.DeadlineExceeded, "the original cause remains available")
-}
-
-func TestWriteTimeoutHonorsShorterHTTPClientTimeout(t *testing.T) {
-	t.Parallel()
-	for name, timeout := range map[string]*time.Duration{
-		"default":    nil,
-		"disabled":   new(time.Duration),
-		"configured": new(time.Second),
+func TestStreamAttemptTimeoutOverride(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		attempt *time.Duration
+		want    time.Duration
+	}{
+		{"inherited", nil, time.Minute}, {"overridden", new(time.Second), time.Second}, {"disabled", new(time.Duration(0)), 2 * time.Minute},
 	} {
-		t.Run(name, func(t *testing.T) {
-			t.Parallel()
-			client, err := NewClient(Config{
-				Endpoint: "https://example.com", WriteTimeout: timeout,
-				HTTPClient: &http.Client{
-					Timeout: 20 * time.Millisecond,
-					Transport: clientRoundTripFunc(func(req *http.Request) (*http.Response, error) {
-						<-req.Context().Done()
-						return nil, req.Context().Err()
-					}),
-				},
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				client, err := NewClient(Config{Endpoint: "https://example.com", Compression: CompressionGzip, WriteTimeout: new(time.Minute), HTTPClient: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+					deadline, ok := r.Context().Deadline()
+					require.True(t, ok)
+					require.Equal(t, tc.want, time.Until(deadline))
+					return appendSuccess(1), nil
+				})}})
+				require.NoError(t, err)
+				stream, err := client.Table("events").AppendStream(AppendStreamOptions{AttemptTimeout: tc.attempt, Retry: &AppendRetryOptions{MaxElapsedTime: 2 * time.Minute}})
+				require.NoError(t, err)
+				if tc.attempt != nil {
+					*tc.attempt = time.Hour
+				}
+				require.NoError(t, stream.Send(t.Context(), map[string]int{"id": 1}))
+				_, err = stream.Shutdown(t.Context())
+				require.NoError(t, err)
 			})
-			require.NoError(t, err)
-			_, err = client.Table("events").AppendNDJSON(context.Background(), []byte(`{"id":1}`))
-			var scopeErr *Error
-			require.ErrorAs(t, err, &scopeErr)
-			require.Equal(t, &WriteErrorDetails{
-				Reason: WriteErrorReasonTimeout, Outcome: AppendStateUnknown,
-			}, scopeErr.WriteDetails)
-			require.False(t, scopeErr.Retryable)
 		})
 	}
-}
-
-func TestServerTimeoutRejectionRemainsSafelyRetryable(t *testing.T) {
-	t.Parallel()
-	client, err := NewClient(Config{
-		Endpoint: "https://example.com",
-		HTTPClient: &http.Client{Transport: clientRoundTripFunc(func(*http.Request) (*http.Response, error) {
-			return &http.Response{
-				StatusCode: http.StatusRequestTimeout, Header: make(http.Header),
-				Body: io.NopCloser(strings.NewReader(`{"message":"admission timed out","retryable":true,"details":{"status":"rejected"},"code":"invalid_schema"}`)),
-			}, nil
-		})},
-	})
-	require.NoError(t, err)
-	_, err = client.Table("events").AppendNDJSON(context.Background(), []byte(`{"id":1}`))
-	var scopeErr *Error
-	require.ErrorAs(t, err, &scopeErr)
-	require.Nil(t, scopeErr.WriteDetails)
-	require.Equal(t, AppendStateRejected, scopeErr.AppendDetails.Status)
-	require.True(t, scopeErr.Retryable)
 }

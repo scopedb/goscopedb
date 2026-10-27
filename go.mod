@@ -5,7 +5,6 @@ go 1.27.3
 require (
 	github.com/google/uuid v1.6.0
 	github.com/klauspost/compress v1.18.5
-	github.com/lucasepe/codename v0.2.0
 	github.com/stretchr/testify v1.10.0
 	go.uber.org/goleak v1.3.0
 )

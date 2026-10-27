@@ -18,694 +18,234 @@ package scopedb
 
 import (
 	"context"
-	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
-	"net/http/httptest"
-	"sync/atomic"
+	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
 
-func TestClientQueryExecutesAndReturnsRows(t *testing.T) {
-	t.Parallel()
+const finishedResult = `,"result_set":{"format":"json","metadata":{"fields":[{"name":"n","data_type":"int"}],"num_rows":1},"rows":[["42"]]}`
 
-	statementID := uuid.New()
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		require.Equal(t, http.MethodPost, r.Method)
-		require.Equal(t, "/v1/statements", r.URL.Path)
-		var request struct {
-			Format string `json:"format"`
-		}
-		body, err := decodeCompressedRequestBody(r)
-		require.NoError(t, err)
-		require.NoError(t, json.Unmarshal(body, &request))
-		require.Equal(t, "json", request.Format)
-		writeTestJSON(t, w, `{
-			"statement_id":"`+statementID.String()+`",
-			"status":"finished",
-			"created_at":"2026-08-08T00:00:00Z",
-			"progress":{},
-			"result_set":{
-				"metadata":{"fields":[{"name":"ready","data_type":"uint"}],"num_rows":1},
-				"format":"json",
-				"rows":[["1"]]
-			}
-		}`)
-	}))
-	defer server.Close()
-
-	client := newTestClient(t, server.URL)
-	result, err := client.Query(context.Background(), "SELECT 1 AS ready")
-	require.NoError(t, err)
-	row, ok, err := result.First()
-	require.NoError(t, err)
-	require.True(t, ok)
-	require.Equal(t, uint64(1), row["ready"])
+func statementJSON(id uuid.UUID, status, extra string) string {
+	return fmt.Sprintf(`{"statement_id":%q,"created_at":"2026-10-27T00:00:00Z","status":%q%s}`, id.String(), status, extra)
 }
 
-func TestStatementSubmitSendsOnlySupportedConfiguration(t *testing.T) {
-	t.Parallel()
-
-	providedID := uuid.MustParse("01989a4e-4ee2-7e63-87a5-65ac3b5161dc")
-	tests := []struct {
-		name         string
-		statementID  *uuid.UUID
-		maxElapsed   time.Duration
-		maxEstimated time.Duration
-		wantBody     string
-	}{
-		{
-			name:     "default",
-			wantBody: `{"statement":"FROM events","format":"json"}`,
-		},
-		{
-			name:         "configured",
-			statementID:  &providedID,
-			maxElapsed:   time.Minute,
-			maxEstimated: 30 * time.Second,
-			wantBody:     `{"statement_id":"01989a4e-4ee2-7e63-87a5-65ac3b5161dc","statement":"FROM events","max_elapsed_seconds":60,"max_estimated_seconds":30,"format":"json"}`,
-		},
-		{
-			name:         "sub-second limits",
-			maxElapsed:   time.Nanosecond,
-			maxEstimated: 250 * time.Millisecond,
-			wantBody:     `{"statement":"FROM events","max_elapsed_seconds":0.000000001,"max_estimated_seconds":0.25,"format":"json"}`,
-		},
-	}
-	for _, test := range tests {
-		test := test
-		t.Run(test.name, func(t *testing.T) {
-			t.Parallel()
-
-			responseID := uuid.New()
-			if test.statementID != nil {
-				responseID = *test.statementID
-			}
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				body, err := decodeCompressedRequestBody(r)
-				require.NoError(t, err)
-				require.JSONEq(t, test.wantBody, string(body))
-				writeTestJSON(t, w, `{
-					"statement_id":"`+responseID.String()+`",
-					"status":"running",
-					"created_at":"2026-08-08T00:00:00Z",
-					"progress":{}
-				}`)
-			}))
-			defer server.Close()
-
-			client := newTestClient(t, server.URL)
-			statement := client.Statement("FROM events")
-			statement.ID = test.statementID
-			statement.MaxElapsed = test.maxElapsed
-			statement.MaxEstimated = test.maxEstimated
-			handle, err := statement.Submit(context.Background())
-			require.NoError(t, err)
-			require.Equal(t, responseID, handle.ID())
-		})
-	}
-}
-
-func TestStatementHTTPError(t *testing.T) {
-	t.Parallel()
-
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("X-Request-ID", "statement-request")
-		w.WriteHeader(http.StatusBadRequest)
-		writeTestJSON(t, w, `{"code":"invalid_request","message":"invalid statement request"}`)
-	}))
-	defer server.Close()
-
-	client := newTestClient(t, server.URL)
-	_, err := client.Statement("SELECT 1").Submit(t.Context())
-	var failure *Error
-	require.ErrorAs(t, err, &failure)
-	require.Equal(t, "invalid_request", failure.Code)
-	require.Equal(t, "invalid statement request", failure.Message)
-	require.Equal(t, http.StatusBadRequest, failure.HTTPStatus)
-	require.Equal(t, "statement-request", failure.RequestID)
-}
-
-func TestStatementHandleStatusFetchesOnceAndCachesTerminalStatus(t *testing.T) {
-	t.Parallel()
-
-	statementID := uuid.New()
-	var requests atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requests.Add(1)
-		require.Equal(t, http.MethodGet, r.Method)
-		require.Equal(t, "/v1/statements/"+statementID.String(), r.URL.Path)
-		require.Equal(t, "json", r.URL.Query().Get("format"))
-		writeTestJSON(t, w, `{
-			"statement_id":"`+statementID.String()+`",
-			"status":"finished",
-			"created_at":"2026-08-08T00:00:00Z",
-			"progress":{},
-			"result_set":{"metadata":{"fields":[],"num_rows":0},"format":"json","rows":[]}
-		}`)
-	}))
-	defer server.Close()
-
-	client := newTestClient(t, server.URL)
-	handle := client.StatementHandle(statementID)
-	require.Equal(t, statementID, handle.ID())
-	require.Nil(t, handle.Snapshot())
-	require.Zero(t, requests.Load(), "Snapshot must not make a request")
-
-	status, err := handle.Refresh(context.Background())
-	require.NoError(t, err)
-	require.Equal(t, StatementStatusFinished, status.Status)
-	require.Equal(t, int32(1), requests.Load())
-
-	status, err = handle.Refresh(context.Background())
-	require.NoError(t, err)
-	require.Equal(t, StatementStatusFinished, status.Status)
-
-	cancelled, err := handle.Cancel(context.Background())
-	require.NoError(t, err)
-	require.Equal(t, StatementStatusFinished, cancelled.Status)
-	require.Equal(t, int32(1), requests.Load(), "terminal status must be cached")
-	require.Equal(t, StatementStatusFinished, handle.Snapshot().Status)
-}
-
-func TestStatementHandleWaitPollsToFinished(t *testing.T) {
-	t.Parallel()
-
-	statementID := uuid.New()
-	var requests atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		request := requests.Add(1)
-		if request == 1 {
-			writeTestJSON(t, w, `{
-				"statement_id":"`+statementID.String()+`",
-				"status":"running",
-				"created_at":"2026-08-08T00:00:00Z",
-				"progress":{}
-			}`)
-			return
-		}
-		writeTestJSON(t, w, `{
-			"statement_id":"`+statementID.String()+`",
-			"status":"finished",
-			"created_at":"2026-08-08T00:00:00Z",
-			"progress":{},
-			"result_set":{
-				"metadata":{"fields":[{"name":"value","data_type":"string"}],"num_rows":1},
-				"format":"json",
-				"rows":[["done"]]
-			}
-		}`)
-	}))
-	defer server.Close()
-
-	client := newTestClient(t, server.URL)
-	result, err := client.StatementHandle(statementID).Wait(context.Background())
-	require.NoError(t, err)
-	require.Equal(t, int32(2), requests.Load())
-	row, ok, err := result.First()
-	require.NoError(t, err)
-	require.True(t, ok)
-	require.Equal(t, "done", row["value"])
-}
-
-func TestStatementHandleWaitReturnsStatementFailure(t *testing.T) {
-	t.Parallel()
-
-	statementID := uuid.New()
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		writeTestJSON(t, w, `{
-			"statement_id":"`+statementID.String()+`",
-			"status":"failed",
-			"created_at":"2026-08-08T00:00:00Z",
-			"progress":{},
-			"error":{
-				"code":"statement_estimate_limit_exceeded",
-				"message":"structured server message",
-				"details":{"estimated_seconds":42,"max_estimated_seconds":30}
-			}
-		}`)
-	}))
-	defer server.Close()
-
-	client := newTestClient(t, server.URL)
-	_, err := client.StatementHandle(statementID).Wait(context.Background())
-	var scopeDBError *Error
-	require.ErrorAs(t, err, &scopeDBError)
-	require.Equal(t, ErrorKindStatementFailed, scopeDBError.Kind)
-	require.Equal(t, "structured server message", scopeDBError.Message)
-	require.Equal(t, "statement_estimate_limit_exceeded", scopeDBError.Code)
-	require.Equal(t, &StatementErrorDetails{
-		Code:    StatementErrorCodeEstimateLimitExceeded,
-		Message: "structured server message",
-		Details: json.RawMessage(`{"estimated_seconds":42,"max_estimated_seconds":30}`),
-	}, scopeDBError.StatementDetails)
-}
-
-func TestStatementHandleCancelResumesWithoutSnapshot(t *testing.T) {
-	t.Parallel()
-
-	statementID := uuid.New()
-	var requests atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requests.Add(1)
-		require.Equal(t, http.MethodPost, r.Method)
-		require.Equal(t, "/v1/statements/"+statementID.String()+"/cancel", r.URL.Path)
-		require.Equal(t, "json", r.URL.Query().Get("format"))
-		writeTestJSON(t, w, `{
-			"statement_id":"`+statementID.String()+`",
-			"created_at":"2026-08-08T00:00:00Z",
-			"status":"cancelled",
-			"progress":{"scanned_rows":6}
-		}`)
-	}))
-	defer server.Close()
-
-	client := newTestClient(t, server.URL)
-	handle := client.StatementHandle(statementID)
-	cancelled, err := handle.Cancel(context.Background())
-	require.NoError(t, err)
-	require.Equal(t, &StatementSnapshot{
-		ID:        statementID,
-		CreatedAt: time.Date(2026, 8, 8, 0, 0, 0, 0, time.UTC),
-		Status:    StatementStatusCancelled,
-		Progress:  StatementProgress{ScannedRows: 6},
-	}, cancelled)
-	require.Equal(t, cancelled.Status, handle.Snapshot().Status)
-	require.Equal(t, int64(6), handle.Snapshot().Progress.ScannedRows)
-
-	again, err := handle.Cancel(context.Background())
-	require.NoError(t, err)
-	require.Equal(t, cancelled, again)
-
-	_, err = handle.Wait(context.Background())
-	require.ErrorContains(t, err, "cancelled")
-	require.ErrorContains(t, err, statementID.String())
-	require.NotErrorIs(t, err, context.Canceled)
-	require.Equal(t, int32(1), requests.Load(), "terminal cancel result must be cached")
-}
-
-func TestStatementHandleCancelCachesFinishedResult(t *testing.T) {
-	t.Parallel()
-
-	statementID := uuid.New()
-	var requests atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requests.Add(1)
-		require.Equal(t, http.MethodPost, r.Method)
-		require.Equal(t, "/v1/statements/"+statementID.String()+"/cancel", r.URL.Path)
-		writeTestJSON(t, w, `{
-			"statement_id":"`+statementID.String()+`",
-			"status":"finished",
-			"created_at":"2026-08-08T00:00:00Z",
-			"progress":{},
-			"result_set":{
-				"metadata":{"fields":[{"name":"value","data_type":"string"}],"num_rows":1},
-				"format":"json",
-				"rows":[["done"]]
-			}
-		}`)
-	}))
-	defer server.Close()
-
-	client := newTestClient(t, server.URL)
-	handle := client.StatementHandle(statementID)
-	cancelled, err := handle.Cancel(context.Background())
-	require.NoError(t, err)
-	require.Equal(t, StatementStatusFinished, cancelled.Status)
-	require.NotNil(t, handle.Snapshot().ResultSet)
-
-	result, err := handle.Wait(context.Background())
-	require.NoError(t, err)
-	row, found, err := result.First()
-	require.NoError(t, err)
-	require.True(t, found)
-	require.Equal(t, "done", row["value"])
-
-	status, err := handle.Refresh(context.Background())
-	require.NoError(t, err)
-	require.Equal(t, StatementStatusFinished, status.Status)
-	require.Equal(t, int32(1), requests.Load(), "cancel provides the complete result")
-}
-
-func TestStatementHandleCancelCachesFailure(t *testing.T) {
-	t.Parallel()
-
-	statementID := uuid.New()
-	var requests atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requests.Add(1)
-		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/v1/statements/"+statementID.String():
-			writeTestJSON(t, w, `{
-				"statement_id":"`+statementID.String()+`",
-				"status":"running",
-				"created_at":"2026-08-08T00:00:00Z",
-				"progress":{"scanned_rows":11}
-			}`)
-		case r.Method == http.MethodPost && r.URL.Path == "/v1/statements/"+statementID.String()+"/cancel":
-			writeTestJSON(t, w, `{
-				"statement_id":"`+statementID.String()+`",
-				"status":"failed",
-				"created_at":"2026-08-08T00:00:00Z",
-				"progress":{"scanned_rows":12,"skipped_rows":3},
-				"error":{
-					"code":"statement_estimate_limit_exceeded",
-					"message":"estimated duration exceeds limit",
-					"details":{"estimated_seconds":12,"max_estimated_seconds":10}
-				}
-			}`)
-		default:
-			http.Error(w, "unexpected request", http.StatusNotFound)
-		}
-	}))
-	defer server.Close()
-
-	client := newTestClient(t, server.URL)
-	handle := client.StatementHandle(statementID)
-	status, err := handle.Refresh(context.Background())
-	require.NoError(t, err)
-	require.Equal(t, StatementStatusRunning, status.Status)
-	require.Equal(t, int64(11), handle.Snapshot().Progress.ScannedRows)
-
-	cancelled, err := handle.Cancel(context.Background())
-	require.NoError(t, err)
-	require.Equal(t, StatementStatusFailed, cancelled.Status)
-	require.Equal(t, "estimated duration exceeds limit", cancelled.Error.Message)
-	require.Equal(t, cancelled.Status, handle.Snapshot().Status)
-	require.Equal(t, int64(12), handle.Snapshot().Progress.ScannedRows)
-	require.Equal(t, int64(3), handle.Snapshot().Progress.SkippedRows)
-
-	_, err = handle.Wait(context.Background())
-	var scopeDBError *Error
-	require.ErrorAs(t, err, &scopeDBError)
-	require.Equal(t, ErrorKindStatementFailed, scopeDBError.Kind)
-	require.Equal(t, "statement_estimate_limit_exceeded", scopeDBError.Code)
-	require.Equal(t, "estimated duration exceeds limit", scopeDBError.Message)
-	require.Equal(t, &StatementErrorDetails{
-		Code:    StatementErrorCodeEstimateLimitExceeded,
-		Message: "estimated duration exceeds limit",
-		Details: json.RawMessage(`{"estimated_seconds":12,"max_estimated_seconds":10}`),
-	}, scopeDBError.StatementDetails)
-	require.Equal(t, int32(2), requests.Load(), "cancel provides the complete failure")
-}
-
-func TestStatementProgressIncludesComputeAndSkippedWork(t *testing.T) {
-	t.Parallel()
-
-	statementID := uuid.New()
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		writeTestJSON(t, w, `{
-			"statement_id":"`+statementID.String()+`",
-			"status":"running",
-			"created_at":"2026-08-08T00:00:00Z",
-			"progress":{
-				"compute_seconds":0.125,
-				"skipped_partitions":1,
-				"skipped_rows":2,
-				"skipped_compressed_bytes":3,
-				"skipped_uncompressed_bytes":4
-			}
-		}`)
-	}))
-	defer server.Close()
-
-	client := newTestClient(t, server.URL)
-	handle := client.StatementHandle(statementID)
-	_, err := handle.Refresh(context.Background())
-	require.NoError(t, err)
-	require.Equal(t, &StatementProgress{
-		ComputeSeconds:           0.125,
-		SkippedPartitions:        1,
-		SkippedRows:              2,
-		SkippedCompressedBytes:   3,
-		SkippedUncompressedBytes: 4,
-	}, &handle.Snapshot().Progress)
-}
-
-func TestStatementStatusRejectsMalformedStructuredFailures(t *testing.T) {
-	t.Parallel()
-
-	tests := map[string]string{
-		"missing error":    `null`,
-		"non-object error": `[]`,
-		"missing code":     `{"message":"failed"}`,
-		"missing message":  `{"code":"statement_failed"}`,
-	}
-	for name, statementError := range tests {
-		name, statementError := name, statementError
-		t.Run(name, func(t *testing.T) {
-			t.Parallel()
-
-			statementID := uuid.New()
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-				writeTestJSON(t, w, `{
-					"statement_id":"`+statementID.String()+`",
-					"status":"failed",
-					"created_at":"2026-08-08T00:00:00Z",
-					"progress":{},
-					"error":`+statementError+`
-				}`)
-			}))
-			defer server.Close()
-
-			client := newTestClient(t, server.URL)
-			_, err := client.StatementHandle(statementID).Refresh(context.Background())
-			var scopeDBError *Error
-			require.ErrorAs(t, err, &scopeDBError)
-			require.Equal(t, ErrorKindUnexpected, scopeDBError.Kind)
-		})
-	}
-}
-
-func TestStatementStatusRejectsMalformedFinishedResultsWithoutPanicking(t *testing.T) {
-	t.Parallel()
-
-	tests := map[string]string{
-		"missing result set": ``,
-		"missing metadata":   `,"result_set":{"format":"json","rows":[]}`,
-		"unsupported format": `,"result_set":{"metadata":{"fields":[],"num_rows":0},"format":"arrow","rows":[]}`,
-		"null field":         `,"result_set":{"metadata":{"fields":[null],"num_rows":0},"format":"json","rows":[]}`,
-		"missing data type":  `,"result_set":{"metadata":{"fields":[{"name":"v"}],"num_rows":0},"format":"json","rows":[]}`,
-		"unknown data type":  `,"result_set":{"metadata":{"fields":[{"name":"v","data_type":"unsigned"}],"num_rows":0},"format":"json","rows":[]}`,
-	}
-	for name, resultSet := range tests {
-		name, resultSet := name, resultSet
-		t.Run(name, func(t *testing.T) {
-			t.Parallel()
-
-			statementID := uuid.New()
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-				writeTestJSON(t, w, `{
-					"statement_id":"`+statementID.String()+`",
-					"status":"finished",
-					"created_at":"2026-08-08T00:00:00Z",
-					"progress":{}`+resultSet+`
-				}`)
-			}))
-			defer server.Close()
-
-			client := newTestClient(t, server.URL)
-			require.NotPanics(t, func() {
-				_, err := client.StatementHandle(statementID).Refresh(context.Background())
-				var scopeDBError *Error
-				require.ErrorAs(t, err, &scopeDBError)
-				require.Equal(t, ErrorKindUnexpected, scopeDBError.Kind)
-			})
-		})
-	}
-}
-
-func TestMalformedFinishedRowsReturnResultErrorsWithoutPanicking(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name      string
-		metadata  string
-		rows      string
-		assertErr func(*testing.T, *ResultSet)
-	}{
-		{
-			name:     "malformed rows",
-			metadata: `{"fields":[],"num_rows":0}`,
-			rows:     `{}`,
-			assertErr: func(t *testing.T, result *ResultSet) {
-				_, err := result.RawRows()
-				require.Error(t, err)
-			},
-		},
-		{
-			name:     "null rows",
-			metadata: `{"fields":[],"num_rows":0}`,
-			rows:     `null`,
-			assertErr: func(t *testing.T, result *ResultSet) {
-				_, err := result.RawRows()
-				require.ErrorContains(t, err, "must be a JSON array")
-			},
-		},
-		{
-			name:     "row count mismatch",
-			metadata: `{"fields":[],"num_rows":1}`,
-			rows:     `[]`,
-			assertErr: func(t *testing.T, result *ResultSet) {
-				_, err := result.RawRows()
-				require.ErrorContains(t, err, "result row count mismatch")
-			},
-		},
-		{
-			name:     "field count mismatch",
-			metadata: `{"fields":[{"name":"v","data_type":"int"}],"num_rows":1}`,
-			rows:     `[[]]`,
-			assertErr: func(t *testing.T, result *ResultSet) {
-				_, err := result.ToValues()
-				require.ErrorContains(t, err, "schema length does not match record length")
-			},
-		},
-	}
-	for _, test := range tests {
-		test := test
-		t.Run(test.name, func(t *testing.T) {
-			t.Parallel()
-
-			statementID := uuid.New()
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-				writeTestJSON(t, w, `{
-					"statement_id":"`+statementID.String()+`",
-					"status":"finished",
-					"created_at":"2026-08-08T00:00:00Z",
-					"progress":{},
-					"result_set":{"metadata":`+test.metadata+`,"format":"json","rows":`+test.rows+`}
-				}`)
-			}))
-			defer server.Close()
-
-			client := newTestClient(t, server.URL)
-			require.NotPanics(t, func() {
-				handle := client.StatementHandle(statementID)
-				_, err := handle.Refresh(context.Background())
-				require.NoError(t, err)
-				result := handle.Snapshot().ResultSet
-				require.NotNil(t, result)
-				test.assertErr(t, result)
-			})
-		})
-	}
-}
-
-func newTestClient(t *testing.T, endpoint string) *Client {
-	t.Helper()
-	client, err := NewClient(Config{Endpoint: endpoint})
-	require.NoError(t, err)
-	t.Cleanup(client.Close)
-	return client
-}
-
-func writeTestJSON(t *testing.T, w http.ResponseWriter, body string) {
-	t.Helper()
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	_, err := w.Write([]byte(body))
-	require.NoError(t, err)
-}
-
-func TestStatementCancelWinsOverStaleRefresh(t *testing.T) {
-	for _, terminal := range []StatementStatus{StatementStatusCancelled, StatementStatusFinished, StatementStatusFailed} {
-		t.Run(string(terminal), func(t *testing.T) {
+func TestStatementResumesWithoutResubmission(t *testing.T) {
+	for _, submitAndWait := range []bool{true, false} {
+		t.Run(fmt.Sprint(submitAndWait), func(t *testing.T) {
 			id := uuid.New()
-			started, release := make(chan struct{}, 4), make(chan struct{})
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				status := terminal
-				if r.Method == http.MethodGet {
-					started <- struct{}{}
-					<-release
-					status = StatementStatusRunning
+			submissions, polls := 0, 0
+			client := testClient(t, func(r *http.Request) (*http.Response, error) {
+				if r.Method == http.MethodPost {
+					submissions++
+					body, err := decodeCompressedRequestBody(r)
+					require.NoError(t, err)
+					require.JSONEq(t, `{"statement_id":"`+id.String()+`","statement":"FROM staging INSERT INTO events","format":"json","max_elapsed_seconds":0.25}`, string(body))
+					return jsonResponse(200, statementJSON(id, "running", "")), nil
 				}
-				response := map[string]any{
-					"statement_id": id, "created_at": "2026-10-23T00:00:00Z",
-					"status": status, "progress": map[string]int{"scanned_rows": 7},
+				require.Equal(t, "/v1/statements/"+id.String(), r.URL.Path)
+				require.Equal(t, "json", r.URL.Query().Get("format"))
+				polls++
+				if polls == 1 {
+					resp := jsonResponse(503, `{"code":"unavailable","message":"poll failed","retryable":true,"details":{"phase":"poll"}}`)
+					resp.Header.Set("X-Request-ID", "poll-request")
+					resp.Header.Set("Retry-After", "2")
+					return resp, nil
 				}
-				if status == StatementStatusFinished {
-					response["result_set"] = json.RawMessage(`{"metadata":{"fields":[{"name":"n","data_type":"int"}],"num_rows":1},"format":"json","rows":[["9007199254740993"]]}`)
-				}
-				if status == StatementStatusFailed {
-					response["error"] = json.RawMessage(`{"code":"statement_failed","message":"original failure","details":{"n":9007199254740993}}`)
-				}
-				writeJSONValue(t, w, response)
-			}))
-			defer server.Close()
-			handle := newTestClient(t, server.URL).StatementHandle(id)
-			finished := make(chan *StatementSnapshot, 4)
-			for range 4 {
-				go func() {
-					snapshot, err := handle.Refresh(t.Context())
-					if err != nil {
-						t.Error(err)
-					}
-					finished <- snapshot
-				}()
+				return jsonResponse(200, statementJSON(id, "finished", finishedResult)), nil
+			})
+			statement := client.Statement("FROM staging INSERT INTO events")
+			statement.ID, statement.MaxElapsed = &id, 250*time.Millisecond
+			var err error
+			if submitAndWait {
+				_, err = statement.Execute(t.Context())
+			} else {
+				handle, submitErr := statement.Submit(t.Context())
+				require.NoError(t, submitErr)
+				_, err = handle.Wait(t.Context())
 			}
-			for range 4 {
-				<-started
-			}
-			cancelled, err := handle.Cancel(t.Context())
-			close(release)
+			failure := apiError(t, err)
+			require.Equal(t, !submitAndWait, failure.Retryable)
+			require.Equal(t, id, *failure.StatementID)
+			require.Equal(t, "unavailable", failure.Code)
+			require.Equal(t, "poll-request", failure.RequestID)
+			require.Equal(t, 2*time.Second, failure.RetryAfter)
+			require.JSONEq(t, `{"phase":"poll"}`, string(failure.Details))
+			result, err := client.StatementHandle(*failure.StatementID).Wait(t.Context())
 			require.NoError(t, err)
-			require.Equal(t, terminal, cancelled.Status)
-			for range 4 {
-				require.Equal(t, terminal, (<-finished).Status)
+			row, found, err := result.First()
+			require.NoError(t, err)
+			require.True(t, found)
+			require.Equal(t, int64(42), row["n"])
+			require.Equal(t, 1, submissions)
+		})
+	}
+}
+
+func TestStatementSubmissionOutcome(t *testing.T) {
+	lost := errors.New("acknowledgement lost")
+	for _, tc := range []struct {
+		name      string
+		status    int
+		body      string
+		cause     error
+		knownID   bool
+		code      string
+		retryable bool
+	}{
+		{name: "lost acknowledgement", cause: lost, knownID: true, code: "statement_submission_outcome_unknown"},
+		{name: "gateway", status: 503, body: "unavailable", code: "statement_submission_outcome_unknown"},
+		{name: "invalid acknowledgement", status: 200, body: `{}`, code: "statement_submission_outcome_unknown"},
+		{name: "mismatched ID", status: 200, body: statementJSON(uuid.New(), "running", ""), knownID: true},
+		{name: "confirmed rejection", status: 503, body: `{"code":"busy","message":"rejected","retryable":true}`, code: "busy", retryable: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client := testClient(t, func(*http.Request) (*http.Response, error) {
+				if tc.cause != nil {
+					return nil, tc.cause
+				}
+				return jsonResponse(tc.status, tc.body), nil
+			})
+			statement := client.Statement("FROM staging INSERT INTO events")
+			id := uuid.New()
+			if tc.knownID {
+				statement.ID = &id
 			}
-			cancelled.Status = StatementStatusPending
-			cancelled.Progress.ScannedRows = 999
-			if cancelled.ResultSet != nil {
-				cancelled.ResultSet.Schema[0].Name = "changed"
+			_, err := statement.Submit(t.Context())
+			failure := apiError(t, err)
+			require.Equal(t, tc.code, failure.Code)
+			require.Equal(t, tc.retryable, failure.Retryable)
+			if tc.knownID {
+				require.Equal(t, id, *failure.StatementID)
+			} else {
+				require.Nil(t, failure.StatementID)
 			}
-			if cancelled.Error != nil {
-				cancelled.Error.Message = "changed"
-				cancelled.Error.Details[0] = '['
-			}
-			snapshot := handle.Snapshot()
-			require.Equal(t, terminal, snapshot.Status)
-			require.EqualValues(t, 7, snapshot.Progress.ScannedRows)
-			result, err := handle.Wait(t.Context())
-			switch terminal {
-			case StatementStatusCancelled:
-				require.ErrorIs(t, err, ErrStatementCancelled)
-				require.NotErrorIs(t, err, context.Canceled)
-			case StatementStatusFinished:
-				require.NoError(t, err)
-				row, ok, err := result.First()
-				require.NoError(t, err)
-				require.True(t, ok)
-				require.Equal(t, int64(9007199254740993), row["n"])
-			case StatementStatusFailed:
-				require.EqualError(t, err, "original failure")
-				require.JSONEq(t, `{"n":9007199254740993}`, string(snapshot.Error.Details))
-			case StatementStatusPending, StatementStatusRunning:
-				t.Fatal("expected a terminal snapshot")
+			if tc.cause != nil {
+				require.ErrorIs(t, err, tc.cause)
 			}
 		})
 	}
 }
 
-func TestStatementRejectsMismatchedResponseID(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		writeJSONValue(t, w, map[string]any{
-			"statement_id": uuid.New(), "created_at": "2026-10-23T00:00:00Z", "status": "running",
-		})
-	}))
-	defer server.Close()
-	client := newTestClient(t, server.URL)
+func TestStatementLocalCancellationPreservesRecoveryID(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
 	id := uuid.New()
-	statement := client.Statement("SELECT 1")
-	statement.ID = &id
-	_, err := statement.Submit(t.Context())
-	require.ErrorContains(t, err, "ID does not match")
-	handle := client.StatementHandle(id)
-	_, err = handle.Refresh(t.Context())
-	require.ErrorContains(t, err, "ID does not match")
-	_, err = handle.Cancel(t.Context())
-	require.ErrorContains(t, err, "ID does not match")
-	require.Nil(t, handle.Snapshot())
+	client := testClient(t, func(r *http.Request) (*http.Response, error) {
+		if r.Method == http.MethodPost {
+			return jsonResponse(200, statementJSON(id, "running", "")), nil
+		}
+		cancel()
+		return nil, r.Context().Err()
+	})
+	_, err := client.Query(ctx, "SELECT 1")
+	require.ErrorIs(t, err, context.Canceled)
+	failure := apiError(t, err)
+	require.Equal(t, id, *failure.StatementID)
+	require.False(t, failure.Retryable)
+}
+
+func TestStatementTerminalWinsOverInFlightRequest(t *testing.T) {
+	for _, tc := range []struct {
+		operation, late, terminal, extra string
+	}{
+		{"wait", "http error", "cancelled", ""},
+		{"refresh", "stale success", "finished", finishedResult},
+		{"cancel", "transport error", "failed", `,"error":{"code":"statement_failed","message":"execution failed","details":{"phase":"execute"}}`},
+	} {
+		t.Run(tc.operation+"/"+tc.late, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				id := uuid.New()
+				started, release := make(chan struct{}), make(chan struct{})
+				calls := 0
+				client := testClient(t, func(*http.Request) (*http.Response, error) {
+					calls++
+					if calls == 1 {
+						close(started)
+						<-release
+						switch tc.late {
+						case "http error":
+							return jsonResponse(503, `{"message":"stale failure"}`), nil
+						case "transport error":
+							return nil, errors.New("connection lost")
+						default:
+							return jsonResponse(200, statementJSON(id, "running", "")), nil
+						}
+					}
+					return jsonResponse(200, statementJSON(id, tc.terminal, tc.extra)), nil
+				})
+				handle := client.StatementHandle(id)
+				done := make(chan error, 1)
+				go func() {
+					var err error
+					switch tc.operation {
+					case "wait":
+						_, err = handle.Wait(t.Context())
+					case "refresh":
+						_, err = handle.Refresh(t.Context())
+					case "cancel":
+						_, err = handle.Cancel(t.Context())
+					}
+					done <- err
+				}()
+				<-started
+				terminal, err := handle.Cancel(t.Context())
+				close(release)
+				require.NoError(t, err)
+				if tc.operation == "wait" {
+					require.ErrorIs(t, <-done, ErrStatementCancelled)
+				} else {
+					require.NoError(t, <-done)
+				}
+				terminal.Status = StatementStatusPending
+				if terminal.Error != nil {
+					terminal.Error.Details[0] = '['
+				}
+				if terminal.ResultSet != nil {
+					terminal.ResultSet.Schema[0].Name = "changed"
+				}
+				result, err := handle.Wait(t.Context())
+				switch tc.terminal {
+				case "cancelled":
+					require.ErrorIs(t, err, ErrStatementCancelled)
+					require.NotErrorIs(t, err, context.Canceled)
+				case "failed":
+					failure := apiError(t, err)
+					require.Equal(t, "execution failed", failure.Message)
+					require.JSONEq(t, `{"phase":"execute"}`, string(failure.StatementDetails.Details))
+				case "finished":
+					require.NoError(t, err)
+					row, found, err := result.First()
+					require.NoError(t, err)
+					require.True(t, found)
+					require.Equal(t, int64(42), row["n"])
+				}
+				require.Equal(t, StatementStatus(tc.terminal), handle.Snapshot().Status)
+				require.Equal(t, 2, calls, "terminal observations must remain cached")
+			})
+		})
+	}
+}
+
+func TestStatementRejectsIncompleteOrMismatchedResponses(t *testing.T) {
+	id := uuid.New()
+	for _, body := range []string{
+		statementJSON(uuid.New(), "running", ""),
+		statementJSON(id, "failed", ""),
+		statementJSON(id, "finished", ""),
+		statementJSON(id, "finished", `,"result_set":{"format":"json","metadata":{"fields":[null],"num_rows":0},"rows":[]}`),
+		statementJSON(id, "finished", strings.Replace(finishedResult, `"int"`, `"unsigned"`, 1)),
+	} {
+		client := testClient(t, func(*http.Request) (*http.Response, error) { return jsonResponse(200, body), nil })
+		handle := client.StatementHandle(id)
+		_, err := handle.Refresh(t.Context())
+		require.Equal(t, ErrorKindUnexpected, apiError(t, err).Kind)
+		require.Nil(t, handle.Snapshot())
+	}
 }

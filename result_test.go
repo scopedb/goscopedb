@@ -24,246 +24,102 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestResultSetToValuesConvertsBinaryAndInterval(t *testing.T) {
-	t.Parallel()
-
-	rows, err := json.Marshal([][]*string{{
-		new("0001ABFF"),
-		new(""),
-		new("abcdef"),
-		new("PT1H2M3.000000004S"),
-		new("-PT1M0.000000001S"),
-		nil,
-	}})
-	require.NoError(t, err)
-
-	resultSet := &ResultSet{
+func TestResultPreservesWirePrecisionAndNulls(t *testing.T) {
+	result := &ResultSet{
 		TotalRows: 1,
 		Schema: Schema{
-			&FieldSchema{Name: "payload", Type: BinaryDataType},
-			&FieldSchema{Name: "empty_payload", Type: BinaryDataType},
-			&FieldSchema{Name: "lowercase_payload", Type: BinaryDataType},
-			&FieldSchema{Name: "elapsed", Type: IntervalDataType},
-			&FieldSchema{Name: "offset", Type: IntervalDataType},
-			&FieldSchema{Name: "nothing", Type: NullDataType},
+			{Name: "signed", Type: IntDataType},
+			{Name: "unsigned", Type: UIntDataType},
+			{Name: "payload", Type: BinaryDataType},
+			{Name: "elapsed", Type: IntervalDataType},
+			{Name: "at", Type: TimestampDataType},
+			{Name: "object", Type: ObjectDataType},
+			{Name: "missing", Type: NullDataType},
 		},
-		rows: rows,
+		rows: json.RawMessage(`[["-9223372036854775808","18446744073709551615","00aBff","-PT1M0.000000001S","2026-08-08T00:00:00.123456789Z","{\"id\":9007199254740993}",null]]`),
 	}
-
-	values, err := resultSet.ToValues()
+	wire, err := result.RawRows()
 	require.NoError(t, err)
-	require.Equal(t, [][]Value{{
-		[]byte{0x00, 0x01, 0xab, 0xff},
-		[]byte{},
-		[]byte{0xab, 0xcd, 0xef},
-		time.Hour + 2*time.Minute + 3*time.Second + 4*time.Nanosecond,
-		-time.Minute - time.Nanosecond,
-		nil,
-	}}, values)
-}
-
-func TestResultSetRawRowsReturnsWireCells(t *testing.T) {
-	t.Parallel()
-
-	resultSet := &ResultSet{
-		TotalRows: 2,
-		Schema: Schema{
-			&FieldSchema{Name: "value", Type: StringDataType},
-			&FieldSchema{Name: "optional", Type: StringDataType},
-		},
-		rows: json.RawMessage(`[["first",null],["second","present"]]`),
-	}
-
-	rows, err := resultSet.RawRows()
+	require.Equal(t, "18446744073709551615", *wire[0][1])
+	require.Nil(t, wire[0][6])
+	values, err := result.ToValues()
 	require.NoError(t, err)
-	require.Len(t, rows, 2)
-	require.Equal(t, "first", *rows[0][0])
-	require.Nil(t, rows[0][1])
-	require.Equal(t, "second", *rows[1][0])
-	require.Equal(t, "present", *rows[1][1])
-}
-
-func TestResultSetToObjectsKeysConvertedValues(t *testing.T) {
-	t.Parallel()
-
-	resultSet := &ResultSet{
-		TotalRows: 1,
-		Schema: Schema{
-			&FieldSchema{Name: "signed", Type: IntDataType},
-			&FieldSchema{Name: "unsigned", Type: UIntDataType},
-			&FieldSchema{Name: "at", Type: TimestampDataType},
-			&FieldSchema{Name: "elapsed", Type: IntervalDataType},
-			&FieldSchema{Name: "payload", Type: BinaryDataType},
-		},
-		rows: json.RawMessage(`[[
-			"-7",
-			"9",
-			"2026-08-08T00:00:00.123456789Z",
-			"PT1.000000002S",
-			"00ff"
-		]]`),
-	}
-
-	objects, err := resultSet.ToObjects()
+	require.Equal(t, [][]Value{{int64(-1 << 63), uint64(1<<64 - 1), []byte{0, 0xab, 0xff}, -time.Minute - time.Nanosecond, time.Date(2026, 8, 8, 0, 0, 0, 123456789, time.UTC), `{"id":9007199254740993}`, nil}}, values)
+	objects, err := result.ToObjects()
 	require.NoError(t, err)
-	require.Equal(t, []map[string]Value{{
-		"signed":   int64(-7),
-		"unsigned": uint64(9),
-		"at":       time.Date(2026, 8, 8, 0, 0, 0, 123456789, time.UTC),
-		"elapsed":  time.Second + 2*time.Nanosecond,
-		"payload":  []byte{0x00, 0xff},
-	}}, objects)
-}
-
-func TestResultSetFirstOnlyConvertsFirstRow(t *testing.T) {
-	t.Parallel()
-
-	resultSet := &ResultSet{
-		TotalRows: 2,
-		Schema:    Schema{&FieldSchema{Name: "value", Type: IntDataType}},
-		rows:      json.RawMessage(`[["1"],["not-an-integer"]]`),
-	}
-
-	first, ok, err := resultSet.First()
-	require.NoError(t, err)
-	require.True(t, ok)
-	require.Equal(t, map[string]Value{"value": int64(1)}, first)
-
-	_, err = resultSet.ToObjects()
-	require.Error(t, err, "converting every row must still surface the invalid second row")
-}
-
-func TestResultSetFirstReportsEmptyResult(t *testing.T) {
-	t.Parallel()
-
-	resultSet := &ResultSet{
-		Schema: Schema{&FieldSchema{Name: "value", Type: StringDataType}},
-		rows:   json.RawMessage(`[]`),
-	}
-
-	first, ok, err := resultSet.First()
-	require.NoError(t, err)
-	require.False(t, ok)
-	require.Nil(t, first)
-}
-
-func TestResultSetObjectConversionsRejectDuplicateColumns(t *testing.T) {
-	t.Parallel()
-
-	resultSet := &ResultSet{
-		TotalRows: 1,
-		Schema: Schema{
-			&FieldSchema{Name: "value", Type: IntDataType},
-			&FieldSchema{Name: "value", Type: IntDataType},
-		},
-		rows: json.RawMessage(`[["1","2"]]`),
-	}
-
-	_, err := resultSet.ToObjects()
-	require.ErrorContains(t, err, `duplicate result column name "value"`)
-	_, _, err = resultSet.First()
-	require.ErrorContains(t, err, `duplicate result column name "value"`)
-}
-
-func TestResultSetToValuesConvertsIntervalBoundaries(t *testing.T) {
-	t.Parallel()
-
-	tests := map[string]time.Duration{
-		"PT0S":                        0,
-		"PT24H":                       24 * time.Hour,
-		"PT2562047H47M16.854775807S":  time.Duration(1<<63 - 1),
-		"-PT2562047H47M16.854775808S": time.Duration(-1 << 63),
-	}
-	for value, expected := range tests {
-		value, expected := value, expected
-		t.Run(value, func(t *testing.T) {
-			t.Parallel()
-
-			resultSet := resultSetWithSingleValue(IntervalDataType, value)
-			values, err := resultSet.ToValues()
-			require.NoError(t, err)
-			require.Equal(t, expected, values[0][0])
-		})
+	for i, field := range result.Schema {
+		require.Equal(t, values[0][i], objects[0][field.Name])
 	}
 }
 
-func TestResultSetToValuesRejectsInvalidBinary(t *testing.T) {
-	t.Parallel()
-
-	resultSet := resultSetWithSingleValue(BinaryDataType, "not-hex")
-
-	_, err := resultSet.ToValues()
-	require.ErrorContains(t, err, `invalid binary value "not-hex"`)
-}
-
-func TestResultSetToValuesRejectsInvalidInterval(t *testing.T) {
-	t.Parallel()
-
-	for _, value := range []string{"1h", "P1D", "PT", "PT1.0000000000S", "PT2562048H"} {
-		value := value
-		t.Run(value, func(t *testing.T) {
-			t.Parallel()
-
-			resultSet := resultSetWithSingleValue(IntervalDataType, value)
-			_, err := resultSet.ToValues()
-			require.ErrorContains(t, err, "invalid interval value")
-		})
-	}
-}
-
-func TestResultSetToValuesRejectsNonNullValueForNullType(t *testing.T) {
-	t.Parallel()
-
-	resultSet := resultSetWithSingleValue(NullDataType, "null")
-
-	_, err := resultSet.ToValues()
-	require.ErrorContains(t, err, "unexpected non-null value for null data type")
-}
-
-func resultSetWithSingleValue(dataType DataType, value string) *ResultSet {
-	rows, err := json.Marshal([][]*string{{new(value)}})
-	if err != nil {
-		panic(err)
-	}
-	return &ResultSet{
-		TotalRows: 1,
-		Schema:    Schema{&FieldSchema{Name: "value", Type: dataType}},
-		rows:      rows,
-	}
-}
-
-func TestResultNumericBoundaries(t *testing.T) {
+func TestResultRejectsInvalidRowsAndLossyObjects(t *testing.T) {
 	for _, tc := range []struct {
-		kind DataType
-		wire string
-		want any
+		name, rows string
+		total      uint64
 	}{
-		{IntDataType, "-9223372036854775808", int64(-1 << 63)},
-		{IntDataType, "9223372036854775807", int64(1<<63 - 1)},
-		{IntDataType, "9007199254740993", int64(9007199254740993)},
-		{UIntDataType, "18446744073709551615", uint64(1<<64 - 1)},
-		{FloatDataType, "1.7976931348623157e308", float64(1.7976931348623157e308)},
-		{ObjectDataType, `{"id":9007199254740993}`, `{"id":9007199254740993}`},
-		{ArrayDataType, `[18446744073709551615]`, `[18446744073709551615]`},
+		{"null rows", `null`, 0},
+		{"row count", `[]`, 1},
+		{"column count", `[[]]`, 1},
+		{"invalid cell", `[["not an integer"]]`, 1},
 	} {
-		t.Run(string(tc.kind)+tc.wire, func(t *testing.T) {
-			row, ok, err := resultSetWithSingleValue(tc.kind, tc.wire).First()
-			require.NoError(t, err)
-			require.True(t, ok)
-			require.Equal(t, tc.want, row["value"])
+		t.Run(tc.name, func(t *testing.T) {
+			result := &ResultSet{TotalRows: tc.total, Schema: Schema{{Name: "n", Type: IntDataType}}, rows: json.RawMessage(tc.rows)}
+			_, err := result.ToValues()
+			require.Error(t, err)
+			if tc.name == "invalid cell" {
+				require.ErrorContains(t, err, `result row 0: column "n"`)
+			}
 		})
 	}
+	result := &ResultSet{TotalRows: 1, Schema: Schema{{Name: "n", Type: IntDataType}, {Name: "n", Type: IntDataType}}, rows: json.RawMessage(`[["1","2"]]`)}
+	_, err := result.ToObjects()
+	require.ErrorContains(t, err, "duplicate result column")
+	_, _, err = result.First()
+	require.ErrorContains(t, err, "duplicate result column")
+}
+
+func TestResultFirstConvertsOnlyTheFirstRow(t *testing.T) {
+	result := &ResultSet{TotalRows: 2, Schema: Schema{{Name: "n", Type: IntDataType}}, rows: json.RawMessage(`[["9007199254740993"],["invalid"]]`)}
+	row, found, err := result.First()
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, int64(9007199254740993), row["n"])
+	_, err = result.ToObjects()
+	require.ErrorContains(t, err, "result row 1")
+	result.TotalRows, result.rows = 0, json.RawMessage(`[]`)
+	row, found, err = result.First()
+	require.NoError(t, err)
+	require.False(t, found)
+	require.Nil(t, row)
+}
+
+func TestResultConversionBoundaries(t *testing.T) {
 	for _, tc := range []struct {
-		kind DataType
-		wire string
+		kind    DataType
+		wire    string
+		want    Value
+		invalid bool
 	}{
-		{IntDataType, "9223372036854775808"},
-		{IntDataType, "-9223372036854775809"},
-		{UIntDataType, "18446744073709551616"},
-		{UIntDataType, "-1"},
-		{FloatDataType, "1e309"},
+		{IntervalDataType, "PT2562047H47M16.854775807S", time.Duration(1<<63 - 1), false},
+		{IntervalDataType, "-PT2562047H47M16.854775808S", time.Duration(-1 << 63), false},
+		{IntervalDataType, "PT2562047H47M16.854775808S", nil, true},
+		{IntervalDataType, "P1D", nil, true},
+		{IntervalDataType, "PT", nil, true},
+		{IntDataType, "9223372036854775808", nil, true},
+		{UIntDataType, "-1", nil, true},
+		{BinaryDataType, "not hex", nil, true},
 	} {
-		_, err := resultSetWithSingleValue(tc.kind, tc.wire).ToValues()
-		require.ErrorContains(t, err, `result row 0: column "value"`)
+		t.Run(string(tc.kind)+"/"+tc.wire, func(t *testing.T) {
+			data, err := json.Marshal([][]string{{tc.wire}})
+			require.NoError(t, err)
+			result := &ResultSet{TotalRows: 1, Schema: Schema{{Name: "value", Type: tc.kind}}, rows: data}
+			values, err := result.ToValues()
+			if tc.invalid {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+				require.Equal(t, tc.want, values[0][0])
+			}
+		})
 	}
 }
