@@ -351,6 +351,8 @@ if errors.As(err, &scopeErr) {
 }
 ```
 
+HTTP error bodies and Append acknowledgements are limited to 64 KiB after transport decompression. The SDK reads at most one extra byte to detect overflow, closes the response without draining the remainder, and discards the oversized body instead of retaining it in errors or `Stats().LastFailure`. Detect this with `errors.Is(err, scopedb.ErrResponseTooLarge)`; HTTP status and diagnostic headers (`RequestID` and `RetryAfter`) remain available. An oversized Append acknowledgement has an unknown commit outcome; HTTP 429 remains a confirmed rejection. Successful Statement results and Catalog definitions are outside this diagnostic limit.
+
 The main kinds are `ErrorKindConfigInvalid`, `ErrorKindStatementFailed`, `ErrorKindCatalogFailed`, `ErrorKindAppendRowsFailed`, and `ErrorKindUnexpected`. Use `errors.Is` and `errors.As` to inspect the underlying cause. Append streams preserve the last attempt's `Code` and `Details` in returned errors and `Stats().LastFailure`; the delivery outcome remains unknown if an earlier attempt may have committed.
 
 `Retryable` classifies a temporary failure; it does not prove that replay is safe. For direct appends, require both `Retryable` and `AppendDetails.Status == scopedb.AppendStateRejected` before retrying, and honor `RetryAfter` within an application-owned budget. An unknown outcome may already be committed and needs reconciliation. Avoid wrapping a retrying stream in a second retry loop.

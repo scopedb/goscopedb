@@ -509,10 +509,10 @@ func TestAppendExpiredDeliveryBudgetIsUnsent(t *testing.T) {
 	})
 	require.NoError(t, err)
 	defer client.Close()
-	stream, err := client.Table("events").AppendStream(AppendStreamOptions{
-		Retry: &AppendRetryOptions{MaxElapsedTime: time.Nanosecond},
-	})
+	stream, err := client.Table("events").AppendStream(AppendStreamOptions{})
 	require.NoError(t, err)
+	// Force synchronous expiration instead of relying on platform clock resolution.
+	stream.config.retry.MaxElapsedTime = 0
 	require.NoError(t, stream.Send(t.Context(), map[string]int{"id": 1}))
 	report, err := stream.Shutdown(t.Context())
 	require.ErrorIs(t, err, context.DeadlineExceeded)

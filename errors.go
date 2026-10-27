@@ -29,6 +29,12 @@ import (
 	"github.com/google/uuid"
 )
 
+const maxErrorResponseBodyBytes = 64 * 1024
+
+// ErrResponseTooLarge means an HTTP error body or Append acknowledgement
+// exceeded the 64 KiB read limit. The oversized body is not retained.
+var ErrResponseTooLarge = errors.New("response body exceeds the 64 KiB limit")
+
 // ErrorKind identifies the operation-level category of a ScopeDB error.
 type ErrorKind string
 
@@ -143,6 +149,19 @@ func (e *Error) withWriteContext(ctx context.Context) *Error {
 	return e
 }
 
+// A zero limit is reserved for successful query results and catalog definitions.
+func readResponseBody(body io.Reader, maxBytes int) ([]byte, error) {
+	if maxBytes == 0 {
+		return io.ReadAll(body)
+	}
+	data, err := io.ReadAll(io.LimitReader(body, int64(maxBytes)+1))
+	if len(data) > maxBytes {
+		// A truncated JSON prefix must not establish a write's commit outcome.
+		return nil, errors.Join(ErrResponseTooLarge, err)
+	}
+	return data, err
+}
+
 type apiErrorPayload struct {
 	Code      string           `json:"code"`
 	Message   string           `json:"message"`
@@ -213,6 +232,9 @@ func responseMetadataError(
 	message string,
 	cause error,
 ) *Error {
+	if errors.Is(cause, ErrResponseTooLarge) {
+		message = ErrResponseTooLarge.Error()
+	}
 	return &Error{
 		Kind:       kind,
 		Message:    message,
@@ -242,7 +264,11 @@ func parseRetryAfter(value string, now time.Time) time.Duration {
 }
 
 func checkStatementResponse(resp *http.Response) (*statementResponse, error) {
-	data, err := io.ReadAll(resp.Body)
+	maxBytes := 0
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		maxBytes = maxErrorResponseBodyBytes
+	}
+	data, err := readResponseBody(resp.Body, maxBytes)
 	if err != nil {
 		return nil, responseMetadataError(
 			resp,

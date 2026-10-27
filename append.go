@@ -23,7 +23,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"net/http/httptrace"
 	"sync/atomic"
@@ -169,13 +168,16 @@ func (c *Client) appendNDJSONWithTimeout(
 	}
 	defer sneakyBodyClose(resp.Body)
 
-	responseBody, err := io.ReadAll(resp.Body)
+	responseBody, err := readResponseBody(resp.Body, maxErrorResponseBodyBytes)
 	if err != nil && resp.StatusCode != http.StatusTooManyRequests {
 		return AppendRowsResult{}, appendUnknownError(err.Error(), err, resp).withWriteContext(ctx)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		apiErr := responseError(resp, responseBody, ErrorKindAppendRowsFailed)
 		apiErr.cause = err
+		if errors.Is(err, ErrResponseTooLarge) {
+			apiErr.Message = ErrResponseTooLarge.Error()
+		}
 		if apiErr.AppendDetails == nil {
 			status := AppendStateUnknown
 			// Rate limiting rejects the append before execution, including when an
