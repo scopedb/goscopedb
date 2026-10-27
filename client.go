@@ -329,12 +329,34 @@ func (c *Client) submitStatement(ctx context.Context, request *statementRequest)
 		return nil, err
 	}
 
-	resp, err := c.http.doPost(ctx, req, body)
-	if err != nil {
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	resp, err := c.http.doPost(ctx, req, body)
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, err
+		}
+		failure := statementError(err, request.StatementID)
+		failure.Code = "statement_submission_outcome_unknown"
+		failure.Retryable = false
+		return nil, failure
+	}
 	defer sneakyBodyClose(resp.Body)
-	return checkStatementResponse(resp)
+	result, err := checkStatementResponse(resp)
+	if err != nil {
+		failure := statementError(err, request.StatementID)
+		// A malformed acknowledgement or unstructured gateway error does not
+		// establish rejection. Replaying a mutating statement may run it twice.
+		if (resp.StatusCode >= 200 && resp.StatusCode < 300) ||
+			(failure.Code == "" && (resp.StatusCode == http.StatusRequestTimeout ||
+				resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500)) {
+			failure.Code = "statement_submission_outcome_unknown"
+			failure.Retryable = false
+		}
+		return nil, failure
+	}
+	return result, nil
 }
 
 func (c *Client) fetchStatementResult(ctx context.Context, id uuid.UUID) (*statementResponse, error) {

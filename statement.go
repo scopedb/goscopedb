@@ -52,8 +52,9 @@ func (c *Client) Statement(stmt string) *Statement {
 }
 
 // Query submits a ScopeQL statement and waits for all result rows. A context
-// error stops local waiting without cancelling server execution. Use
-// Statement.Submit and retain its handle when the query must be resumed or cancelled.
+// error stops local waiting without cancelling server execution.
+// Error.StatementID can be used to resume waiting on the same execution.
+// Use Statement.Submit and retain its handle for explicit lifecycle management.
 func (c *Client) Query(ctx context.Context, scopeql string) (*ResultSet, error) {
 	return c.Statement(scopeql).Execute(ctx)
 }
@@ -73,10 +74,13 @@ func (s *Statement) Submit(ctx context.Context) (*StatementHandle, error) {
 		Format:              resultFormatJSON,
 	})
 	if err != nil {
+		if s.ID != nil {
+			return nil, statementError(err, s.ID)
+		}
 		return nil, err
 	}
 	if s.ID != nil && resp.ID != *s.ID {
-		return nil, newError(ErrorKindUnexpected, "statement response ID does not match submitted ID", nil)
+		return nil, statementError(newError(ErrorKindUnexpected, "statement response ID does not match submitted ID", nil), s.ID)
 	}
 
 	handle := s.c.StatementHandle(resp.ID)
@@ -85,12 +89,20 @@ func (s *Statement) Submit(ctx context.Context) (*StatementHandle, error) {
 }
 
 // Execute submits the statement to ScopeDB for execution and waits for its completion.
+// After submission, errors include Error.StatementID and are not marked retryable:
+// use Client.StatementHandle with that ID to resume the existing execution.
 func (s *Statement) Execute(ctx context.Context) (*ResultSet, error) {
 	handle, err := s.Submit(ctx)
 	if err != nil {
 		return nil, err
 	}
-	return handle.Wait(ctx)
+	result, err := handle.Wait(ctx)
+	if err != nil {
+		failure := statementError(err, &handle.id)
+		failure.Retryable = false
+		return nil, failure
+	}
+	return result, nil
 }
 
 // StatementHandle tracks a submitted statement. Its methods are safe to call
@@ -154,7 +166,9 @@ func (r *statementResponse) snapshot() *StatementSnapshot {
 }
 
 // Refresh fetches one complete observation. A cached terminal observation is
-// returned without making another request. A failed request leaves the cache intact.
+// returned without making another request. If a concurrent request caches a
+// terminal observation, it also takes precedence over this request's failure.
+// Other request failures leave the cache intact and retain their retry classification.
 func (h *StatementHandle) Refresh(ctx context.Context) (*StatementSnapshot, error) {
 	if cached := h.resp.Load(); cached != nil && cached.Status.Terminated() {
 		return cached.snapshot(), nil
@@ -162,14 +176,17 @@ func (h *StatementHandle) Refresh(ctx context.Context) (*StatementSnapshot, erro
 
 	resp, err := h.c.fetchStatementResult(ctx, h.id)
 	if err != nil {
-		return nil, err
+		if cached := h.resp.Load(); cached != nil && cached.Status.Terminated() {
+			return cached.snapshot(), nil
+		}
+		return nil, statementError(err, &h.id)
 	}
 	return h.remember(resp)
 }
 
 func (h *StatementHandle) remember(resp *statementResponse) (*StatementSnapshot, error) {
 	if resp.ID != h.id {
-		return nil, newError(ErrorKindUnexpected, "statement response ID does not match handle", nil)
+		return nil, statementError(newError(ErrorKindUnexpected, "statement response ID does not match handle", nil), &h.id)
 	}
 	for {
 		previous := h.resp.Load()
@@ -212,19 +229,22 @@ func (h *StatementHandle) Wait(ctx context.Context) (*ResultSet, error) {
 				Details:          failure.Details,
 				Message:          failure.Message,
 				StatementDetails: failure,
+				StatementID:      new(h.id),
 			}
 		case StatementStatusCancelled:
 			return nil, &Error{
-				Kind:    ErrorKindStatementFailed,
-				Message: fmt.Sprintf("statement %s was cancelled", h.id),
-				cause:   ErrStatementCancelled,
+				Kind:        ErrorKindStatementFailed,
+				Message:     fmt.Sprintf("statement %s was cancelled", h.id),
+				cause:       ErrStatementCancelled,
+				StatementID: new(h.id),
 			}
 		case StatementStatusPending, StatementStatusRunning:
 			// Keep polling below.
 		default:
 			return nil, &Error{
-				Kind:    ErrorKindUnexpected,
-				Message: fmt.Sprintf("unknown statement status %q", snapshot.Status),
+				Kind:        ErrorKindUnexpected,
+				Message:     fmt.Sprintf("unknown statement status %q", snapshot.Status),
+				StatementID: new(h.id),
 			}
 		}
 
@@ -232,7 +252,7 @@ func (h *StatementHandle) Wait(ctx context.Context) (*ResultSet, error) {
 		select {
 		case <-ctx.Done():
 			timer.Stop()
-			return nil, ctx.Err()
+			return nil, statementError(ctx.Err(), &h.id)
 		case <-timer.C:
 		}
 		if delay < maxDelay {
@@ -243,14 +263,18 @@ func (h *StatementHandle) Wait(ctx context.Context) (*ResultSet, error) {
 
 // Cancel requests server cancellation and returns the complete observation.
 // Completion may win the race: inspect Status, ResultSet, and Error. A cached
-// terminal observation is returned without making another request.
+// terminal observation is returned without making another request and takes
+// precedence over a failed in-flight cancellation request.
 func (h *StatementHandle) Cancel(ctx context.Context) (*StatementSnapshot, error) {
 	if cached := h.resp.Load(); cached != nil && cached.Status.Terminated() {
 		return cached.snapshot(), nil
 	}
 	resp, err := h.c.cancelStatement(ctx, h.id)
 	if err != nil {
-		return nil, err
+		if cached := h.resp.Load(); cached != nil && cached.Status.Terminated() {
+			return cached.snapshot(), nil
+		}
+		return nil, statementError(err, &h.id)
 	}
 	return h.remember(resp)
 }
