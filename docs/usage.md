@@ -308,7 +308,7 @@ See the examples for [streaming writes](../examples/append_stream), [file import
 
 ## Timeouts and HTTP options
 
-`NewClient` validates the endpoint and returns an error for invalid configuration. Set `Config.HTTPClient` when the application needs to own HTTP timeouts, proxies, TLS, or connection pooling. `Client.Close` closes idle connections only for the HTTP client created by the SDK; it never closes a caller-provided client. SDK-owned clients use Go's default redirect policy. To customize redirects, supply an `http.Client` with `CheckRedirect` through `Config.HTTPClient`.
+`NewClient` validates the endpoint and returns an error for invalid configuration. Set `Config.HTTPClient` when the application needs to own HTTP timeouts, proxies, TLS, or connection pooling. `Client.Close` closes idle connections only for the HTTP client created by the SDK; it never closes a caller-provided client. SDK-owned clients default to keeping up to 100 idle HTTP/1.1 connections per host, supporting reuse across concurrent streams and queries. They use Go's default redirect policy. To customize redirects, supply an `http.Client` with `CheckRedirect` through `Config.HTTPClient`.
 
 [Go's default redirect behavior](https://pkg.go.dev/net/http#Client.Do) changes POST requests to GET without a body for HTTP 301, 302, and 303; HTTP 307 and 308 preserve the method and body when the body can be recreated. Redirects happen within one SDK attempt; `AppendRetryOptions` does not control them and `Stats().Retries` does not count them.
 

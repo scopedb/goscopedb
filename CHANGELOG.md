@@ -13,6 +13,11 @@ All significant changes to the ScopeDB Go SDK are documented in this file.
 * Preserve `Error.StatementID` for statement recovery and stop marking `Query`/`Execute` failures as retryable after submission. Resume waiting on that ID instead of submitting another execution. Lost or malformed submission acknowledgements and unstructured gateway errors report `statement_submission_outcome_unknown`; original causes and HTTP diagnostics remain available.
 * Prefer a cached terminal Statement observation over a late in-flight request failure, so concurrent cancellation, completion, or statement failure is not hidden by an older polling or cancellation error.
 
+### Improvements
+
+* Reuse zstd and gzip compression state to reduce allocations when sending Statements and Append requests.
+* Keep up to 100 idle HTTP/1.1 connections per host in the default SDK transport, avoiding connection churn between concurrent request bursts.
+
 ## v0.7.1 (2026-10-26)
 
 ### Bug Fixes

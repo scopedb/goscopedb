@@ -23,11 +23,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -42,7 +44,17 @@ type Client struct {
 	writeTimeout time.Duration
 }
 
-const defaultWriteTimeout = 30 * time.Second
+const (
+	defaultWriteTimeout = 30 * time.Second
+	// Match net/http's total idle budget for clients targeting one endpoint.
+	defaultMaxIdleConnsPerHost = 100
+)
+
+// Pools cache temporary compression state, never request-owned output buffers.
+var (
+	zstdEncoderPool sync.Pool
+	gzipWriterPool  sync.Pool
+)
 
 // NewClient creates a new ScopeDB client with the given configuration.
 func NewClient(config Config) (*Client, error) {
@@ -99,7 +111,11 @@ func NewClient(config Config) (*Client, error) {
 
 func independentDefaultTransport() *http.Transport {
 	if transport, ok := http.DefaultTransport.(*http.Transport); ok && transport != nil {
-		return transport.Clone()
+		cloned := transport.Clone()
+		if cloned.MaxIdleConnsPerHost == 0 {
+			cloned.MaxIdleConnsPerHost = defaultMaxIdleConnsPerHost
+		}
+		return cloned
 	}
 
 	return &http.Transport{
@@ -110,6 +126,7 @@ func independentDefaultTransport() *http.Transport {
 		}).DialContext,
 		ForceAttemptHTTP2:     true,
 		MaxIdleConns:          100,
+		MaxIdleConnsPerHost:   defaultMaxIdleConnsPerHost,
 		IdleConnTimeout:       90 * time.Second,
 		TLSHandshakeTimeout:   10 * time.Second,
 		ExpectContinueTimeout: time.Second,
@@ -230,22 +247,34 @@ func compressRequestBody(body []byte, compression Compression) (bytes.Buffer, Co
 
 	switch compression {
 	case CompressionZstd:
-		zw, err := zstd.NewWriter(&b)
-		if err != nil {
-			return bytes.Buffer{}, "", err
+		encoder, _ := zstdEncoderPool.Get().(*zstd.Encoder)
+		if encoder == nil {
+			var err error
+			encoder, err = zstd.NewWriter(nil)
+			if err != nil {
+				return bytes.Buffer{}, "", err
+			}
 		}
-		if _, err := zw.Write(body); err != nil {
-			return bytes.Buffer{}, "", errors.Join(err, zw.Close())
-		}
-		if err := zw.Close(); err != nil {
+		encoder.Reset(&b)
+		_, writeErr := encoder.Write(body)
+		closeErr := encoder.Close()
+		encoder.Reset(io.Discard)
+		zstdEncoderPool.Put(encoder)
+		if err := errors.Join(writeErr, closeErr); err != nil {
 			return bytes.Buffer{}, "", err
 		}
 	case CompressionGzip:
-		gw := gzip.NewWriter(&b)
-		if _, err := gw.Write(body); err != nil {
-			return bytes.Buffer{}, "", err
+		writer, _ := gzipWriterPool.Get().(*gzip.Writer)
+		if writer == nil {
+			writer = gzip.NewWriter(io.Discard)
 		}
-		if err := gw.Close(); err != nil {
+		writer.Reset(&b)
+		_, writeErr := writer.Write(body)
+		closeErr := writer.Close()
+		// Release the output buffer before caching the writer between requests.
+		writer.Reset(io.Discard)
+		gzipWriterPool.Put(writer)
+		if err := errors.Join(writeErr, closeErr); err != nil {
 			return bytes.Buffer{}, "", err
 		}
 	default:
