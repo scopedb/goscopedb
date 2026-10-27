@@ -107,13 +107,9 @@ func (rs *ResultSet) ToObjects() ([]map[string]Value, error) {
 
 	objects := make([]map[string]Value, 0, len(rows))
 	for i, row := range rows {
-		values, err := rs.convertRow(row)
+		object, err := rs.convertObject(row, names)
 		if err != nil {
 			return nil, fmt.Errorf("result row %d: %w", i, err)
-		}
-		object := make(map[string]Value, len(names))
-		for i, name := range names {
-			object[name] = values[i]
 		}
 		objects = append(objects, object)
 	}
@@ -135,15 +131,23 @@ func (rs *ResultSet) First() (map[string]Value, bool, error) {
 	if err != nil {
 		return nil, false, err
 	}
-	values, err := rs.convertRow(rows[0])
+	object, err := rs.convertObject(rows[0], names)
 	if err != nil {
 		return nil, false, fmt.Errorf("result row 0: %w", err)
+	}
+	return object, true, nil
+}
+
+func (rs *ResultSet) convertObject(row []*string, names []string) (map[string]Value, error) {
+	values, err := rs.convertRow(row)
+	if err != nil {
+		return nil, err
 	}
 	object := make(map[string]Value, len(names))
 	for i, name := range names {
 		object[name] = values[i]
 	}
-	return object, true, nil
+	return object, nil
 }
 
 func (rs *ResultSet) objectColumnNames() ([]string, error) {
@@ -233,7 +237,7 @@ func parseInterval(value string) (time.Duration, error) {
 	return parsed, nil
 }
 
-// Schema describes the fields in a table or query result.
+// Schema describes the columns of a query result.
 type Schema []*FieldSchema
 
 // FieldSchema describes a single field.
@@ -274,8 +278,7 @@ const (
 	NullDataType DataType = "null"
 )
 
-// UnmarshalJSON accepts the canonical wire names and normalizes the historical
-// unsigned-integer alias to UIntDataType.
+// UnmarshalJSON accepts canonical wire type names and rejects unsupported types.
 func (d *DataType) UnmarshalJSON(data []byte) error {
 	var value string
 	if err := json.Unmarshal(data, &value); err != nil {

@@ -175,16 +175,16 @@ func (h *StatementHandle) Refresh(ctx context.Context) (*StatementSnapshot, erro
 	}
 
 	resp, err := h.c.fetchStatement(ctx, h.id)
+	return h.observe(resp, err)
+}
+
+func (h *StatementHandle) observe(resp *statementResponse, err error) (*StatementSnapshot, error) {
 	if err != nil {
 		if cached := h.resp.Load(); cached != nil && cached.Status.Terminated() {
 			return cached.snapshot(), nil
 		}
 		return nil, statementError(err, &h.id)
 	}
-	return h.remember(resp)
-}
-
-func (h *StatementHandle) remember(resp *statementResponse) (*StatementSnapshot, error) {
 	if resp.ID != h.id {
 		return nil, statementError(newError(ErrorKindUnexpected, "statement response ID does not match handle", nil), &h.id)
 	}
@@ -270,13 +270,7 @@ func (h *StatementHandle) Cancel(ctx context.Context) (*StatementSnapshot, error
 		return cached.snapshot(), nil
 	}
 	resp, err := h.c.cancelStatement(ctx, h.id)
-	if err != nil {
-		if cached := h.resp.Load(); cached != nil && cached.Status.Terminated() {
-			return cached.snapshot(), nil
-		}
-		return nil, statementError(err, &h.id)
-	}
-	return h.remember(resp)
+	return h.observe(resp, err)
 }
 
 // StatementStatus is a string that represents the status of a statement.
