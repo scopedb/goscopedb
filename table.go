@@ -57,7 +57,7 @@ func (t *Table) Catalog() *CatalogResource[*CatalogTable] {
 // Response bodies are limited to 64 KiB. Overflow returns an error matching
 // [ErrResponseTooLarge].
 func (t *Table) AppendNDJSON(ctx context.Context, ndjson []byte) (AppendRowsResult, error) {
-	return t.c.appendNDJSON(ctx, t.databaseName(), t.schemaName(), t.Name, ndjson)
+	return t.c.appendNDJSON(ctx, t.databaseName(), t.schemaName(), t.Name, ndjson, t.c.writeTimeout)
 }
 
 // Identifier returns the quoted table identifier.

@@ -78,16 +78,6 @@ func (c *Client) appendNDJSON(
 	schema string,
 	table string,
 	ndjson []byte,
-) (AppendRowsResult, error) {
-	return c.appendNDJSONWithTimeout(ctx, database, schema, table, ndjson, c.writeTimeout)
-}
-
-func (c *Client) appendNDJSONWithTimeout(
-	ctx context.Context,
-	database string,
-	schema string,
-	table string,
-	ndjson []byte,
 	timeout time.Duration,
 ) (AppendRowsResult, error) {
 	if err := ctx.Err(); err != nil {
