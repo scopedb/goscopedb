@@ -33,7 +33,7 @@ type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
-func testClient(t *testing.T, transport roundTripFunc) *Client {
+func newTestClient(t *testing.T, transport roundTripFunc) *Client {
 	t.Helper()
 	c, err := NewClient(Config{Endpoint: "https://example.com", Compression: CompressionGzip, HTTPClient: &http.Client{Transport: transport}})
 	require.NoError(t, err)
@@ -41,11 +41,11 @@ func testClient(t *testing.T, transport roundTripFunc) *Client {
 	return c
 }
 
-func jsonResponse(status int, body string) *http.Response {
+func httpResponse(status int, body string) *http.Response {
 	return &http.Response{StatusCode: status, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}
 }
 
-func apiError(t *testing.T, err error) *Error {
+func requireError(t *testing.T, err error) *Error {
 	t.Helper()
 	var failure *Error
 	require.ErrorAs(t, err, &failure)

@@ -41,15 +41,15 @@ func TestAppendAcknowledgementMustConfirmEveryRow(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			calls := 0
-			client := testClient(t, func(*http.Request) (*http.Response, error) {
+			client := newTestClient(t, func(*http.Request) (*http.Response, error) {
 				calls++
-				return jsonResponse(200, tc.acknowledgement), nil
+				return httpResponse(200, tc.acknowledgement), nil
 			})
 			_, err := client.Table("events").AppendNDJSON(t.Context(), []byte(tc.payload))
 			if tc.committed {
 				require.NoError(t, err)
 			} else {
-				failure := apiError(t, err)
+				failure := requireError(t, err)
 				require.Equal(t, AppendStateUnknown, failure.AppendDetails.Status)
 				require.False(t, failure.Retryable)
 			}
@@ -73,8 +73,8 @@ func TestAppendFailureClassification(t *testing.T) {
 		{"interrupted rejection", 401, "", true, AppendStateUnknown, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			client := testClient(t, func(*http.Request) (*http.Response, error) {
-				resp := jsonResponse(tc.status, tc.body)
+			client := newTestClient(t, func(*http.Request) (*http.Response, error) {
+				resp := httpResponse(tc.status, tc.body)
 				resp.Header.Set("X-Request-ID", "append-request")
 				resp.Header.Set("Retry-After", "2")
 				if tc.readError {
@@ -83,7 +83,7 @@ func TestAppendFailureClassification(t *testing.T) {
 				return resp, nil
 			})
 			_, err := client.Table("events").AppendNDJSON(t.Context(), []byte(`{}`))
-			failure := apiError(t, err)
+			failure := requireError(t, err)
 			require.Equal(t, tc.state, failure.AppendDetails.Status)
 			require.Equal(t, tc.retryable, failure.Retryable)
 			require.Equal(t, tc.status, failure.HTTPStatus)
@@ -101,7 +101,7 @@ func TestAppendFailureClassification(t *testing.T) {
 }
 
 func TestAppendLimitsRejectBeforeDispatch(t *testing.T) {
-	client := testClient(t, func(*http.Request) (*http.Response, error) {
+	client := newTestClient(t, func(*http.Request) (*http.Response, error) {
 		t.Error("oversized append reached transport")
 		return nil, errors.New("unexpected request")
 	})
@@ -110,7 +110,7 @@ func TestAppendLimitsRejectBeforeDispatch(t *testing.T) {
 		bytes.Repeat([]byte("{}\n"), 200001),
 	} {
 		_, err := client.Table("events").AppendNDJSON(t.Context(), payload)
-		failure := apiError(t, err)
+		failure := requireError(t, err)
 		require.Equal(t, AppendStateRejected, failure.AppendDetails.Status)
 	}
 	ctx, cancel := context.WithCancel(t.Context())

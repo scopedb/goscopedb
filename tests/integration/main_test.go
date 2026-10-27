@@ -20,11 +20,9 @@ import (
 	"context"
 	"net/http"
 	"os"
-	"strings"
 	"testing"
 	"time"
 
-	"github.com/google/uuid"
 	scopedb "github.com/scopedb/goscopedb"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/goleak"
@@ -32,7 +30,7 @@ import (
 
 func TestMain(m *testing.M) { goleak.VerifyTestMain(m) }
 
-func integrationClient(t *testing.T, key string) *scopedb.Client {
+func newClient(t *testing.T, key string) *scopedb.Client {
 	t.Helper()
 	endpoint := os.Getenv("SCOPEDB_ENDPOINT")
 	if endpoint == "" {
@@ -44,8 +42,6 @@ func integrationClient(t *testing.T, key string) *scopedb.Client {
 	return client
 }
 
-func tableName() string { return "go_sdk_" + strings.ReplaceAll(uuid.NewString(), "-", "") }
-
 func cleanupTable(t *testing.T, table *scopedb.Table) {
 	t.Helper()
 	t.Cleanup(func() {
@@ -53,12 +49,12 @@ func cleanupTable(t *testing.T, table *scopedb.Table) {
 		defer cancel()
 		_, err := table.Catalog().Delete(ctx, scopedb.CatalogOptions{AllowDestructive: true})
 		if err != nil {
-			require.Equal(t, http.StatusNotFound, httpFailure(t, err).HTTPStatus)
+			require.Equal(t, http.StatusNotFound, requireError(t, err).HTTPStatus)
 		}
 	})
 }
 
-func httpFailure(t *testing.T, err error) *scopedb.Error {
+func requireError(t *testing.T, err error) *scopedb.Error {
 	t.Helper()
 	var failure *scopedb.Error
 	require.ErrorAs(t, err, &failure)

@@ -100,7 +100,7 @@ func TestClientRedirectPolicyAndOwnership(t *testing.T) {
 	}})
 	require.NoError(t, err)
 	_, err = injected.Table("events").AppendNDJSON(t.Context(), []byte(`{}`))
-	require.Equal(t, http.StatusTemporaryRedirect, apiError(t, err).HTTPStatus)
+	require.Equal(t, http.StatusTemporaryRedirect, requireError(t, err).HTTPStatus)
 	injected.Close()
 	require.False(t, transport.closed, "the injected transport belongs to its caller")
 }
@@ -118,15 +118,15 @@ func (t *trackedTransport) CloseIdleConnections() {
 func TestClientRejectsUnsafeDestinations(t *testing.T) {
 	for _, endpoint := range []string{"", "localhost:6543", "ftp://example.com", "https://user:password@example.com", "https://example.com?query=true", "https://example.com#fragment"} {
 		_, err := NewClient(Config{Endpoint: endpoint})
-		require.Equal(t, ErrorKindConfigInvalid, apiError(t, err).Kind, endpoint)
+		require.Equal(t, ErrorKindConfigInvalid, requireError(t, err).Kind, endpoint)
 	}
-	client := testClient(t, func(*http.Request) (*http.Response, error) {
+	client := newTestClient(t, func(*http.Request) (*http.Response, error) {
 		t.Error("unsafe destination reached transport")
 		return nil, errors.New("unexpected request")
 	})
 	for _, name := range []string{"", ".", ".."} {
 		_, err := client.Table(name).Catalog().Delete(t.Context(), CatalogOptions{AllowDestructive: true})
-		require.Equal(t, ErrorKindConfigInvalid, apiError(t, err).Kind)
+		require.Equal(t, ErrorKindConfigInvalid, requireError(t, err).Kind)
 		_, err = client.Table(name).AppendNDJSON(t.Context(), []byte(`{}`))
 		require.Error(t, err)
 	}

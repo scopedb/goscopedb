@@ -36,22 +36,22 @@ type streamResult struct {
 	err    error
 }
 
-func testStream(t *testing.T, options AppendStreamOptions, transport roundTripFunc) *AppendStream {
+func newTestAppendStream(t *testing.T, options AppendStreamOptions, transport roundTripFunc) *AppendStream {
 	t.Helper()
-	stream, err := testClient(t, transport).Table("events").AppendStream(options)
+	stream, err := newTestClient(t, transport).Table("events").AppendStream(options)
 	require.NoError(t, err)
 	return stream
 }
 
 func appendSuccess(rows int) *http.Response {
-	return jsonResponse(200, fmt.Sprintf(`{"status":"committed","num_rows_inserted":%d}`, rows))
+	return httpResponse(200, fmt.Sprintf(`{"status":"committed","num_rows_inserted":%d}`, rows))
 }
 
 func appendFailure(status int, state AppendState, retryable bool) *http.Response {
-	return jsonResponse(status, fmt.Sprintf(`{"code":"append_failed","message":"append failed","retryable":%t,"details":{"status":%q,"row_errors":[{"row_index":0,"column":"id","message":"invalid integer"}]}}`, retryable, state))
+	return httpResponse(status, fmt.Sprintf(`{"code":"append_failed","message":"append failed","retryable":%t,"details":{"status":%q,"row_errors":[{"row_index":0,"column":"id","message":"invalid integer"}]}}`, retryable, state))
 }
 
-func TestStreamBatchBoundaries(t *testing.T) {
+func TestAppendStreamBatchBoundaries(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		options AppendStreamOptions
@@ -62,7 +62,7 @@ func TestStreamBatchBoundaries(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			var bodies []string
 			tc.options.MaxConcurrentBatches, tc.options.FlushInterval = 1, time.Hour
-			stream := testStream(t, tc.options, func(r *http.Request) (*http.Response, error) {
+			stream := newTestAppendStream(t, tc.options, func(r *http.Request) (*http.Response, error) {
 				data, err := decodeCompressedRequestBody(r)
 				require.NoError(t, err)
 				bodies = append(bodies, string(data))
@@ -81,10 +81,10 @@ func TestStreamBatchBoundaries(t *testing.T) {
 	}
 }
 
-func TestStreamFlushesPartialBatchOnTimer(t *testing.T) {
+func TestAppendStreamFlushesPartialBatchOnTimer(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		var calls atomic.Int32
-		stream := testStream(t, AppendStreamOptions{FlushInterval: time.Second}, func(*http.Request) (*http.Response, error) {
+		stream := newTestAppendStream(t, AppendStreamOptions{FlushInterval: time.Second}, func(*http.Request) (*http.Response, error) {
 			calls.Add(1)
 			return appendSuccess(1), nil
 		})
@@ -99,12 +99,12 @@ func TestStreamFlushesPartialBatchOnTimer(t *testing.T) {
 	})
 }
 
-func TestStreamBackpressureAndCanceledSend(t *testing.T) {
+func TestAppendStreamBackpressureAndCanceledSend(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		release := make(chan struct{})
 		unblock := sync.OnceFunc(func() { close(release) })
 		defer unblock()
-		stream := testStream(t, AppendStreamOptions{TargetBatchBytes: 1, MaxBufferedBytes: 9}, func(*http.Request) (*http.Response, error) {
+		stream := newTestAppendStream(t, AppendStreamOptions{TargetBatchBytes: 1, MaxBufferedBytes: 9}, func(*http.Request) (*http.Response, error) {
 			<-release
 			return appendSuccess(1), nil
 		})
@@ -132,7 +132,7 @@ func TestStreamBackpressureAndCanceledSend(t *testing.T) {
 	})
 }
 
-func TestStreamFlushAccountsOnlyItsPrefix(t *testing.T) {
+func TestAppendStreamFlushAccountsOnlyItsPrefix(t *testing.T) {
 	for _, mode := range []string{"success", "stop on failure", "canceled wait"} {
 		t.Run(mode, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
@@ -140,7 +140,7 @@ func TestStreamFlushAccountsOnlyItsPrefix(t *testing.T) {
 				unblock := sync.OnceFunc(func() { close(release) })
 				defer unblock()
 				calls := 0
-				stream := testStream(t, AppendStreamOptions{TargetBatchBytes: 1, MaxConcurrentBatches: 1, FlushInterval: time.Hour}, func(*http.Request) (*http.Response, error) {
+				stream := newTestAppendStream(t, AppendStreamOptions{TargetBatchBytes: 1, MaxConcurrentBatches: 1, FlushInterval: time.Hour}, func(*http.Request) (*http.Response, error) {
 					calls++
 					<-release
 					if mode == "stop on failure" {
@@ -185,7 +185,7 @@ func TestStreamFlushAccountsOnlyItsPrefix(t *testing.T) {
 	}
 }
 
-func TestStreamFailurePoliciesAndDiagnosticOwnership(t *testing.T) {
+func TestAppendStreamFailurePoliciesAndDiagnosticOwnership(t *testing.T) {
 	for _, policy := range []AppendFailurePolicy{AppendFailureStop, AppendFailureContinue} {
 		t.Run(fmt.Sprint(policy), func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
@@ -193,7 +193,7 @@ func TestStreamFailurePoliciesAndDiagnosticOwnership(t *testing.T) {
 				unblock := sync.OnceFunc(func() { close(release) })
 				defer unblock()
 				calls := 0
-				stream := testStream(t, AppendStreamOptions{FailurePolicy: policy, TargetBatchBytes: 1, MaxConcurrentBatches: 1}, func(*http.Request) (*http.Response, error) {
+				stream := newTestAppendStream(t, AppendStreamOptions{FailurePolicy: policy, TargetBatchBytes: 1, MaxConcurrentBatches: 1}, func(*http.Request) (*http.Response, error) {
 					<-release
 					calls++
 					if calls == 1 {
@@ -228,7 +228,7 @@ func TestStreamFailurePoliciesAndDiagnosticOwnership(t *testing.T) {
 	}
 }
 
-func TestStreamConcurrencyAndShutdownSettlement(t *testing.T) {
+func TestAppendStreamConcurrencyAndShutdownSettlement(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		rejected, unknown := make(chan struct{}), make(chan struct{})
 		releaseRejected := sync.OnceFunc(func() { close(rejected) })
@@ -236,7 +236,7 @@ func TestStreamConcurrencyAndShutdownSettlement(t *testing.T) {
 		defer releaseRejected()
 		defer releaseUnknown()
 		var calls atomic.Int32
-		stream := testStream(t, AppendStreamOptions{TargetBatchBytes: 1, MaxConcurrentBatches: 2}, func(r *http.Request) (*http.Response, error) {
+		stream := newTestAppendStream(t, AppendStreamOptions{TargetBatchBytes: 1, MaxConcurrentBatches: 2}, func(r *http.Request) (*http.Response, error) {
 			calls.Add(1)
 			body, err := decodeCompressedRequestBody(r)
 			require.NoError(t, err)
@@ -269,7 +269,7 @@ func TestStreamConcurrencyAndShutdownSettlement(t *testing.T) {
 		require.Zero(t, waiting.report)
 		releaseUnknown()
 		report, err := stream.Shutdown(t.Context())
-		require.Equal(t, AppendStateUnknown, apiError(t, err).AppendDetails.Status)
+		require.Equal(t, AppendStateUnknown, requireError(t, err).AppendDetails.Status)
 		require.EqualValues(t, 1, report.UnknownRows)
 		require.EqualValues(t, 2, report.FailedRows)
 		require.Equal(t, AppendDeliveryUnknown, report.Outcome)
@@ -278,10 +278,10 @@ func TestStreamConcurrencyAndShutdownSettlement(t *testing.T) {
 	})
 }
 
-func TestStreamConcurrentSendAndShutdown(t *testing.T) {
+func TestAppendStreamConcurrentSendAndShutdown(t *testing.T) {
 	var mu sync.Mutex
 	seen := make(map[int]bool)
-	stream := testStream(t, AppendStreamOptions{MaxBatchRows: 1}, func(r *http.Request) (*http.Response, error) {
+	stream := newTestAppendStream(t, AppendStreamOptions{MaxBatchRows: 1}, func(r *http.Request) (*http.Response, error) {
 		body, err := decodeCompressedRequestBody(r)
 		require.NoError(t, err)
 		var row map[string]int
@@ -330,8 +330,8 @@ func TestStreamConcurrentSendAndShutdown(t *testing.T) {
 	require.ErrorIs(t, stream.TrySend(map[string]int{"id": 99}), ErrAppendStreamClosed)
 }
 
-func TestStreamRejectsUnsendableRows(t *testing.T) {
-	stream := testStream(t, AppendStreamOptions{}, func(*http.Request) (*http.Response, error) {
+func TestAppendStreamRejectsUnsendableRows(t *testing.T) {
+	stream := newTestAppendStream(t, AppendStreamOptions{}, func(*http.Request) (*http.Response, error) {
 		t.Error("invalid row was dispatched")
 		return appendSuccess(0), nil
 	})
@@ -344,8 +344,8 @@ func TestStreamRejectsUnsendableRows(t *testing.T) {
 	require.EqualValues(t, 2, report.DroppedRows, "Send failures do not count as TrySend drops")
 }
 
-func TestStreamShutdownDuringRowEncoding(t *testing.T) {
-	stream := testStream(t, AppendStreamOptions{}, func(*http.Request) (*http.Response, error) {
+func TestAppendStreamShutdownDuringRowEncoding(t *testing.T) {
+	stream := newTestAppendStream(t, AppendStreamOptions{}, func(*http.Request) (*http.Response, error) {
 		t.Error("a row rejected during shutdown reached transport")
 		return appendSuccess(0), nil
 	})
