@@ -21,7 +21,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 )
@@ -172,7 +171,11 @@ func (c *CatalogResource[T]) request(ctx context.Context, method string, data []
 		return nil, nil, failure
 	}
 	defer sneakyBodyClose(resp.Body)
-	body, err := io.ReadAll(resp.Body)
+	maxBytes := 0
+	if resp.StatusCode != http.StatusOK {
+		maxBytes = maxErrorResponseBodyBytes
+	}
+	body, err := readResponseBody(resp.Body, maxBytes)
 	if err != nil {
 		failure := responseMetadataError(resp, ErrorKindCatalogFailed, "failed to read catalog response", err)
 		if writing {
