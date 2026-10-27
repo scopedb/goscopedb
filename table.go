@@ -49,8 +49,10 @@ func (t *Table) Catalog() *CatalogResource[*CatalogTable] {
 }
 
 // AppendNDJSON sends one caller-encoded NDJSON request of at most 8 MiB
-// uncompressed. The body contains one JSON object per non-empty line, not a
-// JSON array.
+// uncompressed and 200,000 rows. The body contains one JSON object per non-empty
+// line. It uses Config.Compression and Config.WriteTimeout and makes one SDK
+// attempt without batching or retries. An error with an unknown commit outcome
+// may follow a remote commit; inspect Error.AppendDetails before replaying.
 func (t *Table) AppendNDJSON(ctx context.Context, ndjson []byte) (AppendRowsResult, error) {
 	return t.c.appendNDJSON(ctx, t.databaseName(), t.schemaName(), t.Name, ndjson)
 }

@@ -67,14 +67,13 @@ func (rs *ResultSet) RawRows() ([][]*string, error) {
 	return rows, nil
 }
 
-// ToValues reads the result set and returns the rows as a 2D array of values,
-// i.e., rows of value lists.
+// ToValues returns rows as positional values. Signed and unsigned integers
+// become int64 and uint64 without passing through floating point.
 //
 // Binary cells are returned as []byte, timestamps as time.Time, and intervals
 // as time.Duration. Array, object, and any cells remain JSON strings, while
 // null cells are returned as nil.
-//
-// This method is only valid if the result set is of the JSON format.
+// Conversion errors include the row and column.
 func (rs *ResultSet) ToValues() ([][]Value, error) {
 	rows, err := rs.RawRows()
 	if err != nil {
@@ -95,7 +94,7 @@ func (rs *ResultSet) ToValues() ([][]Value, error) {
 // ToObjects returns rows keyed by result column name.
 //
 // Duplicate output column names are rejected because representing them as a
-// map would silently discard values.
+// map would silently discard values. Cell types follow ToValues.
 func (rs *ResultSet) ToObjects() ([]map[string]Value, error) {
 	names, err := rs.objectColumnNames()
 	if err != nil {

@@ -27,8 +27,8 @@ Review the public surface and release material:
 ```sh
 go list -f '{{range .GoFiles}}{{$.Dir}}/{{.}}{{"\n"}}{{end}}' .
 git diff --check
-git diff -- README.md doc.go CHANGELOG.md RELEASE.md examples
-rg -n 'https?://|SCOPEDB_' README.md doc.go CHANGELOG.md RELEASE.md examples
+git diff -- README.md doc.go CHANGELOG.md RELEASE.md docs examples
+rg -n 'https?://|SCOPEDB_' README.md doc.go CHANGELOG.md RELEASE.md docs examples
 ```
 
 Confirm that `CHANGELOG.md` contains the intended release date, the examples compile, no secret or private endpoint is present, and the final diff contains only intentional changes. Commit and merge the release preparation before tagging.

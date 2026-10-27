@@ -40,8 +40,8 @@ type Config struct {
 	// When provided, the client sends it as the Authorization header using the
 	// Bearer scheme.
 	APIKey string `json:"api_key"`
-	// Compression controls how request bodies are compressed, including direct
-	// table appends and AppendStream batches.
+	// Compression controls Statement and Append request bodies, including direct
+	// table appends and AppendStream batches. Catalog JSON is not compressed.
 	//
 	// The default is CompressionZstd. CompressionGzip is also supported.
 	Compression Compression `json:"compression"`
