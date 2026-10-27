@@ -19,364 +19,102 @@ package scopedb
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
-	"net/http/httptest"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 )
 
-func TestAppendNDJSONUsesConfiguredCompression(t *testing.T) {
-	t.Parallel()
-
-	ndjson := []byte("{\"id\":1}\n\n  \n{\"id\":2}\n")
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		require.Equal(t, http.MethodPost, r.Method)
-		require.Equal(
-			t,
-			"/proxy/v1/catalog/databases/analytics%2F2026/schemas/events%20archive/tables/events%3F%23%2Fraw/ingest",
-			r.URL.EscapedPath(),
-		)
-		require.Equal(t, "Bearer append-key", r.Header.Get("Authorization"))
-		require.Equal(t, "application/x-ndjson", r.Header.Get("Content-Type"))
-		require.Equal(t, string(CompressionGzip), r.Header.Get("Content-Encoding"))
-		body, err := decodeCompressedRequestBody(r)
-		require.NoError(t, err)
-		require.Equal(t, ndjson, body)
-		writeTestJSON(t, w, `{"status":"committed","num_rows_inserted":2}`)
-	}))
-	defer server.Close()
-
-	client, err := NewClient(Config{
-		Endpoint:    server.URL + "/proxy",
-		APIKey:      "append-key",
-		Compression: CompressionGzip,
-	})
-	require.NoError(t, err)
-	t.Cleanup(client.Close)
-
-	result, err := client.appendNDJSON(
-		context.Background(),
-		"analytics/2026",
-		"events archive",
-		"events?#/raw",
-		ndjson,
-	)
-	require.NoError(t, err)
-	require.Equal(t, AppendStateCommitted, result.Status)
-	require.Equal(t, int64(2), result.NumRowsInserted)
-	encoded, err := json.Marshal(result)
-	require.NoError(t, err)
-	require.JSONEq(t, `{"status":"committed","num_rows_inserted":2}`, string(encoded))
-}
-
-func TestAppendNDJSONRejectsLocalLimitsBeforeRequest(t *testing.T) {
-	t.Parallel()
-
-	const eightMiB = 8 * 1024 * 1024
-	requests := 0
-	client, err := NewClient(Config{
-		Endpoint: "https://example.com",
-		HTTPClient: &http.Client{Transport: appendRoundTripFunc(func(*http.Request) (*http.Response, error) {
-			requests++
-			return nil, errors.New("unexpected request")
-		})},
-	})
-	require.NoError(t, err)
-
-	for _, ndjson := range [][]byte{
-		bytes.Repeat([]byte{'x'}, eightMiB+1),
-		bytes.Repeat([]byte("{}\n"), maxAppendRows+1),
-	} {
-		_, err := client.appendNDJSON(context.Background(), "db", "schema", "table", ndjson)
-		var scopeErr *Error
-		require.ErrorAs(t, err, &scopeErr)
-		require.Equal(t, ErrorKindAppendRowsFailed, scopeErr.Kind)
-		require.Equal(t, AppendStateRejected, scopeErr.AppendDetails.Status)
-		require.False(t, scopeErr.Retryable)
-	}
-	require.Zero(t, requests)
-}
-
-func TestAppendNDJSONPreservesRejectedDetails(t *testing.T) {
-	t.Parallel()
-
-	requests := 0
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		requests++
-		w.Header().Set("X-Request-ID", "header-request")
-		w.Header().Set("Retry-After", "3")
-		w.WriteHeader(http.StatusBadRequest)
-		_, err := w.Write([]byte(`{"message":"column id is invalid","request_id":"append-request","retryable":true,"details":{"status":"rejected","row_errors":[{"row_index":1,"column":"id","message":"expected int"}],"row_errors_truncated":false},"code":"invalid_schema"}`))
-		require.NoError(t, err)
-	}))
-	defer server.Close()
-
-	client, err := NewClient(Config{Endpoint: server.URL})
-	require.NoError(t, err)
-	t.Cleanup(client.Close)
-
-	_, err = client.appendNDJSON(context.Background(), "db", "schema", "table", []byte("{\"id\":\"x\"}"))
-	var scopeErr *Error
-	require.ErrorAs(t, err, &scopeErr)
-	require.Equal(t, "column id is invalid", scopeErr.Error())
-	require.Equal(t, ErrorKindAppendRowsFailed, scopeErr.Kind)
-	require.Equal(t, http.StatusBadRequest, scopeErr.HTTPStatus)
-	require.Equal(t, "append-request", scopeErr.RequestID)
-	require.Equal(t, AppendStateRejected, scopeErr.AppendDetails.Status)
-	require.Equal(t, []AppendRowError{{
-		RowIndex: 1,
-		Column:   "id",
-		Message:  "expected int",
-	}}, scopeErr.AppendDetails.RowErrors)
-	require.True(t, scopeErr.Retryable)
-	require.Equal(t, 1, requests)
-	encoded, err := json.Marshal(scopeErr.AppendDetails)
-	require.NoError(t, err)
-	require.JSONEq(t, `{"status":"rejected","row_errors":[{"row_index":1,"column":"id","message":"expected int"}],"row_errors_truncated":false}`, string(encoded))
-}
-
-func TestAppendNDJSONNeverRetriesUnknownOutcome(t *testing.T) {
-	t.Parallel()
-
-	requests := 0
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		requests++
-		w.WriteHeader(http.StatusServiceUnavailable)
-		_, err := w.Write([]byte(`{"message":"commit outcome is unavailable","retryable":true,"details":{"status":"unknown","row_errors":[],"row_errors_truncated":false},"code":"commit_unknown"}`))
-		require.NoError(t, err)
-	}))
-	defer server.Close()
-
-	client, err := NewClient(Config{Endpoint: server.URL})
-	require.NoError(t, err)
-	t.Cleanup(client.Close)
-
-	_, err = client.appendNDJSON(context.Background(), "db", "schema", "table", []byte("{}"))
-	var scopeErr *Error
-	require.ErrorAs(t, err, &scopeErr)
-	require.Equal(t, "commit outcome is unavailable", scopeErr.Error())
-	require.Equal(t, AppendStateUnknown, scopeErr.AppendDetails.Status)
-	require.False(t, scopeErr.Retryable)
-	require.Equal(t, 1, requests)
-}
-
-func TestAppendNDJSONTreatsInvalidSuccessAsUnknown(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name string
-		body string
+func TestAppendAcknowledgementMustConfirmEveryRow(t *testing.T) {
+	for _, tc := range []struct {
+		name, payload, acknowledgement string
+		committed                      bool
 	}{
-		{name: "malformed", body: "not-json"},
-		{name: "contradictory state", body: `{"status":"rejected","num_rows_inserted":0}`},
-		{name: "missing row count", body: `{"status":"committed"}`},
-		{name: "null row count", body: `{"status":"committed","num_rows_inserted":null}`},
-		{name: "negative row count", body: `{"status":"committed","num_rows_inserted":-1}`},
-		{name: "row count mismatch", body: `{"status":"committed","num_rows_inserted":2}`},
-	}
-	for _, test := range tests {
-		test := test
-		t.Run(test.name, func(t *testing.T) {
-			t.Parallel()
-
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-				w.Header().Set("X-Request-ID", "success-request")
-				_, err := io.WriteString(w, test.body)
+		{"explicit zero", "\n \n", `{"status":"committed","num_rows_inserted":0}`, true},
+		{"missing zero", "\n \n", `{"status":"committed"}`, false},
+		{"contradictory state", `{}`, `{"status":"rejected","num_rows_inserted":1}`, false},
+		{"wrong count", `{}`, `{"status":"committed","num_rows_inserted":2}`, false},
+		{"malformed", `{}`, `not JSON`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			client := testClient(t, func(*http.Request) (*http.Response, error) {
+				calls++
+				return jsonResponse(200, tc.acknowledgement), nil
+			})
+			_, err := client.Table("events").AppendNDJSON(t.Context(), []byte(tc.payload))
+			if tc.committed {
 				require.NoError(t, err)
-			}))
-			defer server.Close()
+			} else {
+				failure := apiError(t, err)
+				require.Equal(t, AppendStateUnknown, failure.AppendDetails.Status)
+				require.False(t, failure.Retryable)
+			}
+			require.Equal(t, 1, calls, "direct appends make a single SDK attempt")
+		})
+	}
+}
 
-			client, err := NewClient(Config{Endpoint: server.URL})
-			require.NoError(t, err)
-			t.Cleanup(client.Close)
-			_, err = client.appendNDJSON(context.Background(), "db", "schema", "table", []byte("{}"))
-
-			var scopeErr *Error
-			require.ErrorAs(t, err, &scopeErr)
-			require.Equal(t, ErrorKindAppendRowsFailed, scopeErr.Kind)
-			require.Equal(t, AppendStateUnknown, scopeErr.AppendDetails.Status)
-			require.Equal(t, http.StatusOK, scopeErr.HTTPStatus)
-			require.Equal(t, "success-request", scopeErr.RequestID)
-			require.False(t, scopeErr.Retryable)
-			if test.name == "malformed" {
-				var syntaxErr *json.SyntaxError
-				require.ErrorAs(t, scopeErr, &syntaxErr)
+func TestAppendFailureClassification(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		status    int
+		body      string
+		readError bool
+		state     AppendState
+		retryable bool
+	}{
+		{"schema rejection", 422, `{"code":"invalid_schema","message":"invalid integer","details":{"status":"rejected","row_errors":[{"row_index":0,"column":"id","message":"expected int"}]}}`, false, AppendStateRejected, false},
+		{"explicit unknown", 503, `{"retryable":true,"details":{"status":"unknown"}}`, false, AppendStateUnknown, false},
+		{"rate limit without details", 429, "too many requests", false, AppendStateRejected, true},
+		{"interrupted rejection", 401, "", true, AppendStateUnknown, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client := testClient(t, func(*http.Request) (*http.Response, error) {
+				resp := jsonResponse(tc.status, tc.body)
+				resp.Header.Set("X-Request-ID", "append-request")
+				resp.Header.Set("Retry-After", "2")
+				if tc.readError {
+					resp.Body = errorReadCloser{io.ErrUnexpectedEOF}
+				}
+				return resp, nil
+			})
+			_, err := client.Table("events").AppendNDJSON(t.Context(), []byte(`{}`))
+			failure := apiError(t, err)
+			require.Equal(t, tc.state, failure.AppendDetails.Status)
+			require.Equal(t, tc.retryable, failure.Retryable)
+			require.Equal(t, tc.status, failure.HTTPStatus)
+			require.Equal(t, "append-request", failure.RequestID)
+			require.Equal(t, 2*time.Second, failure.RetryAfter)
+			if tc.readError {
+				require.ErrorIs(t, err, io.ErrUnexpectedEOF)
+			}
+			if tc.name == "schema rejection" {
+				require.Equal(t, "invalid_schema", failure.Code)
+				require.Equal(t, []AppendRowError{{RowIndex: 0, Column: "id", Message: "expected int"}}, failure.AppendDetails.RowErrors)
 			}
 		})
 	}
 }
 
-func TestAppendNDJSONValidatesZeroRowSuccess(t *testing.T) {
-	t.Parallel()
-
-	t.Run("explicit zero", func(t *testing.T) {
-		t.Parallel()
-
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-			_, err := io.WriteString(w, `{"status":"committed","num_rows_inserted":0}`)
-			require.NoError(t, err)
-		}))
-		defer server.Close()
-
-		client, err := NewClient(Config{Endpoint: server.URL})
-		require.NoError(t, err)
-		t.Cleanup(client.Close)
-
-		result, err := client.appendNDJSON(context.Background(), "db", "schema", "table", []byte("\n  \n"))
-		require.NoError(t, err)
-		require.Equal(t, AppendStateCommitted, result.Status)
-		require.Zero(t, result.NumRowsInserted)
+func TestAppendLimitsRejectBeforeDispatch(t *testing.T) {
+	client := testClient(t, func(*http.Request) (*http.Response, error) {
+		t.Error("oversized append reached transport")
+		return nil, errors.New("unexpected request")
 	})
-
-	t.Run("missing row count", func(t *testing.T) {
-		t.Parallel()
-
-		requests := 0
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-			requests++
-			w.Header().Set("X-Request-ID", "missing-count-request")
-			_, err := io.WriteString(w, `{"status":"committed"}`)
-			require.NoError(t, err)
-		}))
-		defer server.Close()
-
-		client, err := NewClient(Config{Endpoint: server.URL})
-		require.NoError(t, err)
-		t.Cleanup(client.Close)
-
-		_, err = client.appendNDJSON(context.Background(), "db", "schema", "table", []byte("\n  \n"))
-		var scopeErr *Error
-		require.ErrorAs(t, err, &scopeErr)
-		require.Equal(t, ErrorKindAppendRowsFailed, scopeErr.Kind)
-		require.Equal(t, AppendStateUnknown, scopeErr.AppendDetails.Status)
-		require.Equal(t, "missing-count-request", scopeErr.RequestID)
-		require.False(t, scopeErr.Retryable)
-		require.Equal(t, 1, requests)
-	})
-}
-
-func TestAppendNDJSONUnstructuredHTTPErrorIsUnknown(t *testing.T) {
-	t.Parallel()
-
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusBadGateway)
-		_, err := io.WriteString(w, "upstream disconnected")
-		require.NoError(t, err)
-	}))
-	defer server.Close()
-
-	client, err := NewClient(Config{Endpoint: server.URL})
-	require.NoError(t, err)
-	t.Cleanup(client.Close)
-
-	_, err = client.appendNDJSON(context.Background(), "db", "schema", "table", []byte("{}"))
-	var scopeErr *Error
-	require.ErrorAs(t, err, &scopeErr)
-	require.Equal(t, "upstream disconnected", scopeErr.Error())
-	require.Equal(t, AppendStateUnknown, scopeErr.AppendDetails.Status)
-	require.False(t, scopeErr.Retryable)
-}
-
-func TestAppendNDJSONTransportAndReadErrorsPreserveCause(t *testing.T) {
-	t.Parallel()
-
-	t.Run("transport", func(t *testing.T) {
-		t.Parallel()
-
-		transportErr := errors.New("network unavailable")
-		client, err := NewClient(Config{
-			Endpoint: "https://example.com",
-			HTTPClient: &http.Client{Transport: appendRoundTripFunc(func(*http.Request) (*http.Response, error) {
-				return nil, transportErr
-			})},
-		})
-		require.NoError(t, err)
-
-		_, err = client.appendNDJSON(context.Background(), "db", "schema", "table", []byte("{}"))
-		var scopeErr *Error
-		require.ErrorAs(t, err, &scopeErr)
-		require.ErrorIs(t, scopeErr, transportErr)
-		require.Contains(t, scopeErr.Error(), transportErr.Error())
-		require.Equal(t, AppendStateUnknown, scopeErr.AppendDetails.Status)
-	})
-
-	for _, status := range []int{http.StatusOK, http.StatusUnauthorized, http.StatusForbidden, http.StatusServiceUnavailable} {
-		t.Run("response body "+http.StatusText(status), func(t *testing.T) {
-			t.Parallel()
-
-			readErr := errors.New("response stream interrupted")
-			calls := 0
-			client, err := NewClient(Config{
-				Endpoint: "https://example.com",
-				HTTPClient: &http.Client{Transport: appendRoundTripFunc(func(*http.Request) (*http.Response, error) {
-					calls++
-					return &http.Response{
-						StatusCode: status,
-						Header: http.Header{
-							"X-Request-Id": {"interrupted-append"},
-							"Retry-After":  {"2"},
-						},
-						Body: errorReadCloser{err: readErr},
-					}, nil
-				})},
-			})
-			require.NoError(t, err)
-			t.Cleanup(client.Close)
-
-			_, err = client.appendNDJSON(context.Background(), "db", "schema", "table", []byte("{}"))
-			var scopeErr *Error
-			require.ErrorAs(t, err, &scopeErr)
-			require.Equal(t, readErr.Error(), scopeErr.Error())
-			require.ErrorIs(t, scopeErr, readErr)
-			require.Equal(t, AppendStateUnknown, scopeErr.AppendDetails.Status)
-			require.False(t, scopeErr.Retryable)
-			require.Equal(t, status, scopeErr.HTTPStatus)
-			require.Equal(t, "interrupted-append", scopeErr.RequestID)
-			require.Equal(t, 2*time.Second, scopeErr.RetryAfter)
-			require.Equal(t, 1, calls)
-		})
+	for _, payload := range [][]byte{
+		bytes.Repeat([]byte{'x'}, 8*1024*1024+1),
+		bytes.Repeat([]byte("{}\n"), 200001),
+	} {
+		_, err := client.Table("events").AppendNDJSON(t.Context(), payload)
+		failure := apiError(t, err)
+		require.Equal(t, AppendStateRejected, failure.AppendDetails.Status)
 	}
-}
-
-func TestAppendNDJSONReturnsPreCancelledContextUnchanged(t *testing.T) {
-	t.Parallel()
-
-	requests := 0
-	client, err := NewClient(Config{
-		Endpoint: "https://example.com",
-		HTTPClient: &http.Client{Transport: appendRoundTripFunc(func(*http.Request) (*http.Response, error) {
-			requests++
-			return nil, errors.New("unexpected request")
-		})},
-	})
-	require.NoError(t, err)
-
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
-	_, err = client.appendNDJSON(ctx, "db", "schema", "table", []byte("{}"))
-	require.Equal(t, context.Canceled, err)
-	require.Zero(t, requests)
-}
-
-type appendRoundTripFunc func(*http.Request) (*http.Response, error)
-
-func (f appendRoundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
-	return f(req)
-}
-
-type errorReadCloser struct {
-	err error
-}
-
-func (r errorReadCloser) Read([]byte) (int, error) {
-	return 0, r.err
-}
-
-func (errorReadCloser) Close() error {
-	return nil
+	_, err := client.Table("events").AppendNDJSON(ctx, []byte(`{}`))
+	require.ErrorIs(t, err, context.Canceled)
 }

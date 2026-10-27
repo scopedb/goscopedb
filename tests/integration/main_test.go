@@ -17,39 +17,50 @@
 package integration_test
 
 import (
+	"context"
+	"net/http"
 	"os"
 	"strings"
 	"testing"
+	"time"
 
-	"github.com/lucasepe/codename"
+	"github.com/google/uuid"
 	scopedb "github.com/scopedb/goscopedb"
 	"github.com/stretchr/testify/require"
-
 	"go.uber.org/goleak"
 )
 
-func TestMain(m *testing.M) {
-	goleak.VerifyTestMain(m)
-}
+func TestMain(m *testing.M) { goleak.VerifyTestMain(m) }
 
-func NewClient(t testing.TB) *scopedb.Client {
+func integrationClient(t *testing.T, key string) *scopedb.Client {
+	t.Helper()
 	endpoint := os.Getenv("SCOPEDB_ENDPOINT")
-
 	if endpoint == "" {
 		t.Skip("SCOPEDB_ENDPOINT not set")
-		return nil // unreachable
 	}
-
-	client, err := scopedb.NewClient(scopedb.Config{
-		Endpoint: endpoint,
-		APIKey:   os.Getenv("SCOPEDB_API_KEY"),
-	})
+	client, err := scopedb.NewClient(scopedb.Config{Endpoint: endpoint, APIKey: key})
 	require.NoError(t, err)
+	t.Cleanup(client.Close)
 	return client
 }
 
-func RandomName(t testing.TB) string {
-	rng, err := codename.DefaultRNG()
-	require.NoError(t, err)
-	return strings.ReplaceAll(codename.Generate(rng, 10), "-", "_")
+func tableName() string { return "go_sdk_" + strings.ReplaceAll(uuid.NewString(), "-", "") }
+
+func cleanupTable(t *testing.T, table *scopedb.Table) {
+	t.Helper()
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		_, err := table.Catalog().Delete(ctx, scopedb.CatalogOptions{AllowDestructive: true})
+		if err != nil {
+			require.Equal(t, http.StatusNotFound, httpFailure(t, err).HTTPStatus)
+		}
+	})
+}
+
+func httpFailure(t *testing.T, err error) *scopedb.Error {
+	t.Helper()
+	var failure *scopedb.Error
+	require.ErrorAs(t, err, &failure)
+	return failure
 }
