@@ -136,9 +136,10 @@ func (o AppendDeliveryOutcome) String() string {
 }
 
 // AppendRetryOptions configures retries of an exact encoded batch for temporary
-// rejections. A nil Retry uses the defaults;
-// a non-nil option with MaxRetries=0 disables retries.
-// Caller cancellations are never retried. Attempt timeouts require RetryUnknown.
+// rejections, with optional replay of transient unknown outcomes. A nil Retry
+// uses the defaults; a non-nil option with MaxRetries=0 disables retries.
+// Caller cancellations are never retried. Timeouts with an unknown commit
+// outcome require RetryUnknown; timeouts known to precede dispatch do not.
 type AppendRetryOptions struct {
 	MaxRetries int
 	// RetryUnknown opts into retries after a transient failure that may have
@@ -164,7 +165,9 @@ type AppendStreamOptions struct {
 	MaxBatchRows int
 	// FlushInterval defaults to one second.
 	FlushInterval time.Duration
-	// MaxBufferedBytes bounds encoded pending rows. It defaults to 64 MiB.
+	// MaxBufferedBytes bounds accepted encoded rows, including in-flight batches.
+	// It defaults to 64 MiB and excludes temporary encoding/compression buffers
+	// and rows held by blocked Send callers.
 	MaxBufferedBytes int
 	// MaxConcurrentBatches defaults to four, cannot exceed 1024, and may be set
 	// to one for serial request submission.
@@ -209,7 +212,8 @@ type AppendDroppedRows struct {
 	Closed uint64
 }
 
-// AppendLastFailure describes the last remotely failed batch.
+// AppendLastFailure describes the last failed batch, including failures before
+// dispatch. Status covers all attempts; other diagnostics describe the last one.
 type AppendLastFailure struct {
 	// At is when the client observed the failure.
 	At time.Time
@@ -252,7 +256,7 @@ type AppendStreamStats struct {
 	PendingRows     uint64
 	PendingBytes    int
 	InFlightBatches int
-	// LastFailure is nil until a remote batch fails.
+	// LastFailure is nil until a batch fails.
 	LastFailure *AppendLastFailure
 	// LastReport is nil until a delivery barrier completes.
 	LastReport *AppendDeliveryReport
@@ -579,8 +583,12 @@ func (s *AppendStream) trySendCapacityError() error {
 }
 
 // Flush dispatches all rows admitted before this barrier and waits for settlement.
+// Its report covers activity since the previous completed barrier. Continue mode
+// may return a non-OK report without an error; callers must inspect Outcome.
 // Canceling ctx stops only this wait; an already enqueued barrier keeps running.
-// If ctx ends first, Flush returns a zero report and ctx.Err().
+// If ctx ends first, Flush returns a zero report and ctx.Err(). The barrier
+// still advances the report interval when it completes; inspect lifetime Stats
+// and Stats().LastReport to account for delivery after an interrupted wait.
 func (s *AppendStream) Flush(ctx context.Context) (AppendDeliveryReport, error) {
 	select {
 	case <-s.terminalDone:
@@ -647,7 +655,9 @@ func (s *AppendStream) waitBarrier(ctx context.Context, barrier *appendBarrier) 
 }
 
 // Shutdown permanently closes admission and settles every admitted row.
-// It is idempotent; canceling ctx stops only the caller's wait.
+// It is idempotent and returns the original final report on repeated calls.
+// Continue mode may return a non-OK report without an error.
+// Canceling ctx stops only the caller's wait.
 // If ctx ends first, Shutdown returns a zero report and ctx.Err().
 func (s *AppendStream) Shutdown(ctx context.Context) (AppendDeliveryReport, error) {
 	start := false
@@ -666,7 +676,9 @@ func (s *AppendStream) Shutdown(ctx context.Context) (AppendDeliveryReport, erro
 	return s.waitTerminal(ctx)
 }
 
-// Stats returns a race-safe lifetime snapshot.
+// Stats returns a race-safe snapshot. Row and retry counters are lifetime
+// totals and are not reset by Flush. LastFailure and LastReport are caller-owned
+// copies; PendingRows, PendingBytes, and InFlightBatches are current gauges.
 func (s *AppendStream) Stats() AppendStreamStats {
 	s.shared.mu.Lock()
 	defer s.shared.mu.Unlock()

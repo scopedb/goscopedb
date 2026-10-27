@@ -34,7 +34,8 @@ import (
 	"github.com/klauspost/compress/zstd"
 )
 
-// Client provides access to ScopeDB APIs.
+// Client provides access to ScopeDB APIs and is safe for concurrent use.
+// Reuse a client to share its HTTP connection pool.
 type Client struct {
 	endpoint     *url.URL
 	http         *httpClient

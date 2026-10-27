@@ -18,7 +18,9 @@
 Package scopedb provides the official Go client for ScopeDB. It supports
 ScopeQL statements, declarative catalog management, and streaming writes.
 
-Create and close one Client for the application's connection pool:
+# Connect and query
+
+Reuse one [Client] for the application's connection pool:
 
 	client, err := scopedb.NewClient(scopedb.Config{
 		Endpoint: os.Getenv("SCOPEDB_ENDPOINT"),
@@ -29,7 +31,7 @@ Create and close one Client for the application's connection pool:
 	}
 	defer client.Close()
 
-Query waits for a statement result, which can be converted to keyed objects:
+[Client.Query] waits for a statement result:
 
 	result, err := client.Query(ctx, "SELECT 1 AS ready")
 	if err != nil {
@@ -41,41 +43,82 @@ Query waits for a statement result, which can be converted to keyed objects:
 	}
 	fmt.Println(rows)
 
-Use Statement.Submit when an application needs the statement ID, a local Snapshot,
-an explicit Refresh, or a separate Wait. Cancel returns the same complete
-StatementSnapshot as Refresh; all handle methods are safe to call concurrently.
-Omit ID to let ScopeDB generate it. MaxElapsed and MaxEstimated set server-side duration limits.
-Failed statements expose the server message and code on Error, with structured
-details on Error.StatementDetails.
-Client.Catalog reads and replaces the complete tenant catalog. Its Database,
-Schema, Table, and View selectors provide typed Get, Apply, and Delete operations.
-Raw retains JSON definitions including fields unknown to the SDK. Apply supports
-dry runs, ETag preconditions, and authorization for destructive changes.
-Table.Catalog selects the table definition for Get, Apply, Delete, or Raw.
-Typed reads reject unsupported fields to prevent lossy replacements.
-Potentially destructive changes are rejected without explicit authorization.
+[ResultSet.ToObjects] keys rows by column name; [ResultSet.ToValues] returns
+positional values, and [ResultSet.RawRows] returns string-or-null wire cells.
+Integers retain their int64/uint64 precision. Timestamps become time.Time,
+intervals become time.Duration, and binary cells become []byte. Object, array,
+and any cells remain JSON strings; use json.Decoder.UseNumber when decoding
+embedded JSON without losing integer precision.
 
-For application writes, Table.AppendStream is the recommended path:
-it accepts typed rows and adds bounded asynchronous batching that is safe for
-concurrent producers. Table.AppendStream and Table.AppendNDJSON use the
-client's configured compression, which defaults to zstd. Table.AppendNDJSON is
-the low-level path for one caller-owned NDJSON request.
+Use [Statement.Submit] and retain its [StatementHandle] to inspect, wait for, or
+cancel an execution. Snapshot reads the local cache; Refresh fetches one remote
+observation while active. Cancel returns the same complete [StatementSnapshot].
+Handle methods are safe to call concurrently. A local context deadline does not
+cancel the server statement; use Cancel with a live context. Set [Statement.ID]
+before submission when recovery requires a caller-known ID. MaxElapsed and
+MaxEstimated limit server execution independently of local waiting.
 
-AppendStream.Send uses encoding/json and accepts typed structs and other values
-that encode as a top-level JSON object. Send does not validate the destination
-table schema. ScopeDB validation failures surface when Flush or Shutdown
-settles: the stop policy returns the error, while continue mode reports failed
-rows in the delivery report and failure details in Stats().LastFailure.
+# Manage table definitions
 
-Stream Send methods confirm local admission only. Flush and Shutdown wait for
-the accepted prefix. AppendStream reports rejected and unknown outcomes.
-Unknown outcomes are not retried unless RetryUnknown is explicitly enabled;
-those retries may duplicate rows, including after an attempt timeout. Cancellation
-and the overall delivery budget still stop retries.
+[Client.Catalog] selects the complete tenant catalog. Its Database, Schema,
+Table, and View selectors provide typed Get, Apply, and Delete operations.
+[Table.Catalog] selects one table. Apply replaces the entire selected subtree,
+including children; omitted fields are cleared. Use dry runs and ETag
+preconditions to review changes and reject concurrent edits. Potentially
+destructive changes require explicit authorization. Typed reads reject
+unsupported fields; Raw preserves them as JSON for export and apply workflows.
 
-ScopeQL is documented separately in the [quickstart], [query guide], and
-[language reference].
+# Write rows
 
+[Table.AppendStream] accepts Go structs or maps and provides bounded asynchronous
+batching. This example uses an existing events table with id int and name string
+columns:
+
+	stream, err := client.Table("events").AppendStream(scopedb.AppendStreamOptions{})
+	if err != nil {
+		return err
+	}
+	if err := stream.Send(ctx, map[string]any{"id": 1, "name": "page_view"}); err != nil {
+		_, _ = stream.Shutdown(ctx)
+		return err
+	}
+	report, err := stream.Shutdown(ctx)
+	if err != nil {
+		return err
+	}
+	fmt.Println(report.CommittedRows)
+
+Send uses encoding/json and confirms local admission only. It requires a
+top-level JSON object but does not validate the destination schema. Flush waits
+for accepted rows while keeping the stream open; Shutdown closes admission and
+settles accepted rows. Cancelling either wait does not cancel delivery.
+[Client.Close] releases idle connections and does not shut down streams.
+
+The default failure policy stops after a failed batch. [AppendFailureContinue]
+keeps processing later batches; inspect [AppendDeliveryReport.Outcome] even when
+the barrier returns no error. [AppendStream.Stats] exposes lifetime counters and
+failure diagnostics. Unknown outcomes may already have committed and are not
+retried unless RetryUnknown is enabled, accepting possible duplicate rows.
+
+[Table.AppendNDJSON] sends one caller-owned NDJSON request without automatic
+retries. Direct requests and stream batches use the client's configured
+compression, which defaults to zstd. Append has no schema-aware conversions:
+encode interval columns as ISO 8601 PT strings, not time.Duration integers.
+See the [usage guide] for JSON encodings, limits, timeouts, and delivery contracts.
+
+# Errors and further reading
+
+Use errors.As to inspect [Error] for the server message, code, HTTP diagnostics,
+and structured statement or append details. Use errors.Is for underlying causes
+and [ErrStatementCancelled], which is distinct from a local context.Canceled.
+Retryable alone does not prove that replay is safe; reconcile unknown write
+outcomes before resubmitting.
+
+For version upgrades, see the [migration guide]. ScopeQL is documented separately
+in the [quickstart], [query guide], and [language reference].
+
+[usage guide]: https://github.com/scopedb/goscopedb/blob/main/docs/usage.md
+[migration guide]: https://github.com/scopedb/goscopedb/blob/main/docs/migration-0.7.md
 [quickstart]: https://www.scopedb.io/docs/guides/quickstart
 [query guide]: https://www.scopedb.io/docs/guides/query-events
 [language reference]: https://www.scopedb.io/docs/reference

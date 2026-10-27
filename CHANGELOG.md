@@ -23,10 +23,10 @@ All significant changes to the ScopeDB Go SDK are documented in this file.
 * `AppendStreamOptions.AttemptTimeout` now takes `*time.Duration`. Omit it to inherit the client write timeout, use `new(duration)` with a positive duration to override it, or use `new(time.Duration)` to disable the per-attempt limit.
 * Direct table appends now have a default 30-second HTTP attempt timeout, including response-body reads. Set `Config.WriteTimeout` to `new(time.Duration)` to disable the SDK limit; caller context deadlines and HTTP-client timeouts still apply. The same setting bounds Catalog mutations and dry runs.
 * Replace partial Statement accessors and `StatementCancelResult` with complete `StatementSnapshot` values from `Snapshot`, `Refresh`, and `Cancel`. Confirmed cancellation is identifiable through `ErrStatementCancelled`.
-* Replace `Statement.ExecTimeout` with `MaxElapsed` and `MaxEstimated` duration fields. Statement failures expose native string codes through `Error.Code` and `StatementErrorDetails.Code` instead of the previous `StatementErrorCode` type and constants.
+* Replace `Statement.ExecTimeout` with `MaxElapsed` and `MaxEstimated` duration fields. Statement failures expose native codes through `Error.Code` and the string-backed `StatementErrorDetails.Code`. Replace prepare/execute error constants with `StatementErrorCodeFailed`; timeout and heartbeat string values now use the `statement_` prefix, and row/scan limit constants have been removed.
 * Replace paginated Catalog APIs and table descriptions with complete declarative definitions. Use `Table.Catalog().Get` and `Delete` instead of `Table.Describe` and `Drop`, preserving ETags and explicitly authorizing destructive changes. Typed reads reject unknown fields; use `Raw()` for forward-compatible round trips.
 * Rename append outcome fields from `AppendState` to `Status` and serialize them as `status`. Remove the historical `u_int` data type spelling; use `uint`.
-* Remove the legacy transform Ingest stream API. Use table append APIs and transform rows in the producer. The [v0.6 to v0.7 migration guide](README.md#migrate-from-v06-to-v07) covers all API replacements and write behavior changes.
+* Remove the legacy transform Ingest stream API. Use table append APIs and transform rows in the producer. The [v0.6 to v0.7 migration guide](docs/migration-0.7.md) covers all API replacements and write behavior changes.
 
 ### New Features
 

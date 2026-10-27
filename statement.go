@@ -51,12 +51,16 @@ func (c *Client) Statement(stmt string) *Statement {
 	return &Statement{c: c, stmt: stmt}
 }
 
-// Query executes a ScopeQL statement and waits for all result rows.
+// Query submits a ScopeQL statement and waits for all result rows. A context
+// error stops local waiting without cancelling server execution. Use
+// Statement.Submit and retain its handle when the query must be resumed or cancelled.
 func (c *Client) Query(ctx context.Context, scopeql string) (*ResultSet, error) {
 	return c.Statement(scopeql).Execute(ctx)
 }
 
-// Submit submits the statement to ScopeDB for execution.
+// Submit submits the statement to ScopeDB for execution. A lost response does
+// not prove rejection; set ID before submission when reconciliation needs a
+// caller-known identifier.
 func (s *Statement) Submit(ctx context.Context) (*StatementHandle, error) {
 	if s.MaxElapsed < 0 || s.MaxEstimated < 0 {
 		return nil, newError(ErrorKindConfigInvalid, "statement limits must not be negative", nil)
