@@ -67,19 +67,25 @@ type Error struct {
 	// Details preserves code-specific HTTP or statement error information from the server.
 	Details json.RawMessage
 	Kind    ErrorKind
-	// Code is the server error code, when provided, or catalog_commit_outcome_unknown
-	// when a catalog mutation could not be confirmed. Unknown codes are retained.
-	Code          string
-	Message       string
-	HTTPStatus    int
-	RequestID     string
-	RetryAfter    time.Duration
+	// Code is the server error code, when provided, or an SDK outcome-unknown
+	// code when a Statement submission or Catalog mutation could not be confirmed.
+	// Unknown server codes are retained.
+	Code       string
+	Message    string
+	HTTPStatus int
+	RequestID  string
+	RetryAfter time.Duration
+	// Retryable classifies temporary failures. After successful submission,
+	// Query and Execute return false because replay would submit another statement.
 	Retryable     bool
 	AppendDetails *AppendErrorDetails
 	// WriteDetails identifies a client or transport timeout or cancellation.
 	// Outcome distinguishes an unsent append from a potentially committed write.
 	// Existing error kinds, causes, and HTTP diagnostics remain available.
 	WriteDetails *WriteErrorDetails
+	// StatementID identifies the statement being submitted, inspected, or waited
+	// for, when known. It does not prove acceptance or continued result retention.
+	StatementID *uuid.UUID
 	// StatementDetails contains the structured server failure for a failed
 	// statement, when available.
 	StatementDetails *StatementErrorDetails
@@ -99,6 +105,20 @@ func (e *Error) Unwrap() error {
 
 func newError(kind ErrorKind, message string, cause error) *Error {
 	return &Error{Kind: kind, Message: message, cause: cause}
+}
+
+// statementError adds recovery context without mutating a transport-owned error.
+func statementError(err error, id *uuid.UUID) *Error {
+	failure := newError(ErrorKindUnexpected, err.Error(), err)
+	if original, ok := errors.AsType[*Error](err); ok {
+		*failure = *original
+		failure.cause = err
+	}
+	failure.StatementID = nil
+	if id != nil {
+		failure.StatementID = new(*id)
+	}
+	return failure
 }
 
 func writeErrorDetails(cause error) *WriteErrorDetails {

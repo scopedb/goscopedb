@@ -56,7 +56,10 @@ observation while active. Cancel returns the same complete [StatementSnapshot].
 Handle methods are safe to call concurrently. A local context deadline does not
 cancel the server statement; use Cancel with a live context. Set [Statement.ID]
 before submission when recovery requires a caller-known ID. MaxElapsed and
-MaxEstimated limit server execution independently of local waiting.
+MaxEstimated limit server execution independently of local waiting. After
+submission, Query and Execute errors expose [Error.StatementID] and are not
+marked retryable; resume waiting on that ID instead of submitting again.
+Transport and context causes remain available through errors.Is and errors.As.
 
 # Manage table definitions
 

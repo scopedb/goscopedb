@@ -8,6 +8,11 @@ All significant changes to the ScopeDB Go SDK are documented in this file.
 
 * Require Go 1.27.3 or later to include its `crypto/x509` security update. Upgrade the Go toolchain before updating the SDK.
 
+### Bug Fixes
+
+* Preserve `Error.StatementID` for statement recovery and stop marking `Query`/`Execute` failures as retryable after submission. Resume waiting on that ID instead of submitting another execution. Lost or malformed submission acknowledgements and unstructured gateway errors report `statement_submission_outcome_unknown`; original causes and HTTP diagnostics remain available.
+* Prefer a cached terminal Statement observation over a late in-flight request failure, so concurrent cancellation, completion, or statement failure is not hidden by an older polling or cancellation error.
+
 ## v0.7.1 (2026-10-26)
 
 ### Bug Fixes
