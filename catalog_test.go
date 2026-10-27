@@ -26,7 +26,7 @@ import (
 
 func TestCatalogConditionalWorkflow(t *testing.T) {
 	calls := 0
-	client := testClient(t, func(r *http.Request) (*http.Response, error) {
+	client := newTestClient(t, func(r *http.Request) (*http.Response, error) {
 		calls++
 		require.Equal(t, "/v1/catalog/databases/scopedb/schemas/public/tables/events.a%2Fb", r.URL.EscapedPath())
 		var body string
@@ -51,7 +51,7 @@ func TestCatalogConditionalWorkflow(t *testing.T) {
 		default:
 			t.Errorf("unexpected request %d", calls)
 		}
-		resp := jsonResponse(200, body)
+		resp := httpResponse(200, body)
 		resp.Header.Set("ETag", `"7"`)
 		if calls >= 3 {
 			resp.Header.Set("ETag", `"8"`)
@@ -77,7 +77,7 @@ func TestCatalogConditionalWorkflow(t *testing.T) {
 
 func TestCatalogRawPreservesUnknownNestedFields(t *testing.T) {
 	const definition = `{"name":"events","columns":[{"name":"id","data_type":"int","future":{"precise":9007199254740993}}]}`
-	client := testClient(t, func(r *http.Request) (*http.Response, error) {
+	client := newTestClient(t, func(r *http.Request) (*http.Response, error) {
 		body := definition
 		if r.Method == http.MethodPut {
 			data, err := io.ReadAll(r.Body)
@@ -85,7 +85,7 @@ func TestCatalogRawPreservesUnknownNestedFields(t *testing.T) {
 			require.JSONEq(t, definition, string(data))
 			body = `{"before":` + definition + `,"after":` + definition + `,"destructive":false}`
 		}
-		resp := jsonResponse(200, body)
+		resp := httpResponse(200, body)
 		resp.Header.Set("ETag", `"1"`)
 		return resp, nil
 	})
@@ -115,8 +115,8 @@ func TestCatalogMutationOutcome(t *testing.T) {
 		{"truncated preview", 200, "", true, true, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			client := testClient(t, func(*http.Request) (*http.Response, error) {
-				resp := jsonResponse(tc.status, tc.body)
+			client := newTestClient(t, func(*http.Request) (*http.Response, error) {
+				resp := httpResponse(tc.status, tc.body)
 				resp.Header.Set("X-Request-ID", "catalog-request")
 				if tc.readError {
 					resp.Body = errorReadCloser{io.ErrUnexpectedEOF}
@@ -124,7 +124,7 @@ func TestCatalogMutationOutcome(t *testing.T) {
 				return resp, nil
 			})
 			_, err := client.Catalog().Apply(t.Context(), &CatalogDocument{}, CatalogOptions{DryRun: tc.dryRun})
-			failure := apiError(t, err)
+			failure := requireError(t, err)
 			require.Equal(t, tc.code, failure.Code)
 			require.False(t, failure.Retryable)
 			require.Equal(t, "catalog-request", failure.RequestID)

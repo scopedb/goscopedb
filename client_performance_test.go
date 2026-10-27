@@ -24,7 +24,6 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -51,13 +50,13 @@ func TestConcurrentCompressionOwnsRequestBodies(t *testing.T) {
 				}
 				workers.Go(func() {
 					<-start
-					body, _, err := compressRequestBody(payloads[i], compression)
+					body, err := compressRequestBody(payloads[i], compression)
 					encoded[i], failures[i] = body.Bytes(), err
 				})
 			}
 			close(start)
 			workers.Wait()
-			_, _, err := compressRequestBody(bytes.Repeat([]byte("replacement"), 1024), compression)
+			_, err := compressRequestBody(bytes.Repeat([]byte("replacement"), 1024), compression)
 			require.NoError(t, err)
 			// Decode only after every encoder has been returned for reuse.
 			for i := range requests {
@@ -92,12 +91,12 @@ func BenchmarkRequestCompression(b *testing.B) {
 				}
 				payload = payload[:size]
 				// Exclude one-time encoder setup; measure sustained request encoding.
-				_, _, err := compressRequestBody(payload, compression)
+				_, err := compressRequestBody(payload, compression)
 				require.NoError(b, err)
 				b.ReportAllocs()
 				b.SetBytes(int64(len(payload)))
 				for b.Loop() {
-					if _, _, err := compressRequestBody(payload, compression); err != nil {
+					if _, err := compressRequestBody(payload, compression); err != nil {
 						b.Fatal(err)
 					}
 				}
@@ -144,8 +143,6 @@ func newHTTP1RequestWave(tb testing.TB) (func(), *atomic.Int64) {
 	client, err := NewClient(Config{Endpoint: server.URL})
 	require.NoError(tb, err)
 	tb.Cleanup(client.Close)
-	endpoint, err := url.Parse(server.URL)
-	require.NoError(tb, err)
 	return func() {
 		ctx, cancel := context.WithTimeout(tb.Context(), 5*time.Second)
 		defer cancel()
@@ -153,7 +150,12 @@ func newHTTP1RequestWave(tb testing.TB) (func(), *atomic.Int64) {
 		failures := make(chan error, concurrency)
 		for range concurrency {
 			workers.Go(func() {
-				resp, err := client.http.doGet(ctx, endpoint)
+				req, err := http.NewRequestWithContext(ctx, http.MethodGet, server.URL, nil)
+				if err != nil {
+					failures <- err
+					return
+				}
+				resp, err := client.do(req)
 				if err == nil {
 					err = resp.Body.Close()
 				}

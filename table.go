@@ -57,22 +57,22 @@ func (t *Table) Catalog() *CatalogResource[*CatalogTable] {
 // Response bodies are limited to 64 KiB. Overflow returns an error matching
 // [ErrResponseTooLarge].
 func (t *Table) AppendNDJSON(ctx context.Context, ndjson []byte) (AppendRowsResult, error) {
-	return t.c.appendNDJSON(ctx, t.databaseName(), t.schemaName(), t.Name, ndjson)
+	return t.c.appendNDJSON(ctx, t.databaseName(), t.schemaName(), t.Name, ndjson, t.c.writeTimeout)
 }
 
 // Identifier returns the quoted table identifier.
 func (t *Table) Identifier() string {
 	var b bytes.Buffer
 	if t.Database != "" {
-		b.WriteString(quoteIdent(t.Database, '`'))
+		b.WriteString(quoteIdentifier(t.Database))
 		b.WriteByte('.')
-		b.WriteString(quoteIdent(t.schemaName(), '`'))
+		b.WriteString(quoteIdentifier(t.schemaName()))
 		b.WriteByte('.')
 	} else if t.Schema != "" {
-		b.WriteString(quoteIdent(t.Schema, '`'))
+		b.WriteString(quoteIdentifier(t.Schema))
 		b.WriteByte('.')
 	}
-	b.WriteString(quoteIdent(t.Name, '`'))
+	b.WriteString(quoteIdentifier(t.Name))
 	return b.String()
 }
 
@@ -90,9 +90,10 @@ func (t *Table) schemaName() string {
 	return t.Schema
 }
 
-func quoteIdent(s string, r rune) string {
+func quoteIdentifier(s string) string {
+	const quote = '`'
 	var b bytes.Buffer
-	b.WriteRune(r)
+	b.WriteRune(quote)
 	for _, c := range s {
 		switch c {
 		case '\t':
@@ -104,7 +105,7 @@ func quoteIdent(s string, r rune) string {
 		case '\\':
 			b.WriteString("\\\\")
 		default:
-			if c == r {
+			if c == quote {
 				b.WriteRune('\\')
 				b.WriteRune(c)
 				break
@@ -118,6 +119,6 @@ func quoteIdent(s string, r rune) string {
 			b.WriteRune(c)
 		}
 	}
-	b.WriteRune(r)
+	b.WriteRune(quote)
 	return b.String()
 }

@@ -21,9 +21,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"math/rand/v2"
-	"net/http"
-	"slices"
 	"sync"
 	"time"
 )
@@ -298,7 +295,8 @@ func (t *Table) AppendStream(options AppendStreamOptions) (*AppendStream, error)
 		failureDone:   make(chan struct{}),
 	}
 	stream.shared.state = AppendStreamOpen
-	go stream.run()
+	worker := &appendWorker{stream: stream}
+	go worker.run()
 	return stream, nil
 }
 
@@ -317,7 +315,7 @@ func normalizeAppendStreamOptions(options AppendStreamOptions, writeTimeout time
 		config.retry = *options.Retry
 	}
 	if config.retry.MaxRetries < 0 || config.retry.InitialBackoff < 0 || config.retry.MaxBackoff < 0 || config.retry.MaxElapsedTime < 0 {
-		return config, appendStreamConfigError("retry limits must not be negative")
+		return config, newError(ErrorKindConfigInvalid, "retry limits must not be negative", nil)
 	}
 	if config.retry.InitialBackoff == 0 {
 		config.retry.InitialBackoff = defaultAppendInitialBackoff
@@ -329,92 +327,51 @@ func normalizeAppendStreamOptions(options AppendStreamOptions, writeTimeout time
 		config.retry.MaxElapsedTime = defaultAppendRetryElapsedTime
 	}
 	if config.retry.InitialBackoff > config.retry.MaxBackoff {
-		return config, appendStreamConfigError("initial retry backoff exceeds maximum backoff")
+		return config, newError(ErrorKindConfigInvalid, "initial retry backoff exceeds maximum backoff", nil)
 	}
 	if config.failurePolicy != AppendFailureStop && config.failurePolicy != AppendFailureContinue {
-		return config, appendStreamConfigError("failure policy is invalid")
+		return config, newError(ErrorKindConfigInvalid, "failure policy is invalid", nil)
 	}
 	if config.targetBatchBytes == 0 {
 		config.targetBatchBytes = defaultAppendTargetBatchBytes
 	}
 	if config.targetBatchBytes < 0 || config.targetBatchBytes > maxAppendBodyBytes {
-		return config, appendStreamConfigError(
-			fmt.Sprintf("target batch bytes must be from 1 to %d", maxAppendBodyBytes),
-		)
+		return config, newError(ErrorKindConfigInvalid,
+			fmt.Sprintf("target batch bytes must be from 1 to %d", maxAppendBodyBytes), nil)
 	}
 	if config.maxBatchRows == 0 {
 		config.maxBatchRows = defaultAppendMaxBatchRows
 	}
 	if config.maxBatchRows < 0 || config.maxBatchRows > maxAppendRows {
-		return config, appendStreamConfigError(
-			fmt.Sprintf("max batch rows must be from 1 to %d", maxAppendRows),
-		)
+		return config, newError(ErrorKindConfigInvalid,
+			fmt.Sprintf("max batch rows must be from 1 to %d", maxAppendRows), nil)
 	}
 	if config.flushInterval == 0 {
 		config.flushInterval = defaultAppendFlushInterval
 	}
 	if config.flushInterval < 0 {
-		return config, appendStreamConfigError("flush interval must be greater than zero")
+		return config, newError(ErrorKindConfigInvalid, "flush interval must be greater than zero", nil)
 	}
 	if config.maxBufferedBytes == 0 {
 		config.maxBufferedBytes = defaultAppendMaxBufferedBytes
 	}
 	if config.maxBufferedBytes < 0 {
-		return config, appendStreamConfigError("max buffered bytes must be greater than zero")
+		return config, newError(ErrorKindConfigInvalid, "max buffered bytes must be greater than zero", nil)
 	}
 	if config.maxConcurrentBatches == 0 {
 		config.maxConcurrentBatches = defaultAppendMaxConcurrentBatches
 	}
 	if config.maxConcurrentBatches < 0 || config.maxConcurrentBatches > maxAppendConcurrentBatches {
-		return config, appendStreamConfigError(
-			fmt.Sprintf("max concurrent batches must be from 1 to %d", maxAppendConcurrentBatches),
-		)
+		return config, newError(ErrorKindConfigInvalid,
+			fmt.Sprintf("max concurrent batches must be from 1 to %d", maxAppendConcurrentBatches), nil)
 	}
 	if options.AttemptTimeout != nil {
 		config.attemptTimeout = *options.AttemptTimeout
 	}
 	if config.attemptTimeout < 0 {
-		return config, appendStreamConfigError("attempt timeout must not be negative")
+		return config, newError(ErrorKindConfigInvalid, "attempt timeout must not be negative", nil)
 	}
 	return config, nil
-}
-
-func appendStreamConfigError(message string) error {
-	return newError(ErrorKindConfigInvalid, message, nil)
-}
-
-type appendCommand struct {
-	record  *appendRecord
-	barrier *appendBarrier
-}
-
-type appendRecord struct {
-	payload       []byte
-	reservedBytes int
-}
-
-type appendBarrier struct {
-	shutdown     bool
-	startedAt    time.Time
-	acceptedRows uint64
-	droppedRows  uint64
-	ack          chan appendBarrierResult
-}
-
-type appendBarrierResult struct {
-	report AppendDeliveryReport
-	err    error
-}
-
-type appendBatch struct {
-	payload       []byte
-	rows          int
-	reservedBytes int
-}
-
-type appendBatchResult struct {
-	batch appendBatch
-	err   error
 }
 
 type appendCounters struct {
@@ -508,12 +465,12 @@ func (s *AppendStream) Send(ctx context.Context, row any) error {
 	s.admissionMu.Lock()
 	defer s.admissionMu.Unlock()
 	if err := ctx.Err(); err != nil {
-		s.releaseCommandSlot()
+		<-s.commandSlots
 		s.budget.release(reservedBytes)
 		return err
 	}
 	if err := s.checkOpen(); err != nil {
-		s.releaseCommandSlot()
+		<-s.commandSlots
 		s.budget.release(reservedBytes)
 		return err
 	}
@@ -554,13 +511,13 @@ func (s *AppendStream) TrySend(row any) error {
 		return s.trySendCapacityError()
 	}
 	if !s.admissionMu.TryLock() {
-		s.releaseCommandSlot()
+		<-s.commandSlots
 		s.budget.release(reservedBytes)
 		return s.trySendCapacityError()
 	}
 	defer s.admissionMu.Unlock()
 	if err := s.checkOpen(); err != nil {
-		s.releaseCommandSlot()
+		<-s.commandSlots
 		s.budget.release(reservedBytes)
 		s.noteDrop(appendDropClosed)
 		return err
@@ -612,7 +569,7 @@ func (s *AppendStream) Flush(ctx context.Context) (AppendDeliveryReport, error) 
 	s.shared.mu.Unlock()
 	if state != AppendStreamOpen {
 		s.admissionMu.Unlock()
-		s.releaseCommandSlot()
+		<-s.commandSlots
 		return s.waitTerminal(ctx)
 	}
 	barrier := &appendBarrier{
@@ -695,9 +652,7 @@ func (s *AppendStream) Stats() AppendStreamStats {
 		PendingBytes:    s.shared.pendingBytes,
 		InFlightBatches: s.shared.inFlightBatches,
 	}
-	if s.shared.lastFailure != nil {
-		stats.LastFailure = copyAppendLastFailure(s.shared.lastFailure)
-	}
+	stats.LastFailure = cloneAppendLastFailure(s.shared.lastFailure)
 	if s.shared.lastReport != nil {
 		report := *s.shared.lastReport
 		stats.LastReport = &report
@@ -716,7 +671,7 @@ func (s *AppendStream) enqueueShutdown() {
 	defer s.admissionMu.Unlock()
 	select {
 	case <-s.terminalDone:
-		s.releaseCommandSlot()
+		<-s.commandSlots
 		return
 	default:
 	}
@@ -735,23 +690,16 @@ func (s *AppendStream) enqueueShutdown() {
 func (s *AppendStream) waitTerminal(ctx context.Context) (AppendDeliveryReport, error) {
 	select {
 	case <-s.terminalDone:
-		s.shared.mu.Lock()
-		report := *s.shared.lastReport
-		err := s.shared.fatal
-		s.shared.mu.Unlock()
-		return report, err
 	default:
+		select {
+		case <-s.terminalDone:
+		case <-ctx.Done():
+			return AppendDeliveryReport{}, ctx.Err()
+		}
 	}
-	select {
-	case <-s.terminalDone:
-		s.shared.mu.Lock()
-		report := *s.shared.lastReport
-		err := s.shared.fatal
-		s.shared.mu.Unlock()
-		return report, err
-	case <-ctx.Done():
-		return AppendDeliveryReport{}, ctx.Err()
-	}
+	s.shared.mu.Lock()
+	defer s.shared.mu.Unlock()
+	return *s.shared.lastReport, s.shared.fatal
 }
 
 func (s *AppendStream) checkOpen() error {
@@ -826,10 +774,6 @@ func (s *AppendStream) finishTerminal(report AppendDeliveryReport, err error, st
 	close(s.terminalDone)
 }
 
-func (s *AppendStream) releaseCommandSlot() {
-	<-s.commandSlots
-}
-
 func marshalAppendRecord(row any) ([]byte, error) {
 	payload, err := json.Marshal(row)
 	if err != nil {
@@ -842,666 +786,4 @@ func marshalAppendRecord(row any) ([]byte, error) {
 		return nil, fmt.Errorf("%w: encoded row is %d bytes, limit is %d", ErrAppendRowTooLarge, len(payload), maxAppendBodyBytes)
 	}
 	return payload, nil
-}
-
-func (s *AppendStream) run() {
-	worker := appendWorker{
-		stream:   s,
-		baseline: appendCounters{},
-	}
-	worker.run()
-}
-
-type appendWorker struct {
-	stream *AppendStream
-
-	current        []appendRecord
-	currentBytes   int
-	ready          []appendBatch
-	inFlight       int
-	barrier        *appendBarrier
-	failureBarrier *appendBarrier
-	baseline       appendCounters
-	stopping       bool
-	fatal          error
-	timer          *time.Timer
-	timerC         <-chan time.Time
-}
-
-func (w *appendWorker) run() {
-	for {
-		w.dispatchReady()
-		if w.stopping {
-			if w.failureBarrier != nil {
-				if w.inFlight == 0 {
-					if w.finishFailureBarrier() {
-						return
-					}
-					continue
-				}
-			} else {
-				w.drainAfterFailure()
-				if w.failureBarrier != nil {
-					continue
-				}
-			}
-			if w.inFlight == 0 {
-				w.finishFailure()
-				return
-			}
-		}
-		if w.barrier != nil && len(w.ready) == 0 && w.inFlight == 0 {
-			if w.finishBarrier() {
-				return
-			}
-			continue
-		}
-
-		var commandC <-chan appendCommand
-		if (!w.stopping && w.barrier == nil) || (w.stopping && w.failureBarrier == nil) {
-			commandC = w.stream.commands
-		}
-		select {
-		case command := <-commandC:
-			w.stream.releaseCommandSlot()
-			w.handleCommand(command)
-		case result := <-w.stream.results:
-			w.handleResult(result)
-		case <-w.timerC:
-			w.timerC = nil
-			w.finalizeCurrent()
-		}
-	}
-}
-
-func (w *appendWorker) handleCommand(command appendCommand) {
-	if command.record != nil {
-		if w.stopping {
-			w.failUnsentRecord(*command.record)
-			return
-		}
-		w.addRecord(*command.record)
-		return
-	}
-	if command.barrier == nil {
-		return
-	}
-	if w.stopping {
-		w.failureBarrier = command.barrier
-		return
-	}
-	w.finalizeCurrent()
-	w.barrier = command.barrier
-}
-
-func (w *appendWorker) addRecord(record appendRecord) {
-	additional := len(record.payload)
-	if len(w.current) > 0 {
-		additional++
-	}
-	if len(w.current) > 0 && (w.currentBytes+additional > w.stream.config.targetBatchBytes || len(w.current) >= w.stream.config.maxBatchRows) {
-		w.finalizeCurrent()
-		additional = len(record.payload)
-	}
-	if len(w.current) == 0 {
-		w.startTimer()
-	}
-	w.current = append(w.current, record)
-	w.currentBytes += additional
-	if w.currentBytes >= w.stream.config.targetBatchBytes || len(w.current) >= w.stream.config.maxBatchRows {
-		w.finalizeCurrent()
-	}
-}
-
-func (w *appendWorker) startTimer() {
-	if w.timer == nil {
-		w.timer = time.NewTimer(w.stream.config.flushInterval)
-	} else {
-		if !w.timer.Stop() {
-			select {
-			case <-w.timer.C:
-			default:
-			}
-		}
-		w.timer.Reset(w.stream.config.flushInterval)
-	}
-	w.timerC = w.timer.C
-}
-
-func (w *appendWorker) stopTimer() {
-	if w.timer != nil && !w.timer.Stop() {
-		select {
-		case <-w.timer.C:
-		default:
-		}
-	}
-	w.timerC = nil
-}
-
-func (w *appendWorker) finalizeCurrent() {
-	if len(w.current) == 0 {
-		return
-	}
-	w.stopTimer()
-	payload := make([]byte, 0, w.currentBytes)
-	reservedBytes := 0
-	for index := range w.current {
-		if index > 0 {
-			payload = append(payload, '\n')
-		}
-		payload = append(payload, w.current[index].payload...)
-		reservedBytes += w.current[index].reservedBytes
-	}
-	w.ready = append(w.ready, appendBatch{
-		payload:       payload,
-		rows:          len(w.current),
-		reservedBytes: reservedBytes,
-	})
-	w.current = nil
-	w.currentBytes = 0
-}
-
-func (w *appendWorker) dispatchReady() {
-	for !w.stopping && w.inFlight < w.stream.config.maxConcurrentBatches && len(w.ready) > 0 {
-		batch := w.ready[0]
-		w.ready[0] = appendBatch{}
-		w.ready = w.ready[1:]
-		w.inFlight++
-		w.stream.shared.mu.Lock()
-		w.stream.shared.inFlightBatches++
-		w.stream.shared.mu.Unlock()
-		go w.stream.sendBatch(batch)
-	}
-}
-
-func (s *AppendStream) sendBatch(batch appendBatch) {
-	var err error
-	backoff := s.config.retry.InitialBackoff
-	deliveryCtx, deliveryCancel := context.WithTimeout(context.Background(), s.config.retry.MaxElapsedTime)
-	defer deliveryCancel()
-	hadUnknown := false
-retryLoop:
-	for attempt := 0; ; attempt++ {
-		if attempt > 0 {
-			if deliveryCtx.Err() != nil {
-				break
-			}
-			select {
-			case <-s.failureDone:
-				break retryLoop
-			default:
-			}
-			s.shared.mu.Lock()
-			s.shared.counters.retries++
-			s.shared.mu.Unlock()
-		}
-		_, err = s.client.appendNDJSONWithTimeout(
-			deliveryCtx,
-			s.database,
-			s.schema,
-			s.table,
-			batch.payload,
-			s.config.attemptTimeout,
-		)
-		// In-flight failures always carry AppendDetails. Errors without them
-		// happened before dispatch (for example, the retry budget expired while
-		// compressing). Those rows were not sent by this attempt.
-		var failure *Error
-		if err != nil && (!errors.As(err, &failure) || failure.AppendDetails == nil) {
-			rejected := appendRejectedError(err.Error())
-			rejected.cause = err
-			err = rejected
-		}
-		if err != nil && appendErrorState(err) == AppendStateUnknown {
-			hadUnknown = true
-		}
-		if err == nil || !s.isRetryableAppend(err) {
-			break
-		}
-		if attempt >= s.config.retry.MaxRetries {
-			err = fmt.Errorf("%w after %d attempts: %w", ErrAppendRetryExhausted, attempt+1, err)
-			break
-		}
-		var retryAfter time.Duration
-		var scopeErr *Error
-		if errors.As(err, &scopeErr) {
-			retryAfter = scopeErr.RetryAfter
-		}
-		delay := appendRetryDelay(backoff, retryAfter)
-		timer := time.NewTimer(delay)
-		select {
-		case <-timer.C:
-		case <-deliveryCtx.Done():
-			timer.Stop()
-			break retryLoop
-		case <-s.failureDone:
-			timer.Stop()
-			break retryLoop
-		}
-		if backoff > s.config.retry.MaxBackoff/2 {
-			backoff = s.config.retry.MaxBackoff
-		} else {
-			backoff *= 2
-		}
-	}
-	if err != nil && deliveryCtx.Err() != nil {
-		err = fmt.Errorf("%w after elapsed budget %s: %w", ErrAppendRetryExhausted, s.config.retry.MaxElapsedTime, err)
-	}
-	// A later rejected attempt cannot prove an earlier unknown attempt did not
-	// commit. Only a successful acknowledgement resolves the batch for replay.
-	if err != nil && hadUnknown && appendErrorState(err) != AppendStateUnknown {
-		err = unknownAppendStreamError("an earlier append attempt may have committed; last attempt: "+err.Error(), err)
-	}
-	s.results <- appendBatchResult{batch: batch, err: err}
-}
-
-func appendRetryDelay(backoff time.Duration, retryAfter time.Duration) time.Duration {
-	// Equal jitter avoids synchronized retries. Retry-After is a lower bound,
-	// even when longer than MaxBackoff; the elapsed budget bounds the wait.
-	delay := backoff/2 + time.Duration(rand.Int64N(max(int64(backoff-backoff/2), 1))) // #nosec G404 -- retry jitter does not require cryptographic randomness.
-	if retryAfter > delay {
-		delay = retryAfter
-	}
-	return delay
-}
-
-func (s *AppendStream) isRetryableAppend(err error) bool {
-	if isRetryableRejectedAppend(err) {
-		return true
-	}
-	var e *Error
-	if !s.config.retry.RetryUnknown || !errors.As(err, &e) || e.AppendDetails == nil || e.AppendDetails.Status != AppendStateUnknown {
-		return false
-	}
-	if errors.Is(err, context.Canceled) || (e.WriteDetails != nil && e.WriteDetails.Reason != WriteErrorReasonTimeout) {
-		return false
-	}
-	// Authentication, schema, and other permanent HTTP errors must not spin.
-	return e.HTTPStatus == 0 || (e.HTTPStatus >= 200 && e.HTTPStatus < 300) ||
-		e.HTTPStatus == http.StatusRequestTimeout || e.HTTPStatus == http.StatusTooManyRequests ||
-		e.HTTPStatus >= 500
-}
-
-func isRetryableRejectedAppend(err error) bool {
-	var scopeErr *Error
-	return errors.As(err, &scopeErr) &&
-		scopeErr.Retryable &&
-		scopeErr.AppendDetails != nil &&
-		scopeErr.AppendDetails.Status == AppendStateRejected
-}
-
-func unknownAppendStreamError(message string, cause error) error {
-	result := &Error{
-		Kind:      ErrorKindAppendRowsFailed,
-		Message:   message,
-		Retryable: false,
-		AppendDetails: &AppendErrorDetails{
-			Status:    AppendStateUnknown,
-			RowErrors: []AppendRowError{},
-		},
-		cause: cause,
-	}
-	// Preserve the last attempt's diagnostic metadata while the state describes
-	// the outcome across all attempts, including an earlier lost response.
-	var last *Error
-	if errors.As(cause, &last) {
-		result.Code = last.Code
-		result.Details = slices.Clone(last.Details)
-		result.WriteDetails = last.WriteDetails
-		result.HTTPStatus = last.HTTPStatus
-		result.RequestID = last.RequestID
-		result.RetryAfter = last.RetryAfter
-		if last.AppendDetails != nil {
-			result.AppendDetails.RowErrors = slices.Clone(last.AppendDetails.RowErrors)
-			result.AppendDetails.RowErrorsTruncated = last.AppendDetails.RowErrorsTruncated
-		}
-	}
-	return result
-}
-
-func (w *appendWorker) handleResult(result appendBatchResult) {
-	w.inFlight--
-	// Update pending counters before capacity can admit another producer.
-	defer w.stream.budget.release(result.batch.reservedBytes)
-	rows := uint64(result.batch.rows) // #nosec G115 -- batch rows are capped at maxAppendRows.
-	w.stream.shared.mu.Lock()
-	w.stream.shared.inFlightBatches--
-	w.stream.shared.pendingRows -= rows
-	w.stream.shared.pendingBytes -= result.batch.reservedBytes
-	if result.err == nil {
-		w.stream.shared.counters.committedRows += rows
-		w.stream.shared.counters.committedBatches++
-		w.stream.shared.mu.Unlock()
-		return
-	}
-	state := appendErrorState(result.err)
-	if state == AppendStateRejected {
-		w.stream.shared.counters.failedRows += rows
-		w.stream.shared.counters.failedBatches++
-	} else {
-		state = AppendStateUnknown
-		w.stream.shared.counters.unknownRows += rows
-		w.stream.shared.counters.unknownBatches++
-	}
-	w.stream.shared.lastFailure = makeAppendLastFailure(result.err, state)
-	w.stream.shared.mu.Unlock()
-
-	if w.stream.config.failurePolicy == AppendFailureStop {
-		w.startStopping(result.err)
-	}
-}
-
-func appendErrorState(err error) AppendState {
-	var scopeErr *Error
-	if errors.As(err, &scopeErr) && scopeErr.AppendDetails != nil {
-		return scopeErr.AppendDetails.Status
-	}
-	return AppendStateUnknown
-}
-
-func makeAppendLastFailure(err error, state AppendState) *AppendLastFailure {
-	failure := &AppendLastFailure{
-		At:      time.Now(),
-		Message: err.Error(),
-		Status:  state,
-	}
-	var scopeErr *Error
-	if !errors.As(err, &scopeErr) {
-		return failure
-	}
-	failure.Code = scopeErr.Code
-	failure.Details = slices.Clone(scopeErr.Details)
-	failure.HTTPStatus = scopeErr.HTTPStatus
-	failure.RequestID = scopeErr.RequestID
-	failure.RetryAfter = scopeErr.RetryAfter
-	failure.Retryable = scopeErr.Retryable
-	if scopeErr.WriteDetails != nil {
-		details := *scopeErr.WriteDetails
-		failure.WriteDetails = &details
-	}
-	if scopeErr.AppendDetails != nil {
-		failure.RowErrors = slices.Clone(scopeErr.AppendDetails.RowErrors)
-		failure.RowErrorsTruncated = scopeErr.AppendDetails.RowErrorsTruncated
-	}
-	return failure
-}
-
-func copyAppendLastFailure(failure *AppendLastFailure) *AppendLastFailure {
-	if failure == nil {
-		return nil
-	}
-	cloned := *failure
-	cloned.Details = slices.Clone(failure.Details)
-	cloned.RowErrors = slices.Clone(failure.RowErrors)
-	if failure.WriteDetails != nil {
-		details := *failure.WriteDetails
-		cloned.WriteDetails = &details
-	}
-	return &cloned
-}
-
-func (w *appendWorker) startStopping(err error) {
-	if !w.stopping {
-		w.stopping = true
-		close(w.stream.failureDone)
-		w.fatal = err
-		w.stopTimer()
-		w.stream.admissionMu.Lock()
-		w.stream.shared.mu.Lock()
-		w.stream.shared.state = AppendStreamFailed
-		w.stream.shared.fatal = err
-		w.stream.shared.mu.Unlock()
-		w.stream.closeAdmission()
-		w.stream.admissionMu.Unlock()
-		for _, record := range w.current {
-			w.failUnsentRecord(record)
-		}
-		w.current = nil
-		w.currentBytes = 0
-		for _, batch := range w.ready {
-			w.failUnsentBatch(batch)
-		}
-		w.ready = nil
-		if w.barrier != nil {
-			w.failureBarrier = w.barrier
-			w.barrier = nil
-		}
-		return
-	}
-	if appendErrorState(err) == AppendStateUnknown && appendErrorState(w.fatal) != AppendStateUnknown {
-		w.fatal = err
-		w.stream.shared.mu.Lock()
-		w.stream.shared.fatal = err
-		w.stream.shared.mu.Unlock()
-	}
-}
-
-func (w *appendWorker) failUnsentRecord(record appendRecord) {
-	w.stream.shared.mu.Lock()
-	w.stream.shared.pendingRows--
-	w.stream.shared.pendingBytes -= record.reservedBytes
-	w.stream.shared.counters.failedRows++
-	w.stream.shared.mu.Unlock()
-	w.stream.budget.release(record.reservedBytes)
-}
-
-func (w *appendWorker) failUnsentBatch(batch appendBatch) {
-	rows := uint64(batch.rows) // #nosec G115 -- batch rows are capped at maxAppendRows.
-	w.stream.shared.mu.Lock()
-	w.stream.shared.pendingRows -= rows
-	w.stream.shared.pendingBytes -= batch.reservedBytes
-	w.stream.shared.counters.failedRows += rows
-	w.stream.shared.mu.Unlock()
-	w.stream.budget.release(batch.reservedBytes)
-}
-
-func (w *appendWorker) drainAfterFailure() {
-	for {
-		select {
-		case command := <-w.stream.commands:
-			w.stream.releaseCommandSlot()
-			w.handleCommand(command)
-			if w.failureBarrier != nil {
-				return
-			}
-		default:
-			return
-		}
-	}
-}
-
-func (w *appendWorker) finishFailure() {
-	report := w.makeReport(time.Now())
-	w.stream.finishTerminal(report, w.fatal, AppendStreamFailed)
-}
-
-func (w *appendWorker) finishFailureBarrier() bool {
-	barrier := w.failureBarrier
-	w.failureBarrier = nil
-	counters := w.snapshotCounters()
-	counters.acceptedRows = barrier.acceptedRows
-	counters.droppedRows = barrier.droppedRows
-	report := w.makeReportFrom(barrier.startedAt, counters)
-	w.baseline = counters
-	w.stream.shared.mu.Lock()
-	reportCopy := report
-	w.stream.shared.lastReport = &reportCopy
-	w.stream.shared.mu.Unlock()
-	barrier.ack <- appendBarrierResult{report: report, err: w.fatal}
-	if barrier.shutdown {
-		w.stream.finishTerminal(report, w.fatal, AppendStreamFailed)
-		return true
-	}
-	return false
-}
-
-func (w *appendWorker) finishBarrier() bool {
-	barrier := w.barrier
-	w.barrier = nil
-	counters := w.snapshotCounters()
-	counters.acceptedRows = barrier.acceptedRows
-	counters.droppedRows = barrier.droppedRows
-	report := w.makeReportFrom(barrier.startedAt, counters)
-	w.baseline = counters
-	w.stream.shared.mu.Lock()
-	reportCopy := report
-	w.stream.shared.lastReport = &reportCopy
-	w.stream.shared.mu.Unlock()
-	barrier.ack <- appendBarrierResult{report: report}
-	if barrier.shutdown {
-		w.stream.finishTerminal(report, nil, AppendStreamClosed)
-		return true
-	}
-	return false
-}
-
-func (w *appendWorker) snapshotCounters() appendCounters {
-	w.stream.shared.mu.Lock()
-	defer w.stream.shared.mu.Unlock()
-	return w.stream.shared.counters
-}
-
-func (w *appendWorker) makeReport(startedAt time.Time) AppendDeliveryReport {
-	return w.makeReportFrom(startedAt, w.snapshotCounters())
-}
-
-func (w *appendWorker) makeReportFrom(startedAt time.Time, counters appendCounters) AppendDeliveryReport {
-	report := AppendDeliveryReport{
-		AcceptedRows:     counters.acceptedRows - w.baseline.acceptedRows,
-		CommittedRows:    counters.committedRows - w.baseline.committedRows,
-		FailedRows:       counters.failedRows - w.baseline.failedRows,
-		UnknownRows:      counters.unknownRows - w.baseline.unknownRows,
-		DroppedRows:      counters.droppedRows - w.baseline.droppedRows,
-		CommittedBatches: counters.committedBatches - w.baseline.committedBatches,
-		FailedBatches:    counters.failedBatches - w.baseline.failedBatches,
-		UnknownBatches:   counters.unknownBatches - w.baseline.unknownBatches,
-		Retries:          counters.retries - w.baseline.retries,
-		Duration:         time.Since(startedAt),
-	}
-	lost := report.FailedRows + report.UnknownRows + report.DroppedRows
-	switch {
-	case lost == 0:
-		report.Outcome = AppendDeliveryOK
-	case report.CommittedRows > 0:
-		report.Outcome = AppendDeliveryPartial
-	case report.UnknownRows > 0:
-		report.Outcome = AppendDeliveryUnknown
-	default:
-		report.Outcome = AppendDeliveryFailed
-	}
-	return report
-}
-
-type appendByteBudget struct {
-	mu       sync.Mutex
-	capacity int
-	used     int
-	closed   bool
-	waiters  []*appendBudgetWaiter
-}
-
-func newAppendByteBudget(capacity int) *appendByteBudget {
-	return &appendByteBudget{capacity: capacity}
-}
-
-type appendBudgetWaiter struct {
-	bytes   int
-	ready   chan struct{}
-	granted bool
-}
-
-func (b *appendByteBudget) acquire(ctx context.Context, bytes int) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	b.mu.Lock()
-	if b.closed {
-		b.mu.Unlock()
-		return ErrAppendStreamClosed
-	}
-	if len(b.waiters) == 0 && b.used <= b.capacity-bytes {
-		b.used += bytes
-		b.mu.Unlock()
-		return nil
-	}
-	waiter := &appendBudgetWaiter{bytes: bytes, ready: make(chan struct{})}
-	b.waiters = append(b.waiters, waiter)
-	b.mu.Unlock()
-
-	select {
-	case <-waiter.ready:
-		if waiter.granted {
-			return nil
-		}
-		return ErrAppendStreamClosed
-	case <-ctx.Done():
-		b.mu.Lock()
-		if waiter.granted {
-			b.used -= bytes
-			b.drainWaitersLocked()
-		} else {
-			b.removeWaiterLocked(waiter)
-			b.drainWaitersLocked()
-		}
-		b.mu.Unlock()
-		return ctx.Err()
-	}
-}
-
-func (b *appendByteBudget) tryAcquire(bytes int) bool {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if b.closed || len(b.waiters) > 0 || b.used > b.capacity-bytes {
-		return false
-	}
-	b.used += bytes
-	return true
-}
-
-func (b *appendByteBudget) release(bytes int) {
-	b.mu.Lock()
-	b.used -= bytes
-	if b.used < 0 {
-		b.used = 0
-	}
-	b.drainWaitersLocked()
-	b.mu.Unlock()
-}
-
-func (b *appendByteBudget) close() {
-	b.mu.Lock()
-	if !b.closed {
-		b.closed = true
-		for _, waiter := range b.waiters {
-			close(waiter.ready)
-		}
-		b.waiters = nil
-	}
-	b.mu.Unlock()
-}
-
-func (b *appendByteBudget) drainWaitersLocked() {
-	for len(b.waiters) > 0 {
-		waiter := b.waiters[0]
-		if b.used > b.capacity-waiter.bytes {
-			return
-		}
-		b.waiters[0] = nil
-		b.waiters = b.waiters[1:]
-		b.used += waiter.bytes
-		waiter.granted = true
-		close(waiter.ready)
-	}
-}
-
-func (b *appendByteBudget) removeWaiterLocked(target *appendBudgetWaiter) {
-	for index, waiter := range b.waiters {
-		if waiter != target {
-			continue
-		}
-		copy(b.waiters[index:], b.waiters[index+1:])
-		b.waiters[len(b.waiters)-1] = nil
-		b.waiters = b.waiters[:len(b.waiters)-1]
-		return
-	}
 }

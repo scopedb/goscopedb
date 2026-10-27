@@ -37,41 +37,44 @@ func statementJSON(id uuid.UUID, status, extra string) string {
 }
 
 func TestStatementResumesWithoutResubmission(t *testing.T) {
-	for _, submitAndWait := range []bool{true, false} {
-		t.Run(fmt.Sprint(submitAndWait), func(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		execute bool
+	}{{"execute", true}, {"wait", false}} {
+		t.Run(tc.name, func(t *testing.T) {
 			id := uuid.New()
 			submissions, polls := 0, 0
-			client := testClient(t, func(r *http.Request) (*http.Response, error) {
+			client := newTestClient(t, func(r *http.Request) (*http.Response, error) {
 				if r.Method == http.MethodPost {
 					submissions++
 					body, err := decodeCompressedRequestBody(r)
 					require.NoError(t, err)
 					require.JSONEq(t, `{"statement_id":"`+id.String()+`","statement":"FROM staging INSERT INTO events","format":"json","max_elapsed_seconds":0.25}`, string(body))
-					return jsonResponse(200, statementJSON(id, "running", "")), nil
+					return httpResponse(200, statementJSON(id, "running", "")), nil
 				}
 				require.Equal(t, "/v1/statements/"+id.String(), r.URL.Path)
 				require.Equal(t, "json", r.URL.Query().Get("format"))
 				polls++
 				if polls == 1 {
-					resp := jsonResponse(503, `{"code":"unavailable","message":"poll failed","retryable":true,"details":{"phase":"poll"}}`)
+					resp := httpResponse(503, `{"code":"unavailable","message":"poll failed","retryable":true,"details":{"phase":"poll"}}`)
 					resp.Header.Set("X-Request-ID", "poll-request")
 					resp.Header.Set("Retry-After", "2")
 					return resp, nil
 				}
-				return jsonResponse(200, statementJSON(id, "finished", finishedResult)), nil
+				return httpResponse(200, statementJSON(id, "finished", finishedResult)), nil
 			})
 			statement := client.Statement("FROM staging INSERT INTO events")
 			statement.ID, statement.MaxElapsed = &id, 250*time.Millisecond
 			var err error
-			if submitAndWait {
+			if tc.execute {
 				_, err = statement.Execute(t.Context())
 			} else {
 				handle, submitErr := statement.Submit(t.Context())
 				require.NoError(t, submitErr)
 				_, err = handle.Wait(t.Context())
 			}
-			failure := apiError(t, err)
-			require.Equal(t, !submitAndWait, failure.Retryable)
+			failure := requireError(t, err)
+			require.Equal(t, !tc.execute, failure.Retryable)
 			require.Equal(t, id, *failure.StatementID)
 			require.Equal(t, "unavailable", failure.Code)
 			require.Equal(t, "poll-request", failure.RequestID)
@@ -106,11 +109,11 @@ func TestStatementSubmissionOutcome(t *testing.T) {
 		{name: "confirmed rejection", status: 503, body: `{"code":"busy","message":"rejected","retryable":true}`, code: "busy", retryable: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			client := testClient(t, func(*http.Request) (*http.Response, error) {
+			client := newTestClient(t, func(*http.Request) (*http.Response, error) {
 				if tc.cause != nil {
 					return nil, tc.cause
 				}
-				return jsonResponse(tc.status, tc.body), nil
+				return httpResponse(tc.status, tc.body), nil
 			})
 			statement := client.Statement("FROM staging INSERT INTO events")
 			id := uuid.New()
@@ -118,7 +121,7 @@ func TestStatementSubmissionOutcome(t *testing.T) {
 				statement.ID = &id
 			}
 			_, err := statement.Submit(t.Context())
-			failure := apiError(t, err)
+			failure := requireError(t, err)
 			require.Equal(t, tc.code, failure.Code)
 			require.Equal(t, tc.retryable, failure.Retryable)
 			if tc.knownID {
@@ -137,16 +140,16 @@ func TestStatementLocalCancellationPreservesRecoveryID(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	id := uuid.New()
-	client := testClient(t, func(r *http.Request) (*http.Response, error) {
+	client := newTestClient(t, func(r *http.Request) (*http.Response, error) {
 		if r.Method == http.MethodPost {
-			return jsonResponse(200, statementJSON(id, "running", "")), nil
+			return httpResponse(200, statementJSON(id, "running", "")), nil
 		}
 		cancel()
 		return nil, r.Context().Err()
 	})
 	_, err := client.Query(ctx, "SELECT 1")
 	require.ErrorIs(t, err, context.Canceled)
-	failure := apiError(t, err)
+	failure := requireError(t, err)
 	require.Equal(t, id, *failure.StatementID)
 	require.False(t, failure.Retryable)
 }
@@ -164,21 +167,21 @@ func TestStatementTerminalWinsOverInFlightRequest(t *testing.T) {
 				id := uuid.New()
 				started, release := make(chan struct{}), make(chan struct{})
 				calls := 0
-				client := testClient(t, func(*http.Request) (*http.Response, error) {
+				client := newTestClient(t, func(*http.Request) (*http.Response, error) {
 					calls++
 					if calls == 1 {
 						close(started)
 						<-release
 						switch tc.late {
 						case "http error":
-							return jsonResponse(503, `{"message":"stale failure"}`), nil
+							return httpResponse(503, `{"message":"stale failure"}`), nil
 						case "transport error":
 							return nil, errors.New("connection lost")
 						default:
-							return jsonResponse(200, statementJSON(id, "running", "")), nil
+							return httpResponse(200, statementJSON(id, "running", "")), nil
 						}
 					}
-					return jsonResponse(200, statementJSON(id, tc.terminal, tc.extra)), nil
+					return httpResponse(200, statementJSON(id, tc.terminal, tc.extra)), nil
 				})
 				handle := client.StatementHandle(id)
 				done := make(chan error, 1)
@@ -216,7 +219,7 @@ func TestStatementTerminalWinsOverInFlightRequest(t *testing.T) {
 					require.ErrorIs(t, err, ErrStatementCancelled)
 					require.NotErrorIs(t, err, context.Canceled)
 				case "failed":
-					failure := apiError(t, err)
+					failure := requireError(t, err)
 					require.Equal(t, "execution failed", failure.Message)
 					require.JSONEq(t, `{"phase":"execute"}`, string(failure.StatementDetails.Details))
 				case "finished":
@@ -242,10 +245,10 @@ func TestStatementRejectsIncompleteOrMismatchedResponses(t *testing.T) {
 		statementJSON(id, "finished", `,"result_set":{"format":"json","metadata":{"fields":[null],"num_rows":0},"rows":[]}`),
 		statementJSON(id, "finished", strings.Replace(finishedResult, `"int"`, `"unsigned"`, 1)),
 	} {
-		client := testClient(t, func(*http.Request) (*http.Response, error) { return jsonResponse(200, body), nil })
+		client := newTestClient(t, func(*http.Request) (*http.Response, error) { return httpResponse(200, body), nil })
 		handle := client.StatementHandle(id)
 		_, err := handle.Refresh(t.Context())
-		require.Equal(t, ErrorKindUnexpected, apiError(t, err).Kind)
+		require.Equal(t, ErrorKindUnexpected, requireError(t, err).Kind)
 		require.Nil(t, handle.Snapshot())
 	}
 }

@@ -27,7 +27,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestStreamRetryRequiresSafeRejectionOrReplayOptIn(t *testing.T) {
+func TestAppendStreamRetryRequiresSafeRejectionOrReplayOptIn(t *testing.T) {
 	for _, tc := range []struct {
 		name                               string
 		status                             int
@@ -46,7 +46,7 @@ func TestStreamRetryRequiresSafeRejectionOrReplayOptIn(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				calls := 0
 				started := time.Now()
-				stream := testStream(t, AppendStreamOptions{Retry: &AppendRetryOptions{
+				stream := newTestAppendStream(t, AppendStreamOptions{Retry: &AppendRetryOptions{
 					MaxRetries: 2, RetryUnknown: tc.replay, InitialBackoff: time.Millisecond, MaxBackoff: time.Millisecond,
 				}}, func(r *http.Request) (*http.Response, error) {
 					body, err := decodeCompressedRequestBody(r)
@@ -93,10 +93,10 @@ func TestStreamRetryRequiresSafeRejectionOrReplayOptIn(t *testing.T) {
 	}
 }
 
-func TestStreamRetryCountIsBounded(t *testing.T) {
+func TestAppendStreamRetryCountIsBounded(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		calls := 0
-		stream := testStream(t, AppendStreamOptions{Retry: &AppendRetryOptions{MaxRetries: 2, RetryUnknown: true}}, func(*http.Request) (*http.Response, error) {
+		stream := newTestAppendStream(t, AppendStreamOptions{Retry: &AppendRetryOptions{MaxRetries: 2, RetryUnknown: true}}, func(*http.Request) (*http.Response, error) {
 			calls++
 			return appendFailure(503, AppendStateUnknown, true), nil
 		})
@@ -109,12 +109,12 @@ func TestStreamRetryCountIsBounded(t *testing.T) {
 	})
 }
 
-func TestStreamDeliveryBudgetBoundsAttemptsAndBackoff(t *testing.T) {
+func TestAppendStreamDeliveryBudgetBoundsAttemptsAndBackoff(t *testing.T) {
 	for _, slowAttempt := range []bool{true, false} {
 		t.Run(map[bool]string{true: "attempt", false: "retry delay"}[slowAttempt], func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				calls := 0
-				stream := testStream(t, AppendStreamOptions{
+				stream := newTestAppendStream(t, AppendStreamOptions{
 					AttemptTimeout: new(25 * time.Millisecond),
 					Retry:          &AppendRetryOptions{MaxRetries: 10, RetryUnknown: true, MaxElapsedTime: 40 * time.Millisecond, InitialBackoff: time.Millisecond},
 				}, func(r *http.Request) (*http.Response, error) {
@@ -143,10 +143,10 @@ func TestStreamDeliveryBudgetBoundsAttemptsAndBackoff(t *testing.T) {
 	}
 }
 
-func TestStreamFailureInterruptsOtherRetryWaits(t *testing.T) {
+func TestAppendStreamFailureInterruptsOtherRetryWaits(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		calls := 0
-		stream := testStream(t, AppendStreamOptions{
+		stream := newTestAppendStream(t, AppendStreamOptions{
 			MaxBatchRows: 1, MaxConcurrentBatches: 2,
 			Retry: &AppendRetryOptions{MaxRetries: 2, MaxElapsedTime: time.Hour},
 		}, func(*http.Request) (*http.Response, error) {

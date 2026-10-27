@@ -71,7 +71,7 @@ func (s *Statement) Submit(ctx context.Context) (*StatementHandle, error) {
 		Statement:           s.stmt,
 		MaxElapsedSeconds:   s.MaxElapsed.Seconds(),
 		MaxEstimatedSeconds: s.MaxEstimated.Seconds(),
-		Format:              resultFormatJSON,
+		Format:              statementResultFormat,
 	})
 	if err != nil {
 		if s.ID != nil {
@@ -155,7 +155,7 @@ func (r *statementResponse) snapshot() *StatementSnapshot {
 	}
 	snapshot := &StatementSnapshot{
 		ID: r.ID, CreatedAt: r.Created, Status: r.Status,
-		Progress: r.Progress, ResultSet: r.ResultSet.toResultSet(),
+		Progress: r.Progress, ResultSet: r.ResultSet.snapshot(),
 	}
 	if r.Error != nil {
 		failure := *r.Error
@@ -174,17 +174,17 @@ func (h *StatementHandle) Refresh(ctx context.Context) (*StatementSnapshot, erro
 		return cached.snapshot(), nil
 	}
 
-	resp, err := h.c.fetchStatementResult(ctx, h.id)
+	resp, err := h.c.fetchStatement(ctx, h.id)
+	return h.observe(resp, err)
+}
+
+func (h *StatementHandle) observe(resp *statementResponse, err error) (*StatementSnapshot, error) {
 	if err != nil {
 		if cached := h.resp.Load(); cached != nil && cached.Status.Terminated() {
 			return cached.snapshot(), nil
 		}
 		return nil, statementError(err, &h.id)
 	}
-	return h.remember(resp)
-}
-
-func (h *StatementHandle) remember(resp *statementResponse) (*StatementSnapshot, error) {
 	if resp.ID != h.id {
 		return nil, statementError(newError(ErrorKindUnexpected, "statement response ID does not match handle", nil), &h.id)
 	}
@@ -270,13 +270,7 @@ func (h *StatementHandle) Cancel(ctx context.Context) (*StatementSnapshot, error
 		return cached.snapshot(), nil
 	}
 	resp, err := h.c.cancelStatement(ctx, h.id)
-	if err != nil {
-		if cached := h.resp.Load(); cached != nil && cached.Status.Terminated() {
-			return cached.snapshot(), nil
-		}
-		return nil, statementError(err, &h.id)
-	}
-	return h.remember(resp)
+	return h.observe(resp, err)
 }
 
 // StatementStatus is a string that represents the status of a statement.
@@ -371,4 +365,18 @@ type StatementProgress struct {
 	SkippedCompressedBytes int64 `json:"skipped_compressed_bytes"`
 	// SkippedUncompressedBytes denotes the number of uncompressed bytes skipped by pruning.
 	SkippedUncompressedBytes int64 `json:"skipped_uncompressed_bytes"`
+}
+
+// statementError adds recovery context without mutating a transport-owned error.
+func statementError(err error, id *uuid.UUID) *Error {
+	failure := newError(ErrorKindUnexpected, err.Error(), err)
+	if original, ok := errors.AsType[*Error](err); ok {
+		*failure = *original
+		failure.cause = err
+	}
+	failure.StatementID = nil
+	if id != nil {
+		failure.StatementID = new(*id)
+	}
+	return failure
 }

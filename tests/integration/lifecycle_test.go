@@ -22,22 +22,24 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+
 	scopedb "github.com/scopedb/goscopedb"
 	"github.com/stretchr/testify/require"
 )
 
 func TestCatalogAppendAndStatementLifecycle(t *testing.T) {
-	client := integrationClient(t, os.Getenv("SCOPEDB_API_KEY"))
+	client := newClient(t, os.Getenv("SCOPEDB_API_KEY"))
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Minute)
 	defer cancel()
-	table := client.Table(tableName())
+	table := client.Table("go_sdk_" + uuid.NewString())
 	definition := &scopedb.CatalogTable{Name: table.Name, Columns: []scopedb.CatalogColumn{
 		{Name: "i", DataType: scopedb.IntDataType}, {Name: "u", DataType: scopedb.UIntDataType}, {Name: "object", DataType: scopedb.ObjectDataType},
 	}}
 	plan, err := table.Catalog().Apply(ctx, definition, scopedb.CatalogOptions{DryRun: true})
 	require.NoError(t, err)
 	_, err = table.Catalog().Get(ctx)
-	require.Equal(t, 404, httpFailure(t, err).HTTPStatus, "dry run must not create the table")
+	require.Equal(t, 404, requireError(t, err).HTTPStatus, "dry run must not create the table")
 	cleanupTable(t, table)
 	created, err := table.Catalog().Apply(ctx, definition, scopedb.CatalogOptions{IfMatch: plan.ETag})
 	require.NoError(t, err)
@@ -45,12 +47,12 @@ func TestCatalogAppendAndStatementLifecycle(t *testing.T) {
 	_, err = table.Catalog().Apply(ctx, definition, scopedb.CatalogOptions{IfMatch: created.ETag})
 	require.NoError(t, err)
 	_, err = table.Catalog().Delete(ctx, scopedb.CatalogOptions{IfMatch: created.ETag, AllowDestructive: true})
-	require.Equal(t, 412, httpFailure(t, err).HTTPStatus)
+	require.Equal(t, 412, requireError(t, err).HTTPStatus)
 	_, err = table.Catalog().Delete(ctx)
-	require.Equal(t, 409, httpFailure(t, err).HTTPStatus)
+	require.Equal(t, 409, requireError(t, err).HTTPStatus)
 
 	_, err = table.AppendNDJSON(ctx, []byte(`{"u":18446744073709551615}`))
-	require.Equal(t, scopedb.AppendStateRejected, httpFailure(t, err).AppendDetails.Status)
+	require.Equal(t, scopedb.AppendStateRejected, requireError(t, err).AppendDetails.Status)
 	_, err = table.AppendNDJSON(ctx, []byte(`{"i":-9223372036854775808,"u":9223372036854775807,"object":{"id":9007199254740993}}`))
 	require.NoError(t, err)
 	stream, err := table.AppendStream(scopedb.AppendStreamOptions{})
@@ -83,5 +85,5 @@ func TestCatalogAppendAndStatementLifecycle(t *testing.T) {
 	require.True(t, found)
 	require.Equal(t, uint64(1<<64-1), row["u"])
 	_, err = client.Query(ctx, "SELECT UNKNOWN_FUNCTION()")
-	require.NotEmpty(t, httpFailure(t, err).Code)
+	require.NotEmpty(t, requireError(t, err).Code)
 }

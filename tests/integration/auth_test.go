@@ -23,25 +23,27 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+
 	scopedb "github.com/scopedb/goscopedb"
 	"github.com/stretchr/testify/require"
 )
 
-func TestCloudRejectsUnauthenticatedAppend(t *testing.T) {
+func TestAppendRequiresAuthentication(t *testing.T) {
 	key := os.Getenv("SCOPEDB_API_KEY")
 	if key == "" {
 		t.Skip("SCOPEDB_API_KEY not set")
 	}
-	owner := integrationClient(t, key)
+	owner := newClient(t, key)
 	ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
 	defer cancel()
-	table := owner.Table(tableName())
+	table := owner.Table("go_sdk_" + uuid.NewString())
 	cleanupTable(t, table)
 	_, err := table.Catalog().Apply(ctx, &scopedb.CatalogTable{Name: table.Name, Columns: []scopedb.CatalogColumn{{Name: "id", DataType: scopedb.IntDataType}}})
 	require.NoError(t, err)
-	unauthorized := integrationClient(t, "")
+	unauthorized := newClient(t, "")
 	_, err = unauthorized.Table(table.Name).AppendNDJSON(ctx, []byte(`{"id":1}`))
-	failure := httpFailure(t, err)
+	failure := requireError(t, err)
 	require.Equal(t, 401, failure.HTTPStatus)
 	require.Equal(t, scopedb.AppendStateRejected, failure.AppendDetails.Status)
 	require.False(t, failure.Retryable)
@@ -50,17 +52,17 @@ func TestCloudRejectsUnauthenticatedAppend(t *testing.T) {
 	require.Zero(t, result.TotalRows)
 }
 
-func TestCloudClientsKeepTenantCredentialsIsolated(t *testing.T) {
+func TestTenantIsolation(t *testing.T) {
 	primary, secondary := os.Getenv("SCOPEDB_API_KEY"), os.Getenv("SCOPEDB_SECONDARY_API_KEY")
 	primaryID, secondaryID := os.Getenv("SCOPEDB_WORKSPACE_ID"), os.Getenv("SCOPEDB_SECONDARY_WORKSPACE_ID")
 	if primary == "" || secondary == "" || primaryID == "" || secondaryID == "" {
-		t.Skip("requires credentials for two different Cloud tenants")
+		t.Skip("requires credentials for two different tenants")
 	}
 	require.NotEqual(t, primaryID, secondaryID)
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Minute)
 	defer cancel()
-	name := tableName()
-	first, second := integrationClient(t, primary), integrationClient(t, secondary)
+	name := "go_sdk_" + uuid.NewString()
+	first, second := newClient(t, primary), newClient(t, secondary)
 	for i, client := range []*scopedb.Client{first, second} {
 		table := client.Table(name)
 		cleanupTable(t, table)
@@ -79,6 +81,6 @@ func TestCloudClientsKeepTenantCredentialsIsolated(t *testing.T) {
 		require.Equal(t, []map[string]scopedb.Value{{"id": int64(i + 1)}}, rows)
 		other := []*scopedb.Client{second, first}[i]
 		_, err = other.StatementHandle(handle.ID()).Refresh(ctx)
-		require.Equal(t, 404, httpFailure(t, err).HTTPStatus)
+		require.Equal(t, 404, requireError(t, err).HTTPStatus)
 	}
 }

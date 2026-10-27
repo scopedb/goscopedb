@@ -46,9 +46,9 @@ func TestOversizedResponsesBoundReadsAndRetainedErrors(t *testing.T) {
 			if test.status == http.StatusOK {
 				prefix = `{"status":"committed","num_rows_inserted":1}`
 			}
-			data := prefix + strings.Repeat(" ", 2*maxErrorResponseBodyBytes)
+			data := prefix + strings.Repeat(" ", 2*maxDiagnosticBodyBytes)
 			if test.name == "append stream" {
-				data = strings.Repeat("x", 2*maxErrorResponseBodyBytes)
+				data = strings.Repeat("x", 2*maxDiagnosticBodyBytes)
 			}
 			body := &observedResponseBody{Reader: strings.NewReader(data)}
 			client, err := NewClient(Config{
@@ -75,7 +75,7 @@ func TestOversizedResponsesBoundReadsAndRetainedErrors(t *testing.T) {
 			default:
 				_, err = client.Table("events").AppendNDJSON(t.Context(), []byte(`{"id":1}`))
 			}
-			require.LessOrEqual(t, body.Size()-int64(body.Len()), int64(maxErrorResponseBodyBytes+1))
+			require.LessOrEqual(t, body.Size()-int64(body.Len()), int64(maxDiagnosticBodyBytes+1))
 			require.True(t, body.closed)
 			require.ErrorIs(t, err, ErrResponseTooLarge)
 			var failure *Error
@@ -85,14 +85,14 @@ func TestOversizedResponsesBoundReadsAndRetainedErrors(t *testing.T) {
 			require.Equal(t, 2*time.Second, failure.RetryAfter)
 			require.Equal(t, test.code, failure.Code)
 			require.Equal(t, test.appendState == AppendStateRejected, failure.Retryable)
-			require.LessOrEqual(t, len(failure.Message), maxErrorResponseBodyBytes)
+			require.LessOrEqual(t, len(failure.Message), maxDiagnosticBodyBytes)
 			require.Empty(t, failure.Details)
 			if test.appendState != "" {
 				require.Equal(t, test.appendState, failure.AppendDetails.Status)
 			}
 			if stream != nil {
 				last := stream.Stats().LastFailure
-				require.LessOrEqual(t, len(last.Message), maxErrorResponseBodyBytes)
+				require.LessOrEqual(t, len(last.Message), maxDiagnosticBodyBytes)
 				require.Empty(t, last.Details)
 				require.Empty(t, last.RowErrors)
 			}
@@ -102,7 +102,7 @@ func TestOversizedResponsesBoundReadsAndRetainedErrors(t *testing.T) {
 
 func TestResponseLimitPreservesCompleteDiagnosticsAndLargeResults(t *testing.T) {
 	id := uuid.New()
-	value := strings.Repeat("x", maxErrorResponseBodyBytes+1)
+	value := strings.Repeat("x", maxDiagnosticBodyBytes+1)
 	prefix := `{"code":"schema_mismatch","message":"invalid column","details":{"status":"rejected","row_errors":[]}}`
 	for _, operation := range []string{"error at limit", "query result", "catalog definition"} {
 		t.Run(operation, func(t *testing.T) {
@@ -114,7 +114,7 @@ func TestResponseLimitPreservesCompleteDiagnosticsAndLargeResults(t *testing.T) 
 					switch operation {
 					case "error at limit":
 						status = http.StatusUnprocessableEntity
-						data = prefix + strings.Repeat(" ", maxErrorResponseBodyBytes-len(prefix))
+						data = prefix + strings.Repeat(" ", maxDiagnosticBodyBytes-len(prefix))
 					case "query result":
 						data = `{"statement_id":"` + id.String() + `","created_at":"2026-10-27T00:00:00Z","status":"finished","result_set":{"format":"json","metadata":{"fields":[{"name":"text","data_type":"string"}],"num_rows":1},"rows":[["` + value + `"]]}}`
 					case "catalog definition":

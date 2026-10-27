@@ -17,44 +17,25 @@
 package scopedb
 
 import (
-	"bytes"
-	"compress/gzip"
-	"context"
-	"encoding/json"
-	"errors"
 	"fmt"
-	"io"
-	"net"
 	"net/http"
 	"net/url"
-	"strconv"
 	"strings"
-	"sync"
 	"time"
-
-	"github.com/google/uuid"
-	"github.com/klauspost/compress/zstd"
 )
 
 // Client provides access to ScopeDB APIs and is safe for concurrent use.
 // Reuse a client to share its HTTP connection pool.
 type Client struct {
-	endpoint     *url.URL
-	http         *httpClient
-	writeTimeout time.Duration
+	endpoint       *url.URL
+	httpClient     *http.Client
+	authorization  string
+	compression    Compression
+	ownsHTTPClient bool
+	writeTimeout   time.Duration
 }
 
-const (
-	defaultWriteTimeout = 30 * time.Second
-	// Match net/http's total idle budget for clients targeting one endpoint.
-	defaultMaxIdleConnsPerHost = 100
-)
-
-// Pools cache temporary compression state, never request-owned output buffers.
-var (
-	zstdEncoderPool sync.Pool
-	gzipWriterPool  sync.Pool
-)
+const defaultWriteTimeout = 30 * time.Second
 
 // NewClient creates a new ScopeDB client with the given configuration.
 func NewClient(config Config) (*Client, error) {
@@ -89,7 +70,7 @@ func NewClient(config Config) (*Client, error) {
 	standardClient := config.HTTPClient
 	owned := false
 	if standardClient == nil {
-		standardClient = &http.Client{Transport: independentDefaultTransport()}
+		standardClient = &http.Client{Transport: newDefaultTransport()}
 		owned = true
 	}
 	var authorization string
@@ -98,108 +79,20 @@ func NewClient(config Config) (*Client, error) {
 	}
 
 	return &Client{
-		endpoint:     endpoint,
-		writeTimeout: writeTimeout,
-		http: &httpClient{
-			client:        standardClient,
-			authorization: authorization,
-			compression:   compression,
-			owned:         owned,
-		},
+		endpoint:       endpoint,
+		httpClient:     standardClient,
+		authorization:  authorization,
+		compression:    compression,
+		ownsHTTPClient: owned,
+		writeTimeout:   writeTimeout,
 	}, nil
-}
-
-func independentDefaultTransport() *http.Transport {
-	if transport, ok := http.DefaultTransport.(*http.Transport); ok && transport != nil {
-		cloned := transport.Clone()
-		if cloned.MaxIdleConnsPerHost == 0 {
-			cloned.MaxIdleConnsPerHost = defaultMaxIdleConnsPerHost
-		}
-		return cloned
-	}
-
-	return &http.Transport{
-		Proxy: http.ProxyFromEnvironment,
-		DialContext: (&net.Dialer{
-			Timeout:   30 * time.Second,
-			KeepAlive: 30 * time.Second,
-		}).DialContext,
-		ForceAttemptHTTP2:     true,
-		MaxIdleConns:          100,
-		MaxIdleConnsPerHost:   defaultMaxIdleConnsPerHost,
-		IdleConnTimeout:       90 * time.Second,
-		TLSHandshakeTimeout:   10 * time.Second,
-		ExpectContinueTimeout: time.Second,
-	}
 }
 
 // Close releases idle connections owned by the client. It does not close a
 // caller-provided HTTP client.
 func (c *Client) Close() {
-	c.http.Close()
-}
-
-// httpClient applies authentication and compression using the configured HTTP client.
-type httpClient struct {
-	client        *http.Client
-	authorization string
-	compression   Compression
-	owned         bool
-}
-
-// doGet sends a GET request to the ScopeDB server.
-func (c *httpClient) doGet(ctx context.Context, u *url.URL) (*http.Response, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
-	if err != nil {
-		return nil, err
-	}
-	return c.do(req)
-}
-
-// doPost sends a POST request to the ScopeDB server.
-func (c *httpClient) doPost(ctx context.Context, u *url.URL, body []byte) (*http.Response, error) {
-	req, err := c.newPostRequest(ctx, u, body)
-	if err != nil {
-		return nil, err
-	}
-	return c.do(req)
-}
-
-func (c *httpClient) newPostRequest(ctx context.Context, u *url.URL, body []byte) (*http.Request, error) {
-	uncompressedContentLength := len(body)
-
-	compressedBody, compression, err := compressRequestBody(body, c.compression)
-	if err != nil {
-		return nil, err
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u.String(), &compressedBody)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Content-Encoding", string(compression))
-	req.Header.Set("X-ScopeDB-Uncompressed-Content-Length", strconv.Itoa(uncompressedContentLength))
-	return req, nil
-}
-
-func (c *httpClient) do(req *http.Request) (*http.Response, error) {
-	c.applyAuthorization(req)
-	req.Header.Set("X-ScopeDB-Client", "goscopedb")
-	return c.client.Do(req)
-}
-
-func (c *httpClient) applyAuthorization(req *http.Request) {
-	if c.authorization == "" {
-		return
-	}
-	req.Header.Set("Authorization", c.authorization)
-}
-
-// Close releases idle connections when this wrapper owns its HTTP client.
-func (c *httpClient) Close() {
-	if c.owned {
-		c.client.CloseIdleConnections()
+	if c.ownsHTTPClient {
+		c.httpClient.CloseIdleConnections()
 	}
 }
 
@@ -240,186 +133,4 @@ func (c *Client) resourceURL(segments ...string) (*url.URL, error) {
 	u.Path = path
 	u.RawPath = rawPath
 	return &u, nil
-}
-
-func compressRequestBody(body []byte, compression Compression) (bytes.Buffer, Compression, error) {
-	var b bytes.Buffer
-
-	switch compression {
-	case CompressionZstd:
-		encoder, _ := zstdEncoderPool.Get().(*zstd.Encoder)
-		if encoder == nil {
-			var err error
-			encoder, err = zstd.NewWriter(nil)
-			if err != nil {
-				return bytes.Buffer{}, "", err
-			}
-		}
-		encoder.Reset(&b)
-		_, writeErr := encoder.Write(body)
-		closeErr := encoder.Close()
-		encoder.Reset(io.Discard)
-		zstdEncoderPool.Put(encoder)
-		if err := errors.Join(writeErr, closeErr); err != nil {
-			return bytes.Buffer{}, "", err
-		}
-	case CompressionGzip:
-		writer, _ := gzipWriterPool.Get().(*gzip.Writer)
-		if writer == nil {
-			writer = gzip.NewWriter(io.Discard)
-		}
-		writer.Reset(&b)
-		_, writeErr := writer.Write(body)
-		closeErr := writer.Close()
-		// Release the output buffer before caching the writer between requests.
-		writer.Reset(io.Discard)
-		gzipWriterPool.Put(writer)
-		if err := errors.Join(writeErr, closeErr); err != nil {
-			return bytes.Buffer{}, "", err
-		}
-	default:
-		return bytes.Buffer{}, "", fmt.Errorf("unsupported compression: %q", compression)
-	}
-
-	return b, compression, nil
-}
-
-type resultFormat string
-
-const resultFormatJSON resultFormat = "json"
-
-type statementRequest struct {
-	StatementID         *uuid.UUID   `json:"statement_id,omitempty"`
-	Statement           string       `json:"statement"`
-	MaxElapsedSeconds   float64      `json:"max_elapsed_seconds,omitempty"`
-	MaxEstimatedSeconds float64      `json:"max_estimated_seconds,omitempty"`
-	Format              resultFormat `json:"format"`
-}
-
-type statementResponse struct {
-	ID       uuid.UUID         `json:"statement_id"`
-	Progress StatementProgress `json:"progress"`
-	Status   StatementStatus   `json:"status"`
-	Created  time.Time         `json:"created_at"`
-
-	// Error is required when the statement failed.
-	Error *StatementErrorDetails `json:"error"`
-
-	// ResultSet is set when the statement was successfully finished.
-	ResultSet *resultSet `json:"result_set"`
-}
-
-type resultSet struct {
-	Metadata *resultSetMetadata `json:"metadata"`
-	Format   resultFormat       `json:"format"`
-	Rows     json.RawMessage    `json:"rows"`
-}
-
-type resultSetMetadata struct {
-	Fields  []*resultSetField `json:"fields"`
-	NumRows uint64            `json:"num_rows"`
-}
-
-type resultSetField struct {
-	Name     string   `json:"name"`
-	DataType DataType `json:"data_type"`
-}
-
-func (rs *resultSet) toResultSet() *ResultSet {
-	if rs == nil || rs.Metadata == nil {
-		return nil
-	}
-	schema := make(Schema, len(rs.Metadata.Fields))
-	for i, field := range rs.Metadata.Fields {
-		if field == nil {
-			return nil
-		}
-		schema[i] = &FieldSchema{
-			Name: field.Name,
-			Type: field.DataType,
-		}
-	}
-
-	return &ResultSet{
-		TotalRows: rs.Metadata.NumRows,
-		Schema:    schema,
-		rows:      rs.Rows,
-	}
-}
-
-func (c *Client) submitStatement(ctx context.Context, request *statementRequest) (*statementResponse, error) {
-	req, err := c.resourceURL("statements")
-	if err != nil {
-		return nil, err
-	}
-
-	body, err := json.Marshal(request)
-	if err != nil {
-		return nil, err
-	}
-
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	resp, err := c.http.doPost(ctx, req, body)
-	if err != nil {
-		if ctx.Err() != nil {
-			return nil, err
-		}
-		failure := statementError(err, request.StatementID)
-		failure.Code = "statement_submission_outcome_unknown"
-		failure.Retryable = false
-		return nil, failure
-	}
-	defer sneakyBodyClose(resp.Body)
-	result, err := checkStatementResponse(resp)
-	if err != nil {
-		failure := statementError(err, request.StatementID)
-		// A malformed acknowledgement or unstructured gateway error does not
-		// establish rejection. Replaying a mutating statement may run it twice.
-		if (resp.StatusCode >= 200 && resp.StatusCode < 300) ||
-			(failure.Code == "" && (resp.StatusCode == http.StatusRequestTimeout ||
-				resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500)) {
-			failure.Code = "statement_submission_outcome_unknown"
-			failure.Retryable = false
-		}
-		return nil, failure
-	}
-	return result, nil
-}
-
-func (c *Client) fetchStatementResult(ctx context.Context, id uuid.UUID) (*statementResponse, error) {
-	req, err := c.resourceURL("statements", id.String())
-	if err != nil {
-		return nil, err
-	}
-
-	q := req.Query()
-	q.Set("format", string(resultFormatJSON))
-	req.RawQuery = q.Encode()
-
-	resp, err := c.http.doGet(ctx, req)
-	if err != nil {
-		return nil, err
-	}
-	defer sneakyBodyClose(resp.Body)
-	return checkStatementResponse(resp)
-}
-
-func (c *Client) cancelStatement(ctx context.Context, statementID uuid.UUID) (*statementResponse, error) {
-	req, err := c.resourceURL("statements", statementID.String(), "cancel")
-	if err != nil {
-		return nil, err
-	}
-
-	q := req.Query()
-	q.Set("format", string(resultFormatJSON))
-	req.RawQuery = q.Encode()
-
-	resp, err := c.http.doPost(ctx, req, []byte{})
-	if err != nil {
-		return nil, err
-	}
-	defer sneakyBodyClose(resp.Body)
-	return checkStatementResponse(resp)
 }

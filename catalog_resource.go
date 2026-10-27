@@ -46,11 +46,11 @@ func (c *CatalogResource[T]) Get(ctx context.Context) (CatalogSnapshot[T], error
 	}
 	trimmed := bytes.TrimSpace(data)
 	if len(trimmed) == 0 || trimmed[0] != '{' || resp.Header.Get("ETag") == "" {
-		return CatalogSnapshot[T]{}, responseMetadataError(resp, ErrorKindCatalogFailed, "invalid catalog response", nil)
+		return CatalogSnapshot[T]{}, newResponseError(resp, ErrorKindCatalogFailed, "invalid catalog response", nil)
 	}
 	var definition T
 	if err := decodeCatalogDefinition(data, &definition); err != nil {
-		return CatalogSnapshot[T]{}, responseMetadataError(resp, ErrorKindCatalogFailed, err.Error(), err)
+		return CatalogSnapshot[T]{}, newResponseError(resp, ErrorKindCatalogFailed, err.Error(), err)
 	}
 	return CatalogSnapshot[T]{Definition: definition, ETag: resp.Header.Get("ETag")}, nil
 }
@@ -93,7 +93,7 @@ func (c *CatalogResource[T]) mutate(ctx context.Context, method string, data []b
 	err = json.Unmarshal(data, &raw)
 	etag := resp.Header.Get("ETag")
 	if err != nil || len(raw.Before) == 0 || len(raw.After) == 0 || raw.Destructive == nil || etag == "" {
-		failure := responseMetadataError(resp, ErrorKindCatalogFailed, "invalid catalog response", err)
+		failure := newResponseError(resp, ErrorKindCatalogFailed, "invalid catalog response", err)
 		if !controls.DryRun {
 			failure.Code = "catalog_commit_outcome_unknown"
 		}
@@ -105,7 +105,7 @@ func (c *CatalogResource[T]) mutate(ctx context.Context, method string, data []b
 		err = decodeCatalogDefinition(raw.After, &result.After)
 	}
 	if err != nil {
-		failure := responseMetadataError(resp, ErrorKindCatalogFailed, err.Error(), err)
+		failure := newResponseError(resp, ErrorKindCatalogFailed, err.Error(), err)
 		if !controls.DryRun {
 			failure.Code = "catalog_commit_outcome_unknown"
 		}
@@ -159,7 +159,7 @@ func (c *CatalogResource[T]) request(ctx context.Context, method string, data []
 		defer cancel()
 		req = req.WithContext(writeCtx)
 	}
-	resp, err := c.client.http.do(req)
+	resp, err := c.client.do(req)
 	if err != nil {
 		failure := newError(ErrorKindCatalogFailed, "catalog request failed", err)
 		if writing {
@@ -170,14 +170,14 @@ func (c *CatalogResource[T]) request(ctx context.Context, method string, data []
 		}
 		return nil, nil, failure
 	}
-	defer sneakyBodyClose(resp.Body)
+	defer closeResponseBody(resp.Body)
 	maxBytes := 0
 	if resp.StatusCode != http.StatusOK {
-		maxBytes = maxErrorResponseBodyBytes
+		maxBytes = maxDiagnosticBodyBytes
 	}
 	body, err := readResponseBody(resp.Body, maxBytes)
 	if err != nil {
-		failure := responseMetadataError(resp, ErrorKindCatalogFailed, "failed to read catalog response", err)
+		failure := newResponseError(resp, ErrorKindCatalogFailed, "failed to read catalog response", err)
 		if writing {
 			failure.Retryable = false
 			failure.WriteDetails = writeErrorDetails(err)
@@ -189,7 +189,7 @@ func (c *CatalogResource[T]) request(ctx context.Context, method string, data []
 		return nil, nil, failure
 	}
 	if resp.StatusCode != http.StatusOK {
-		failure := responseError(resp, body, ErrorKindCatalogFailed)
+		failure := decodeResponseError(resp, body, ErrorKindCatalogFailed)
 		// A failed write is not necessarily safe to replay, even for a transient HTTP status.
 		if writing {
 			failure.Retryable = false
@@ -197,7 +197,7 @@ func (c *CatalogResource[T]) request(ctx context.Context, method string, data []
 				failure.Code = "catalog_commit_outcome_unknown"
 			}
 		}
-		key := strings.TrimPrefix(c.client.http.authorization, "Bearer ")
+		key := strings.TrimPrefix(c.client.authorization, "Bearer ")
 		if key != "" {
 			failure.Message = strings.ReplaceAll(failure.Message, key, "[redacted]")
 			failure.Code = strings.ReplaceAll(failure.Code, key, "[redacted]")

@@ -51,7 +51,7 @@ func TestWriteTimeoutCoversHeadersAndBody(t *testing.T) {
 					_, err = client.Table("events").Catalog().Delete(t.Context())
 				}
 				require.ErrorIs(t, err, context.DeadlineExceeded)
-				failure := apiError(t, err)
+				failure := requireError(t, err)
 				require.Equal(t, &WriteErrorDetails{Reason: WriteErrorReasonTimeout, Outcome: AppendStateUnknown}, failure.WriteDetails)
 				require.False(t, failure.Retryable)
 				if tc.operation == "catalog" {
@@ -100,13 +100,13 @@ func TestWriteDeadlinePrecedence(t *testing.T) {
 				_, err = client.Table("events").AppendNDJSON(ctx, []byte(`{}`))
 				require.ErrorIs(t, err, context.DeadlineExceeded)
 				require.Equal(t, time.Second, time.Since(started))
-				require.Equal(t, WriteErrorReasonTimeout, apiError(t, err).WriteDetails.Reason)
+				require.Equal(t, WriteErrorReasonTimeout, requireError(t, err).WriteDetails.Reason)
 			})
 		})
 	}
 }
 
-func TestStreamAttemptTimeoutOverride(t *testing.T) {
+func TestAppendStreamAttemptTimeoutOverride(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		attempt *time.Duration
