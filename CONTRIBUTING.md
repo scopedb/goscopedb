@@ -1,6 +1,6 @@
-# Developing the Go SDK
+# Contributing to the Go SDK
 
-Use the tool versions and tasks declared in [mise.toml](../mise.toml). The minimum supported Go version is declared in [go.mod](../go.mod).
+Use the tool versions and tasks declared in [mise.toml](mise.toml). The minimum supported Go version is declared in [go.mod](go.mod).
 
 ## Local checks
 
@@ -17,7 +17,7 @@ git diff --check
 
 `check` runs license validation, module tidiness checks, and static analysis. `build` compiles the library and examples. `test:race` runs unit tests and benchmarks with the race detector; it does not contact a live service. CI runs these checks on Linux, macOS, and Windows.
 
-For focused iteration, use `go test -run <pattern> .` or `go test -bench <pattern> -run '^$' .`. The unit tests use controlled transports and virtual time to exercise request failures, retry budgets, cancellation, and concurrent delivery.
+For focused iteration, use `go test -run <pattern> .` or `go test -bench <pattern> -run '^$' .`.
 
 ## Live protocol validation
 
@@ -35,4 +35,4 @@ For tenant isolation tests, set `SCOPEDB_WORKSPACE_ID`, `SCOPEDB_SECONDARY_WORKS
 
 Keep the README focused on installation, a first query/write, and navigation. Put application workflows in the usage guide; place detailed write, configuration, and error contracts in their respective guides. API comments describe individual types and methods. Migration guides explain version-to-version changes, and the changelog records released behavior. Examples document their own inputs and how to run them.
 
-Follow [RELEASE.md](../RELEASE.md) when preparing or publishing a version.
+Follow [RELEASE.md](RELEASE.md) when preparing or publishing a version.

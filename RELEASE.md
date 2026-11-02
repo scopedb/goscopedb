@@ -8,7 +8,7 @@ Compare changes with the latest published tag and choose the next version. For a
 
 Use `*` bullets and the nonempty sections Breaking Changes, New Features, Bug Fixes, and Improvements, in that order. Describe user-observable changes and link breaking changes to the corresponding migration guide. Preserve published entries. Keep implementation refactors, test maintenance, and transient release status out of user-facing notes.
 
-Verify the candidate using the [development checks](docs/development.md#local-checks). Review exported API documentation, compile examples, and check repository links and the final diff. Update `go.mod` and `go.sum` only when the module's requirements actually change. Open a release PR with its compatibility changes and validation results.
+Verify the candidate using the [local checks](CONTRIBUTING.md#local-checks). Review exported API documentation, compile examples, and check repository links and the final diff. Update `go.mod` and `go.sum` only when the module's requirements actually change. Open a release PR with its compatibility changes and validation results.
 
 ## Publish the approved commit
 
