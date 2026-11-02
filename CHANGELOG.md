@@ -16,6 +16,7 @@ All significant changes to the ScopeDB Go SDK are documented in this file.
 
 ### Bug Fixes
 
+* Honor explicit retry refusal at either error-envelope level even when another hint permits retry or other diagnostic fields are malformed. Such failures cannot trigger Append stream replay or mark Statement submission as retryable against the server's refusal.
 * Reject malformed Statement result row counts, column counts, and wire cell types before caching a successful terminal observation, so the same handle can fetch a valid result after an invalid response. Value conversion remains deferred until reading rows.
 * Preserve HTTP status, request ID, and retry delay when a custom redirect policy rejects Catalog requests or Statement refresh/cancellation requests.
 * Send `Statement.MaxElapsed` as `timeout_seconds` so current servers enforce the configured elapsed time limit instead of silently using the default. Request JSON results through the `format` query parameter on submission.

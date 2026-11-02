@@ -168,6 +168,7 @@ func TestStatementSubmissionOutcome(t *testing.T) {
 		{name: "unfollowed redirect", status: 307, body: "", knownID: true, code: "statement_submission_outcome_unknown"},
 		{name: "coded server error", status: 503, body: `{"error":{"code":"service_unavailable","message":"busy","retryable":true}}`, code: "service_unavailable", retryable: false},
 		{name: "confirmed rejection", status: 429, body: `{"error":{"code":"too_many_requests","message":"rejected","retryable":true}}`, code: "too_many_requests", retryable: true},
+		{name: "outer retry refusal", status: 429, body: `{"error":{"code":"too_many_requests","message":"rejected","retryable":true},"retryable":false}`, code: "too_many_requests", retryable: false},
 		{name: "invalid 429 envelope", status: 429, body: `{"error":{"code":"bad_request","message":"rejected"}}`, code: "statement_submission_outcome_unknown", retryable: false},
 		{name: "malformed outer 429 envelope", status: 429, body: `{"error":{"code":"too_many_requests","message":"rejected"},"retryable":"false"}`, knownID: true, code: "statement_submission_outcome_unknown", retryable: false},
 	} {
