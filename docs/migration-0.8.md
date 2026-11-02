@@ -52,6 +52,18 @@ Streams automatically retry valid HTTP 429 rejections and temporary connection f
 
 ## Statement recovery and diagnostics
 
+`Statement.MaxElapsed` now sends the server's `timeout_seconds` field. Its `time.Duration` API is unchanged: positive values limit time from submission through queueing, preparation, and execution; zero uses the server default of one hour, and negative values are invalid. Polling does not reset the limit. Previous SDKs sent `max_elapsed_seconds`, which current servers ignore. Remove `Statement.MaxEstimated`: the server no longer supports an estimated-duration limit, and there is no replacement for that setting. A context deadline still limits local waiting independently of server execution.
+
+Replace the old Statement error constants with the current failure categories:
+
+| Removed constants                                                            | Current handling                                                                                                                   |
+| ---------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| `StatementErrorCodePendingTimeout`, `StatementErrorCodeExecutionTimeout`     | Use `StatementErrorCodeTimeout` (`statement_timeout`) for the single server-side time limit.                                       |
+| `StatementErrorCodeFailed`                                                   | Distinguish `StatementErrorCodeBadRequest` (`bad_request`) from `StatementErrorCodeInternalServerError` (`internal_server_error`). |
+| `StatementErrorCodeEstimateLimitExceeded`, `StatementErrorCodeHeartbeatLost` | These categories no longer exist; handle the current failure code rather than assuming an equivalent category.                     |
+
+`StatementErrorDetails.Code` remains string-backed, and `Error.Code` exposes the same server value. Preserve a fallback for unknown codes and inspect `Details` for diagnostics. Failure or cancellation does not establish rollback; do not automatically resubmit a mutating statement based on its failure code.
+
 After submission, `Query` and `Execute` failures now have `Retryable == false` and retain `Error.StatementID`. Resume that statement with `StatementHandle(id).Wait(ctx)` instead of submitting the query again. Set `Statement.ID` before submission if the application also needs recovery when the submission response is lost. See [statement recovery](errors.md#statements).
 
 HTTP error bodies and Append acknowledgements are now limited to 64 KiB. Use `errors.Is(err, scopedb.ErrResponseTooLarge)` to detect overflow; HTTP metadata remains available, but the oversized body is discarded. Successful query results and Catalog definitions are not subject to this diagnostic limit.

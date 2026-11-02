@@ -16,6 +16,8 @@ if errors.As(err, &scopeErr) {
 
 A failed execution exposes `StatementDetails`; confirmed server cancellation is identified by `errors.Is(err, scopedb.ErrStatementCancelled)`. A local `context.Canceled` stops the client's request or wait without confirming server cancellation.
 
+Use `StatementDetails.Code` to distinguish `StatementErrorCodeBadRequest` (invalid input), `StatementErrorCodeInternalServerError` (internal execution failure), and `StatementErrorCodeTimeout` (the server-side time limit expired). The timeout covers queueing, preparation, and execution without separate phase-specific codes. `Error.Code` exposes the same value as a string; unknown codes and code-specific `Details` are preserved. A failed or cancelled statement does not establish rollback of its writes.
+
 After successful submission, `Query` and `Execute` errors retain `StatementID` and have `Retryable == false`, because calling them again would submit a new execution. After deciding a polling failure is recoverable, resume the same statement:
 
 ```go

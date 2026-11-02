@@ -38,12 +38,10 @@ type Statement struct {
 	//
 	// When nil, ScopeDB generates the statement ID.
 	ID *uuid.UUID
-	// MaxElapsed limits the server-side elapsed time, including queueing.
-	// Zero uses the server default of one hour.
+	// MaxElapsed limits server-side time from submission, including queueing,
+	// preparation, and execution. Polling does not reset it. Zero uses the
+	// server default of one hour; negative durations are invalid.
 	MaxElapsed time.Duration
-	// MaxEstimated limits the estimated total execution duration.
-	// Zero leaves the estimate unrestricted.
-	MaxEstimated time.Duration
 }
 
 // Statement creates a new statement with the given ScopeQL statement.
@@ -63,15 +61,13 @@ func (c *Client) Query(ctx context.Context, scopeql string) (*ResultSet, error) 
 // not prove rejection; set ID before submission when reconciliation needs a
 // caller-known identifier.
 func (s *Statement) Submit(ctx context.Context) (*StatementHandle, error) {
-	if s.MaxElapsed < 0 || s.MaxEstimated < 0 {
-		return nil, newError(ErrorKindConfigInvalid, "statement limits must not be negative", nil)
+	if s.MaxElapsed < 0 {
+		return nil, newError(ErrorKindConfigInvalid, "statement elapsed time limit must not be negative", nil)
 	}
 	resp, err := s.c.submitStatement(ctx, &statementRequest{
-		StatementID:         s.ID,
-		Statement:           s.stmt,
-		MaxElapsedSeconds:   s.MaxElapsed.Seconds(),
-		MaxEstimatedSeconds: s.MaxEstimated.Seconds(),
-		Format:              statementResultFormat,
+		StatementID:    s.ID,
+		Statement:      s.stmt,
+		TimeoutSeconds: s.MaxElapsed.Seconds(),
 	})
 	if err != nil {
 		if s.ID != nil {
@@ -294,16 +290,14 @@ const (
 type StatementErrorCode string
 
 const (
-	// StatementErrorCodeFailed indicates that statement preparation or execution failed.
-	StatementErrorCodeFailed StatementErrorCode = "statement_failed"
-	// StatementErrorCodePendingTimeout indicates that the statement timed out before execution.
-	StatementErrorCodePendingTimeout StatementErrorCode = "statement_pending_timeout"
-	// StatementErrorCodeExecutionTimeout indicates that the statement exceeded its execution timeout.
-	StatementErrorCodeExecutionTimeout StatementErrorCode = "statement_execution_timeout"
-	// StatementErrorCodeEstimateLimitExceeded indicates that the estimated duration reached its limit.
-	StatementErrorCodeEstimateLimitExceeded StatementErrorCode = "statement_estimate_limit_exceeded"
-	// StatementErrorCodeHeartbeatLost indicates that the statement worker stopped reporting progress.
-	StatementErrorCodeHeartbeatLost StatementErrorCode = "statement_heartbeat_lost"
+	// StatementErrorCodeBadRequest indicates that the statement could not be
+	// prepared or executed because of invalid input.
+	StatementErrorCodeBadRequest StatementErrorCode = "bad_request"
+	// StatementErrorCodeInternalServerError indicates an internal execution failure.
+	StatementErrorCodeInternalServerError StatementErrorCode = "internal_server_error"
+	// StatementErrorCodeTimeout indicates that the server-side time limit was
+	// exceeded during queueing, preparation, or execution.
+	StatementErrorCodeTimeout StatementErrorCode = "statement_timeout"
 )
 
 // StatementErrorDetails contains the structured failure returned for a failed

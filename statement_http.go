@@ -29,11 +29,9 @@ import (
 const statementResultFormat = "json"
 
 type statementRequest struct {
-	StatementID         *uuid.UUID `json:"statement_id,omitempty"`
-	Statement           string     `json:"statement"`
-	MaxElapsedSeconds   float64    `json:"max_elapsed_seconds,omitempty"`
-	MaxEstimatedSeconds float64    `json:"max_estimated_seconds,omitempty"`
-	Format              string     `json:"format"`
+	StatementID    *uuid.UUID `json:"statement_id,omitempty"`
+	Statement      string     `json:"statement"`
+	TimeoutSeconds float64    `json:"timeout_seconds,omitempty"`
 }
 
 type statementResponse struct {
@@ -92,6 +90,10 @@ func (c *Client) submitStatement(ctx context.Context, request *statementRequest)
 	if err != nil {
 		return nil, err
 	}
+
+	q := req.Query()
+	q.Set("format", statementResultFormat)
+	req.RawQuery = q.Encode()
 
 	body, err := json.Marshal(request)
 	if err != nil {

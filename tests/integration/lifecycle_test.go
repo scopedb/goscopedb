@@ -85,5 +85,8 @@ func TestCatalogAppendAndStatementLifecycle(t *testing.T) {
 	require.True(t, found)
 	require.Equal(t, uint64(1<<64-1), row["u"])
 	_, err = client.Query(ctx, "SELECT UNKNOWN_FUNCTION()")
-	require.NotEmpty(t, requireError(t, err).Code)
+	failure := requireError(t, err)
+	require.Equal(t, "bad_request", failure.Code)
+	require.NotNil(t, failure.StatementDetails)
+	require.Equal(t, scopedb.StatementErrorCodeBadRequest, failure.StatementDetails.Code)
 }
