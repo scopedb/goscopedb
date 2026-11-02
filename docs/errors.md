@@ -31,7 +31,7 @@ if errors.As(err, &scopeErr) && scopeErr.StatementID != nil {
 }
 ```
 
-A lost or malformed submission acknowledgement, or an unstructured HTTP 408/429/5xx response, reports `statement_submission_outcome_unknown`. Set `Statement.ID` before submission when recovery requires a caller-known ID. That ID identifies the attempted execution; it does not prove acceptance or guarantee result retention.
+A lost, interrupted, or malformed submission acknowledgement, or an unstructured or invalid HTTP 408/429/5xx response, reports `statement_submission_outcome_unknown`; only a valid HTTP 429 admission refusal is marked retryable on submission. Set `Statement.ID` before submission when recovery requires a caller-known ID. That ID identifies the attempted execution; it does not prove acceptance or guarantee result retention.
 
 Handle polling returns errors without automatic retries and retains their temporary classification. A cached terminal observation takes precedence over an older in-flight response or failure.
 

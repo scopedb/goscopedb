@@ -26,6 +26,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -102,6 +103,75 @@ type apiErrorPayload struct {
 	RequestID string           `json:"request_id"`
 	Retryable *bool            `json:"retryable"`
 	Nested    *apiErrorPayload `json:"error"`
+}
+
+type decodedErrorEnvelope struct {
+	Code      *string         `json:"code"`
+	Message   *string         `json:"message"`
+	Retryable *bool           `json:"retryable"`
+	Details   json.RawMessage `json:"details"`
+	modern    bool
+	valid     bool
+}
+
+func parseErrorEnvelope(resp *http.Response, body []byte) decodedErrorEnvelope {
+	var envelope map[string]json.RawMessage
+	parsed := json.Unmarshal(body, &envelope) == nil
+	nested, modern := envelope["error"]
+	if modern {
+		body = nested
+	}
+	var payload decodedErrorEnvelope
+	payload.modern = modern
+	payload.valid = parsed && json.Unmarshal(body, &payload) == nil &&
+		payload.Code != nil && *payload.Code != "" && payload.Message != nil &&
+		resp.StatusCode >= 400 && resp.StatusCode < 600 &&
+		(!modern || validHTTPErrorCode(*payload.Code, resp.StatusCode))
+	return payload
+}
+
+func validHTTPErrorCode(code string, status int) bool {
+	if code == "" {
+		return false
+	}
+	var expected int
+	switch code {
+	case "bad_request":
+		expected = 400
+	case "not_found":
+		expected = 404
+	case "method_not_allowed":
+		expected = 405
+	case "request_timeout":
+		expected = 408
+	case "conflict":
+		expected = 409
+	case "precondition_failed":
+		expected = 412
+	case "too_many_requests":
+		expected = 429
+	case "internal_server_error":
+		expected = 500
+	case "service_unavailable":
+		expected = 503
+	case "statement_timeout", "invalid_request", "unauthorized", "payload_too_large", "timeout", "unavailable", "internal_error":
+		return false
+	default:
+		return true
+	}
+	return status == expected
+}
+
+func (c *Client) redactError(failure *Error) *Error {
+	if failure == nil {
+		return nil
+	}
+	key := strings.TrimPrefix(c.authorization, "Bearer ")
+	if key != "" {
+		failure.Message = strings.ReplaceAll(failure.Message, key, "[redacted]")
+		failure.Code = strings.ReplaceAll(failure.Code, key, "[redacted]")
+	}
+	return failure
 }
 
 func decodeResponseError(resp *http.Response, body []byte, kind ErrorKind) *Error {

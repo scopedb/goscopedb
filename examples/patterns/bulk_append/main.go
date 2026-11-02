@@ -60,7 +60,7 @@ func run(ctx context.Context, input io.Reader) error {
 	readErr := sendRows(ctx, stream, input)
 	report, writeErr := stream.Shutdown(ctx)
 	fmt.Printf(
-		"accepted=%d committed=%d failed=%d unknown=%d duration=%s\n",
+		"accepted=%d committed=%d failed=%d ambiguous=%d duration=%s\n",
 		report.AcceptedRows,
 		report.CommittedRows,
 		report.FailedRows,

@@ -74,7 +74,7 @@ func run(ctx context.Context) error {
 	report, shutdownErr := stream.Shutdown(ctx)
 	stats := stream.Stats()
 	fmt.Printf(
-		"accepted=%d committed=%d failed=%d unknown=%d dropped=%d retries=%d\n",
+		"accepted=%d committed=%d failed=%d ambiguous=%d dropped=%d retries=%d\n",
 		stats.AcceptedRows,
 		stats.CommittedRows,
 		stats.FailedRows,
@@ -87,7 +87,7 @@ func run(ctx context.Context) error {
 	}
 	if report.Outcome != scopedb.AppendDeliverySucceeded {
 		log.Printf("telemetry loss or ambiguity: %+v", report)
-		// Unknown rows may have committed. Continue mode reports terminal
+		// Ambiguous rows may have committed. Continue mode reports terminal
 		// loss but does not retain payloads for reconciliation or replay.
 	}
 	return nil

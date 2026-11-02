@@ -97,6 +97,8 @@ func TestCatalogRawPreservesUnknownNestedFields(t *testing.T) {
 	result, err := resource.Raw().Apply(t.Context(), snapshot.Definition, CatalogOptions{ExpectedVersion: snapshot.Version})
 	require.NoError(t, err)
 	require.JSONEq(t, definition, string(result.After))
+	_, err = client.Catalog().Raw().Delete(t.Context())
+	require.Equal(t, ErrorKindConfigInvalid, requireError(t, err).Kind)
 }
 
 func TestCatalogMutationOutcome(t *testing.T) {
@@ -110,6 +112,9 @@ func TestCatalogMutationOutcome(t *testing.T) {
 		outcome   CatalogMutationOutcome
 	}{
 		{"version conflict", 412, `{"code":"precondition_failed","message":"stale"}`, false, false, "precondition_failed", CatalogMutationRejected},
+		{"empty error code", 412, `{"error":{"code":"","message":"stale"}}`, false, false, "", CatalogMutationUnknown},
+		{"mismatched error code", 412, `{"error":{"code":"internal_server_error","message":"stale"}}`, false, false, "internal_server_error", CatalogMutationUnknown},
+		{"missing error message", 412, `{"code":"precondition_failed"}`, false, false, "precondition_failed", CatalogMutationUnknown},
 		{"gateway", 502, "response lost", false, false, "", CatalogMutationUnknown},
 		{"truncated acknowledgement", 200, "", true, false, "", CatalogMutationUnknown},
 		{"missing acknowledgement", 200, `{}`, false, false, "", CatalogMutationUnknown},

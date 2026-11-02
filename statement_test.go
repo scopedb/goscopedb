@@ -151,22 +151,32 @@ func TestStatementFailurePreservesServerDiagnostics(t *testing.T) {
 func TestStatementSubmissionOutcome(t *testing.T) {
 	lost := errors.New("acknowledgement lost")
 	for _, tc := range []struct {
-		name      string
-		status    int
-		body      string
-		cause     error
-		knownID   bool
-		code      string
-		retryable bool
+		name           string
+		status         int
+		body           string
+		cause          error
+		cancelInFlight bool
+		knownID        bool
+		code           string
+		retryable      bool
 	}{
 		{name: "lost acknowledgement", cause: lost, knownID: true, code: "statement_submission_outcome_unknown"},
+		{name: "in-flight context timeout", cancelInFlight: true, code: "statement_submission_outcome_unknown"},
 		{name: "gateway", status: 503, body: "unavailable", code: "statement_submission_outcome_unknown"},
 		{name: "invalid acknowledgement", status: 200, body: `{}`, code: "statement_submission_outcome_unknown"},
 		{name: "mismatched ID", status: 200, body: statementJSON(uuid.New(), "running", ""), knownID: true},
-		{name: "confirmed rejection", status: 503, body: `{"code":"busy","message":"rejected","retryable":true}`, code: "busy", retryable: true},
+		{name: "coded server error", status: 503, body: `{"error":{"code":"service_unavailable","message":"busy","retryable":true}}`, code: "service_unavailable", retryable: false},
+		{name: "confirmed rejection", status: 429, body: `{"error":{"code":"too_many_requests","message":"rejected","retryable":true}}`, code: "too_many_requests", retryable: true},
+		{name: "invalid 429 envelope", status: 429, body: `{"error":{"code":"bad_request","message":"rejected"}}`, code: "statement_submission_outcome_unknown", retryable: false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			client := newTestClient(t, func(*http.Request) (*http.Response, error) {
+			ctx, cancel := context.WithCancelCause(t.Context())
+			defer cancel(nil)
+			client := newTestClient(t, func(r *http.Request) (*http.Response, error) {
+				if tc.cancelInFlight {
+					cancel(context.DeadlineExceeded)
+					return nil, context.Cause(r.Context())
+				}
 				if tc.cause != nil {
 					return nil, tc.cause
 				}
@@ -177,7 +187,7 @@ func TestStatementSubmissionOutcome(t *testing.T) {
 			if tc.knownID {
 				statement.ID = &id
 			}
-			_, err := statement.Submit(t.Context())
+			_, err := statement.Submit(ctx)
 			failure := requireError(t, err)
 			require.Equal(t, tc.code, failure.Code)
 			require.Equal(t, tc.retryable, failure.Retryable)
@@ -188,6 +198,9 @@ func TestStatementSubmissionOutcome(t *testing.T) {
 			}
 			if tc.cause != nil {
 				require.ErrorIs(t, err, tc.cause)
+			}
+			if tc.cancelInFlight {
+				require.ErrorIs(t, err, context.DeadlineExceeded)
 			}
 		})
 	}

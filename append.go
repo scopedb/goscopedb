@@ -165,7 +165,7 @@ func (c *Client) appendNDJSON(
 		return AppendRowsResult{}, appendAmbiguousError(err.Error(), err, resp).withWriteContext(ctx)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return AppendRowsResult{}, decodeAppendError(resp, responseBody)
+		return AppendRowsResult{}, c.redactError(decodeAppendError(resp, responseBody))
 	}
 
 	if resp.StatusCode != http.StatusOK {
@@ -254,24 +254,8 @@ func appendAmbiguousError(message string, cause error, resp *http.Response) *Err
 func decodeAppendError(resp *http.Response, body []byte) *Error {
 	failure := decodeResponseError(resp, body, ErrorKindAppendRowsFailed)
 	failure.AppendDetails = &AppendErrorDetails{Status: AppendOutcomeAmbiguous, RowErrors: []AppendRowError{}}
-	var envelope map[string]json.RawMessage
-	parsed := json.Unmarshal(body, &envelope) == nil
-	nested, modern := envelope["error"]
-	if modern {
-		body = nested
-	}
-	var payload struct {
-		Code      *string         `json:"code"`
-		Message   *string         `json:"message"`
-		Retryable *bool           `json:"retryable"`
-		Details   json.RawMessage `json:"details"`
-	}
-	valid := parsed && json.Unmarshal(body, &payload) == nil && payload.Code != nil && payload.Message != nil &&
-		resp.StatusCode >= 400 && resp.StatusCode < 600
-	if valid && modern {
-		valid = validIngestErrorCode(*payload.Code, resp.StatusCode)
-	}
-	if valid && !modern {
+	payload := parseErrorEnvelope(resp, body)
+	if payload.valid && !payload.modern {
 		var details AppendErrorDetails
 		if json.Unmarshal(payload.Details, &details) == nil &&
 			(details.Status == AppendOutcomeFailed || details.Status == AppendOutcomeAmbiguous) {
@@ -281,41 +265,12 @@ func decodeAppendError(resp *http.Response, body []byte) *Error {
 			failure.AppendDetails = &details
 		}
 	}
-	if valid && resp.StatusCode < 500 && (modern || failure.AppendDetails.Status == AppendOutcomeFailed) {
+	if payload.valid && resp.StatusCode < 500 && (payload.modern || failure.AppendDetails.Status == AppendOutcomeFailed) {
 		failure.AppendDetails.Status = AppendOutcomeFailed
 	} else {
 		failure.AppendDetails.Status = AppendOutcomeAmbiguous
 	}
-	failure.Retryable = valid && failure.AppendDetails.Status == AppendOutcomeFailed &&
+	failure.Retryable = payload.valid && failure.AppendDetails.Status == AppendOutcomeFailed &&
 		resp.StatusCode == http.StatusTooManyRequests && (payload.Retryable == nil || *payload.Retryable)
 	return failure
-}
-
-func validIngestErrorCode(code string, status int) bool {
-	var expected int
-	switch code {
-	case "bad_request":
-		expected = 400
-	case "not_found":
-		expected = 404
-	case "method_not_allowed":
-		expected = 405
-	case "request_timeout":
-		expected = 408
-	case "conflict":
-		expected = 409
-	case "precondition_failed":
-		expected = 412
-	case "too_many_requests":
-		expected = 429
-	case "internal_server_error":
-		expected = 500
-	case "service_unavailable":
-		expected = 503
-	case "statement_timeout", "invalid_request", "unauthorized", "payload_too_large", "timeout", "unavailable", "internal_error":
-		return false
-	default:
-		return true
-	}
-	return status == expected
 }

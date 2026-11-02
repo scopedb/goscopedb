@@ -105,27 +105,27 @@ func (c *Client) submitStatement(ctx context.Context, request *statementRequest)
 	}
 	resp, err := c.postJSON(ctx, req, body)
 	if err != nil {
-		if ctx.Err() != nil {
-			return nil, err
-		}
 		failure := statementError(err, request.StatementID)
 		failure.Code = "statement_submission_outcome_unknown"
 		failure.Retryable = false
-		return nil, failure
+		return nil, c.redactError(failure)
 	}
 	defer closeResponseBody(resp.Body)
-	result, err := readStatementResponse(resp)
+	result, validError, err := readStatementResponseWithEnvelope(resp)
 	if err != nil {
 		failure := statementError(err, request.StatementID)
-		// A malformed acknowledgement or unstructured gateway error does not
-		// establish rejection. Replaying a mutating statement may run it twice.
+		// Only a valid HTTP 429 response establishes admission refusal before
+		// registration. A malformed acknowledgement, 408/5xx response, or
+		// unstructured gateway error may follow registration.
 		if (resp.StatusCode >= 200 && resp.StatusCode < 300) ||
-			(failure.Code == "" && (resp.StatusCode == http.StatusRequestTimeout ||
+			(!validError && (resp.StatusCode == http.StatusRequestTimeout ||
 				resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500)) {
 			failure.Code = "statement_submission_outcome_unknown"
+		}
+		if !validError || resp.StatusCode != http.StatusTooManyRequests {
 			failure.Retryable = false
 		}
-		return nil, failure
+		return nil, c.redactError(failure)
 	}
 	return result, nil
 }
@@ -149,7 +149,11 @@ func (c *Client) fetchStatement(ctx context.Context, id uuid.UUID) (*statementRe
 		return nil, err
 	}
 	defer closeResponseBody(resp.Body)
-	return readStatementResponse(resp)
+	result, err := readStatementResponse(resp)
+	if err != nil {
+		return nil, c.redactError(statementError(err, &id))
+	}
+	return result, nil
 }
 
 func (c *Client) cancelStatement(ctx context.Context, statementID uuid.UUID) (*statementResponse, error) {
@@ -167,17 +171,26 @@ func (c *Client) cancelStatement(ctx context.Context, statementID uuid.UUID) (*s
 		return nil, err
 	}
 	defer closeResponseBody(resp.Body)
-	return readStatementResponse(resp)
+	result, err := readStatementResponse(resp)
+	if err != nil {
+		return nil, c.redactError(statementError(err, &statementID))
+	}
+	return result, nil
 }
 
 func readStatementResponse(resp *http.Response) (*statementResponse, error) {
+	result, _, err := readStatementResponseWithEnvelope(resp)
+	return result, err
+}
+
+func readStatementResponseWithEnvelope(resp *http.Response) (*statementResponse, bool, error) {
 	maxBytes := 0
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		maxBytes = maxDiagnosticBodyBytes
 	}
 	data, err := readResponseBody(resp.Body, maxBytes)
 	if err != nil {
-		return nil, newResponseError(
+		return nil, false, newResponseError(
 			resp,
 			ErrorKindUnexpected,
 			"failed to read statement response",
@@ -185,12 +198,12 @@ func readStatementResponse(resp *http.Response) (*statementResponse, error) {
 		)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, decodeResponseError(resp, data, ErrorKindUnexpected)
+		return nil, parseErrorEnvelope(resp, data).valid, decodeResponseError(resp, data, ErrorKindUnexpected)
 	}
 
 	var stmtResp statementResponse
 	if err := json.Unmarshal(data, &stmtResp); err != nil {
-		return nil, newResponseError(
+		return nil, false, newResponseError(
 			resp,
 			ErrorKindUnexpected,
 			"failed to decode statement response",
@@ -198,7 +211,7 @@ func readStatementResponse(resp *http.Response) (*statementResponse, error) {
 		)
 	}
 	if stmtResp.Status == "" {
-		return nil, newResponseError(
+		return nil, false, newResponseError(
 			resp,
 			ErrorKindUnexpected,
 			"statement response is missing status",
@@ -206,14 +219,14 @@ func readStatementResponse(resp *http.Response) (*statementResponse, error) {
 		)
 	}
 	if err := validateStatementResponse(&stmtResp); err != nil {
-		return nil, newResponseError(
+		return nil, false, newResponseError(
 			resp,
 			ErrorKindUnexpected,
 			"invalid statement response: "+err.Error(),
 			err,
 		)
 	}
-	return &stmtResp, nil
+	return &stmtResp, false, nil
 }
 
 func validateStatementResponse(resp *statementResponse) error {

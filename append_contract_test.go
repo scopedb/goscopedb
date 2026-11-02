@@ -39,6 +39,7 @@ func TestAppendModernContract(t *testing.T) {
 		{"future code", 409, `{"error":{"code":"future_conflict","message":"conflict"}}`, AppendOutcomeFailed, false},
 		{"mismatched code", 429, `{"error":{"code":"bad_request","message":"bad"}}`, AppendOutcomeAmbiguous, false},
 		{"statement code", 400, `{"error":{"code":"invalid_request","message":"bad"}}`, AppendOutcomeAmbiguous, false},
+		{"empty code", 429, `{"error":{"code":"","message":"busy"}}`, AppendOutcomeAmbiguous, false},
 		{"missing code", 429, `{"error":{"message":"busy"}}`, AppendOutcomeAmbiguous, false},
 		{"null message", 429, `{"error":{"code":"too_many_requests","message":null}}`, AppendOutcomeAmbiguous, false},
 		{"invalid retry hint", 429, `{"error":{"code":"too_many_requests","message":"busy","retryable":"true"}}`, AppendOutcomeAmbiguous, false},
