@@ -45,7 +45,7 @@ func TestAppendRequiresAuthentication(t *testing.T) {
 	_, err = unauthorized.Table(table.Name).AppendNDJSON(ctx, []byte(`{"id":1}`))
 	failure := requireError(t, err)
 	require.Equal(t, 401, failure.HTTPStatus)
-	require.Equal(t, scopedb.AppendStateRejected, failure.AppendDetails.Status)
+	require.Equal(t, scopedb.AppendOutcomeFailed, failure.AppendDetails.Status)
 	require.False(t, failure.Retryable)
 	result, err := owner.Query(ctx, "FROM "+table.Identifier())
 	require.NoError(t, err)

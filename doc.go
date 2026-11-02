@@ -66,7 +66,7 @@ Transport and context causes remain available through errors.Is and errors.As.
 [Client.Catalog] selects the complete tenant catalog. Its Database, Schema,
 Table, and View selectors provide typed Get, Apply, and Delete operations.
 [Table.Catalog] selects one table. Apply replaces the entire selected subtree,
-including children; omitted fields are cleared. Use dry runs and ETag
+including children; omitted fields are cleared. Use dry runs and catalog version
 preconditions to review changes and reject concurrent edits. Potentially
 destructive changes require explicit authorization. Typed reads reject
 unsupported fields; Raw preserves them as JSON for export and apply workflows.
@@ -101,7 +101,7 @@ The default failure policy stops after a failed batch. [AppendFailureContinue]
 keeps processing later batches; inspect [AppendDeliveryReport.Outcome] even when
 the barrier returns no error. [AppendStream.Stats] exposes lifetime counters and
 failure diagnostics. Unknown outcomes may already have committed and are not
-retried unless RetryUnknown is enabled, accepting possible duplicate rows.
+retried unless RetryAmbiguous is enabled, accepting possible duplicate rows.
 
 [Table.AppendNDJSON] sends one caller-owned NDJSON request without automatic
 retries. Direct requests and stream batches use the client's configured

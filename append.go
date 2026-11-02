@@ -34,31 +34,33 @@ const (
 	maxAppendRows      = 200_000
 )
 
-// AppendState describes a write's commit outcome. Table append responses and
-// client-side interruption details use these values.
-type AppendState string
+// AppendOutcome describes a write's commit outcome. Table append responses and
+// client-side interruption details use these values. String values retain the
+// historical JSON spellings committed, rejected, and unknown.
+type AppendOutcome string
 
 const (
-	// AppendStateCommitted means all reported rows committed.
-	AppendStateCommitted AppendState = "committed"
-	// AppendStateRejected means no rows committed and the request is safe to correct and retry.
-	AppendStateRejected AppendState = "rejected"
-	// AppendStateUnknown means the client cannot determine whether rows committed.
-	AppendStateUnknown AppendState = "unknown"
+	// AppendOutcomeSucceeded means all reported rows committed.
+	AppendOutcomeSucceeded AppendOutcome = "committed"
+	// AppendOutcomeFailed means no rows committed and the request is safe to correct and retry.
+	AppendOutcomeFailed AppendOutcome = "rejected"
+	// AppendOutcomeAmbiguous means the client cannot determine whether rows committed.
+	AppendOutcomeAmbiguous AppendOutcome = "unknown"
 )
 
 // AppendRowsResult is the result of a committed table append.
 type AppendRowsResult struct {
-	Status          AppendState `json:"status"`
-	NumRowsInserted int64       `json:"num_rows_inserted"`
+	Status          AppendOutcome `json:"status"`
+	NumRowsInserted int64         `json:"num_rows_inserted"`
 }
 
 type appendRowsResponse struct {
-	Status          AppendState `json:"status"`
-	NumRowsInserted *int64      `json:"num_rows_inserted"`
+	Status          json.RawMessage `json:"status"`
+	NumRowsInserted *int64          `json:"num_rows_inserted"`
 }
 
-// AppendRowError describes a validation error for one row in an append request.
+// AppendRowError preserves optional legacy per-row diagnostics. Modern errors
+// describe the whole request; do not parse messages to infer row outcomes.
 type AppendRowError struct {
 	RowIndex uint64 `json:"row_index"`
 	Column   string `json:"column"`
@@ -67,7 +69,7 @@ type AppendRowError struct {
 
 // AppendErrorDetails contains the structured outcome of a failed append.
 type AppendErrorDetails struct {
-	Status             AppendState      `json:"status"`
+	Status             AppendOutcome    `json:"status"`
 	RowErrors          []AppendRowError `json:"row_errors"`
 	RowErrorsTruncated bool             `json:"row_errors_truncated"`
 }
@@ -84,7 +86,7 @@ func (c *Client) appendNDJSON(
 		return AppendRowsResult{}, err
 	}
 	if len(ndjson) > maxAppendBodyBytes {
-		return AppendRowsResult{}, appendRejectedError(fmt.Sprintf(
+		return AppendRowsResult{}, appendDefiniteFailure(fmt.Sprintf(
 			"append payload exceeds the %d-byte limit",
 			maxAppendBodyBytes,
 		))
@@ -92,7 +94,7 @@ func (c *Client) appendNDJSON(
 
 	numRows := countAppendRows(ndjson)
 	if numRows > maxAppendRows {
-		return AppendRowsResult{}, appendRejectedError(fmt.Sprintf(
+		return AppendRowsResult{}, appendDefiniteFailure(fmt.Sprintf(
 			"append payload exceeds the %d-row limit",
 			maxAppendRows,
 		))
@@ -142,16 +144,16 @@ func (c *Client) appendNDJSON(
 	})
 	resp, err := c.do(req.WithContext(ctx))
 	if err != nil {
-		apiErr := appendUnknownError(err.Error(), err, nil).withWriteContext(ctx)
+		apiErr := appendAmbiguousError(err.Error(), err, nil).withWriteContext(ctx)
 		// Keep connection evidence across redirects. A later dial failure cannot
 		// prove that an earlier endpoint did not process the append. Transports
 		// without tracing also retain an unknown outcome.
 		if acquiring.Load() && !connected.Load() {
-			apiErr.AppendDetails.Status = AppendStateRejected
+			apiErr.AppendDetails.Status = AppendOutcomeFailed
 			var certificateErr *tls.CertificateVerificationError
 			apiErr.Retryable = !errors.Is(err, context.Canceled) && !errors.As(err, &certificateErr)
 			if apiErr.WriteDetails != nil {
-				apiErr.WriteDetails.Outcome = AppendStateRejected
+				apiErr.WriteDetails.Outcome = AppendOutcomeFailed
 			}
 		}
 		return AppendRowsResult{}, apiErr
@@ -159,67 +161,51 @@ func (c *Client) appendNDJSON(
 	defer closeResponseBody(resp.Body)
 
 	responseBody, err := readResponseBody(resp.Body, maxDiagnosticBodyBytes)
-	if err != nil && resp.StatusCode != http.StatusTooManyRequests {
-		return AppendRowsResult{}, appendUnknownError(err.Error(), err, resp).withWriteContext(ctx)
+	if err != nil {
+		return AppendRowsResult{}, appendAmbiguousError(err.Error(), err, resp).withWriteContext(ctx)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		apiErr := decodeResponseError(resp, responseBody, ErrorKindAppendRowsFailed)
-		apiErr.cause = err
-		if errors.Is(err, ErrResponseTooLarge) {
-			apiErr.Message = ErrResponseTooLarge.Error()
-		}
-		if apiErr.AppendDetails == nil {
-			status := AppendStateUnknown
-			// Rate limiting rejects the append before execution, including when an
-			// intermediary omits or truncates the structured error body.
-			if resp.StatusCode == http.StatusTooManyRequests {
-				status = AppendStateRejected
-			}
-			apiErr.AppendDetails = &AppendErrorDetails{
-				Status:    status,
-				RowErrors: []AppendRowError{},
-			}
-		}
-		if apiErr.AppendDetails.Status == AppendStateUnknown {
-			apiErr.Retryable = false
-		}
-		return AppendRowsResult{}, apiErr
+		return AppendRowsResult{}, decodeAppendError(resp, responseBody)
 	}
 
+	if resp.StatusCode != http.StatusOK {
+		return AppendRowsResult{}, appendAmbiguousError("table append response must have HTTP status 200", nil, resp)
+	}
 	var response appendRowsResponse
 	if err := json.Unmarshal(responseBody, &response); err != nil {
-		return AppendRowsResult{}, appendUnknownError("failed to decode table append response", err, resp)
+		return AppendRowsResult{}, appendAmbiguousError("failed to decode table append response", err, resp)
 	}
-	if response.Status != AppendStateCommitted {
-		return AppendRowsResult{}, appendUnknownError(
+	var status AppendOutcome
+	if len(response.Status) != 0 && (json.Unmarshal(response.Status, &status) != nil || status != AppendOutcomeSucceeded) {
+		return AppendRowsResult{}, appendAmbiguousError(
 			"table append response did not confirm a committed outcome",
 			nil,
 			resp,
 		)
 	}
 	if response.NumRowsInserted == nil {
-		return AppendRowsResult{}, appendUnknownError(
+		return AppendRowsResult{}, appendAmbiguousError(
 			"table append response did not report the number of inserted rows",
 			nil,
 			resp,
 		)
 	}
 	if *response.NumRowsInserted < 0 {
-		return AppendRowsResult{}, appendUnknownError(
+		return AppendRowsResult{}, appendAmbiguousError(
 			"table append response reported a negative number of inserted rows",
 			nil,
 			resp,
 		)
 	}
 	if *response.NumRowsInserted != int64(numRows) {
-		return AppendRowsResult{}, appendUnknownError(fmt.Sprintf(
+		return AppendRowsResult{}, appendAmbiguousError(fmt.Sprintf(
 			"table append response reported %d inserted rows for a %d-row request",
 			*response.NumRowsInserted,
 			numRows,
 		), nil, resp)
 	}
 	return AppendRowsResult{
-		Status:          response.Status,
+		Status:          AppendOutcomeSucceeded,
 		NumRowsInserted: *response.NumRowsInserted,
 	}, nil
 }
@@ -234,23 +220,23 @@ func countAppendRows(ndjson []byte) int {
 	return rows
 }
 
-func appendRejectedError(message string) *Error {
+func appendDefiniteFailure(message string) *Error {
 	return &Error{
 		Kind:    ErrorKindAppendRowsFailed,
 		Message: message,
 		AppendDetails: &AppendErrorDetails{
-			Status:    AppendStateRejected,
+			Status:    AppendOutcomeFailed,
 			RowErrors: []AppendRowError{},
 		},
 	}
 }
 
-func appendUnknownError(message string, cause error, resp *http.Response) *Error {
+func appendAmbiguousError(message string, cause error, resp *http.Response) *Error {
 	err := &Error{
 		Kind:    ErrorKindAppendRowsFailed,
 		Message: message,
 		AppendDetails: &AppendErrorDetails{
-			Status:    AppendStateUnknown,
+			Status:    AppendOutcomeAmbiguous,
 			RowErrors: []AppendRowError{},
 		},
 		WriteDetails: writeErrorDetails(cause),
@@ -262,4 +248,74 @@ func appendUnknownError(message string, cause error, resp *http.Response) *Error
 		err.RetryAfter = parseRetryAfter(resp.Header.Get("Retry-After"), time.Now())
 	}
 	return err
+}
+
+// decodeAppendError keeps certainty separate from status-based retry hints.
+func decodeAppendError(resp *http.Response, body []byte) *Error {
+	failure := decodeResponseError(resp, body, ErrorKindAppendRowsFailed)
+	failure.AppendDetails = &AppendErrorDetails{Status: AppendOutcomeAmbiguous, RowErrors: []AppendRowError{}}
+	var envelope map[string]json.RawMessage
+	parsed := json.Unmarshal(body, &envelope) == nil
+	nested, modern := envelope["error"]
+	if modern {
+		body = nested
+	}
+	var payload struct {
+		Code      *string         `json:"code"`
+		Message   *string         `json:"message"`
+		Retryable *bool           `json:"retryable"`
+		Details   json.RawMessage `json:"details"`
+	}
+	valid := parsed && json.Unmarshal(body, &payload) == nil && payload.Code != nil && payload.Message != nil &&
+		resp.StatusCode >= 400 && resp.StatusCode < 600
+	if valid && modern {
+		valid = validIngestErrorCode(*payload.Code, resp.StatusCode)
+	}
+	if valid && !modern {
+		var details AppendErrorDetails
+		if json.Unmarshal(payload.Details, &details) == nil &&
+			(details.Status == AppendOutcomeFailed || details.Status == AppendOutcomeAmbiguous) {
+			if details.RowErrors == nil {
+				details.RowErrors = []AppendRowError{}
+			}
+			failure.AppendDetails = &details
+		}
+	}
+	if valid && resp.StatusCode < 500 && (modern || failure.AppendDetails.Status == AppendOutcomeFailed) {
+		failure.AppendDetails.Status = AppendOutcomeFailed
+	} else {
+		failure.AppendDetails.Status = AppendOutcomeAmbiguous
+	}
+	failure.Retryable = valid && failure.AppendDetails.Status == AppendOutcomeFailed &&
+		resp.StatusCode == http.StatusTooManyRequests && (payload.Retryable == nil || *payload.Retryable)
+	return failure
+}
+
+func validIngestErrorCode(code string, status int) bool {
+	var expected int
+	switch code {
+	case "bad_request":
+		expected = 400
+	case "not_found":
+		expected = 404
+	case "method_not_allowed":
+		expected = 405
+	case "request_timeout":
+		expected = 408
+	case "conflict":
+		expected = 409
+	case "precondition_failed":
+		expected = 412
+	case "too_many_requests":
+		expected = 429
+	case "internal_server_error":
+		expected = 500
+	case "service_unavailable":
+		expected = 503
+	case "statement_timeout", "invalid_request", "unauthorized", "payload_too_large", "timeout", "unavailable", "internal_error":
+		return false
+	default:
+		return true
+	}
+	return status == expected
 }

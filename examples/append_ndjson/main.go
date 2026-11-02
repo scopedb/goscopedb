@@ -78,7 +78,7 @@ func run(ctx context.Context) error {
 	if err != nil {
 		var scopeErr *scopedb.Error
 		if errors.As(err, &scopeErr) && scopeErr.AppendDetails != nil &&
-			scopeErr.AppendDetails.Status == scopedb.AppendStateUnknown {
+			scopeErr.AppendDetails.Status == scopedb.AppendOutcomeAmbiguous {
 			log.Print("append may have committed; replaying this payload may create duplicates")
 		}
 		return err

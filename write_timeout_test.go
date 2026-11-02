@@ -52,10 +52,11 @@ func TestWriteTimeoutCoversHeadersAndBody(t *testing.T) {
 				}
 				require.ErrorIs(t, err, context.DeadlineExceeded)
 				failure := requireError(t, err)
-				require.Equal(t, &WriteErrorDetails{Reason: WriteErrorReasonTimeout, Outcome: AppendStateUnknown}, failure.WriteDetails)
+				require.Equal(t, &WriteErrorDetails{Reason: WriteErrorReasonTimeout, Outcome: AppendOutcomeAmbiguous}, failure.WriteDetails)
 				require.False(t, failure.Retryable)
 				if tc.operation == "catalog" {
-					require.Equal(t, "catalog_commit_outcome_unknown", failure.Code)
+					require.Equal(t, CatalogMutationUnknown, failure.CatalogOutcome)
+					require.Empty(t, failure.Code)
 				}
 				if tc.headers {
 					require.True(t, body.closed)
