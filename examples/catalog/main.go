@@ -42,7 +42,7 @@ func run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("tables in %s.%s (version %s):\n", exampleutil.Database(), exampleutil.Schema(), snapshot.ETag)
+	fmt.Printf("tables in %s.%s (version %s):\n", exampleutil.Database(), exampleutil.Schema(), snapshot.Version)
 	for _, table := range snapshot.Definition.Tables {
 		fmt.Printf(" - %s (%d columns)\n", table.Name, len(table.Columns))
 	}

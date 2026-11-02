@@ -42,7 +42,7 @@ func TestAppendTLSAndRedirectFailures(t *testing.T) {
 		_, err = client.Table("events").AppendNDJSON(t.Context(), []byte("{}\n"))
 		var failure *Error
 		require.ErrorAs(t, err, &failure)
-		require.Equal(t, AppendStateRejected, failure.AppendDetails.Status)
+		require.Equal(t, AppendOutcomeFailed, failure.AppendDetails.Status)
 		require.False(t, failure.Retryable)
 	})
 	t.Run("redirect followed by dial failure stays unknown", func(t *testing.T) {
@@ -64,7 +64,7 @@ func TestAppendTLSAndRedirectFailures(t *testing.T) {
 		_, err = client.Table("events").AppendNDJSON(t.Context(), []byte("{}\n"))
 		var failure *Error
 		require.ErrorAs(t, err, &failure)
-		require.Equal(t, AppendStateUnknown, failure.AppendDetails.Status)
+		require.Equal(t, AppendOutcomeAmbiguous, failure.AppendDetails.Status)
 		require.False(t, failure.Retryable)
 	})
 }
@@ -91,6 +91,6 @@ func TestAppendStreamRecoversFromConnectionFailure(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, uint64(1), report.Retries)
 	require.Equal(t, uint64(1), report.CommittedRows)
-	require.Zero(t, report.UnknownRows)
+	require.Zero(t, report.AmbiguousRows)
 	require.Equal(t, int32(2), attempts.Load())
 }

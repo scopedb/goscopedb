@@ -38,7 +38,7 @@ func (c *Catalog) Get(ctx context.Context) (CatalogSnapshot[*CatalogDocument], e
 }
 
 // Apply replaces the complete tenant catalog. An empty document clears the tenant.
-// Options may be omitted; by default, changes apply without an ETag precondition
+// Options may be omitted; by default, changes apply without a version precondition
 // and potentially destructive changes are rejected.
 func (c *Catalog) Apply(ctx context.Context, definition *CatalogDocument, options ...CatalogOptions) (CatalogResult[*CatalogDocument], error) {
 	return c.resource.Apply(ctx, definition, options...)
@@ -72,7 +72,8 @@ func (c *Catalog) View(database, schema, view string) *CatalogResource[*CatalogV
 // CatalogSnapshot contains a complete resource definition and its opaque version.
 type CatalogSnapshot[T any] struct {
 	Definition T
-	ETag       string
+	// Version is an opaque token for the whole tenant catalog, including its quotes.
+	Version string
 }
 
 // CatalogOptions controls preview, concurrent updates, and data-loss authorization.
@@ -80,8 +81,9 @@ type CatalogSnapshot[T any] struct {
 type CatalogOptions struct {
 	DryRun           bool
 	AllowDestructive bool
-	// IfMatch is optional. Use the ETag from Get or a dry-run result to reject concurrent changes.
-	IfMatch string
+	// ExpectedVersion is optional. Use Version from Get or a dry run to reject concurrent tenant catalog changes.
+	// Preserve the token including quotes. Stale versions fail with HTTP 412 and precondition_failed.
+	ExpectedVersion string
 }
 
 // CatalogResult contains the normalized states compared in one server transaction.
@@ -90,6 +92,6 @@ type CatalogResult[T any] struct {
 	Before      T    `json:"before"`
 	After       T    `json:"after"`
 	Destructive bool `json:"destructive"`
-	// ETag comes from the response header; it is the base version for a dry run.
-	ETag string `json:"-"`
+	// Version is the base tenant catalog version for a dry run, or the resulting version after a write.
+	Version string `json:"-"`
 }

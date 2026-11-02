@@ -78,14 +78,14 @@ func run(ctx context.Context) error {
 		stats.AcceptedRows,
 		stats.CommittedRows,
 		stats.FailedRows,
-		stats.UnknownRows,
+		stats.AmbiguousRows,
 		stats.DroppedRows,
 		stats.Retries,
 	)
 	if shutdownErr != nil {
 		return shutdownErr
 	}
-	if report.Outcome != scopedb.AppendDeliveryOK {
+	if report.Outcome != scopedb.AppendDeliverySucceeded {
 		log.Printf("telemetry loss or ambiguity: %+v", report)
 		// Unknown rows may have committed. Continue mode reports terminal
 		// loss but does not retain payloads for reconciliation or replay.

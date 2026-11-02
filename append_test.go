@@ -50,7 +50,7 @@ func TestAppendAcknowledgementMustConfirmEveryRow(t *testing.T) {
 				require.NoError(t, err)
 			} else {
 				failure := requireError(t, err)
-				require.Equal(t, AppendStateUnknown, failure.AppendDetails.Status)
+				require.Equal(t, AppendOutcomeAmbiguous, failure.AppendDetails.Status)
 				require.False(t, failure.Retryable)
 			}
 			require.Equal(t, 1, calls, "direct appends make a single SDK attempt")
@@ -64,13 +64,13 @@ func TestAppendFailureClassification(t *testing.T) {
 		status    int
 		body      string
 		readError bool
-		state     AppendState
+		state     AppendOutcome
 		retryable bool
 	}{
-		{"schema rejection", 422, `{"code":"invalid_schema","message":"invalid integer","details":{"status":"rejected","row_errors":[{"row_index":0,"column":"id","message":"expected int"}]}}`, false, AppendStateRejected, false},
-		{"explicit unknown", 503, `{"retryable":true,"details":{"status":"unknown"}}`, false, AppendStateUnknown, false},
-		{"rate limit without details", 429, "too many requests", false, AppendStateRejected, true},
-		{"interrupted rejection", 401, "", true, AppendStateUnknown, false},
+		{"schema rejection", 422, `{"code":"invalid_schema","message":"invalid integer","details":{"status":"rejected","row_errors":[{"row_index":0,"column":"id","message":"expected int"}]}}`, false, AppendOutcomeFailed, false},
+		{"explicit unknown", 503, `{"retryable":true,"details":{"status":"unknown"}}`, false, AppendOutcomeAmbiguous, false},
+		{"rate limit without details", 429, "too many requests", false, AppendOutcomeAmbiguous, false},
+		{"interrupted rejection", 401, "", true, AppendOutcomeAmbiguous, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			client := newTestClient(t, func(*http.Request) (*http.Response, error) {
@@ -111,7 +111,7 @@ func TestAppendLimitsRejectBeforeDispatch(t *testing.T) {
 	} {
 		_, err := client.Table("events").AppendNDJSON(t.Context(), payload)
 		failure := requireError(t, err)
-		require.Equal(t, AppendStateRejected, failure.AppendDetails.Status)
+		require.Equal(t, AppendOutcomeFailed, failure.AppendDetails.Status)
 	}
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()

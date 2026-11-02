@@ -6,6 +6,8 @@ The official Go client for [ScopeDB](https://www.scopedb.io). Run ScopeQL querie
 
 Upgrading from v0.6? Follow the [v0.7 migration guide](docs/migration-0.7.md), including the move from Ingest to Append.
 
+For the upcoming release, see [Upgrade from 0.7 to 0.8](docs/migration-0.8.md).
+
 ## Install
 
 Requires Go 1.27.3 or later. Use the SDK in a trusted server-side process and keep API keys out of source control.

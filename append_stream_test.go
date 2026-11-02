@@ -47,7 +47,7 @@ func appendSuccess(rows int) *http.Response {
 	return httpResponse(200, fmt.Sprintf(`{"status":"committed","num_rows_inserted":%d}`, rows))
 }
 
-func appendFailure(status int, state AppendState, retryable bool) *http.Response {
+func appendFailure(status int, state AppendOutcome, retryable bool) *http.Response {
 	return httpResponse(status, fmt.Sprintf(`{"code":"append_failed","message":"append failed","retryable":%t,"details":{"status":%q,"row_errors":[{"row_index":0,"column":"id","message":"invalid integer"}]}}`, retryable, state))
 }
 
@@ -144,7 +144,7 @@ func TestAppendStreamFlushAccountsOnlyItsPrefix(t *testing.T) {
 					calls++
 					<-release
 					if mode == "stop on failure" {
-						return appendFailure(422, AppendStateRejected, false), nil
+						return appendFailure(422, AppendOutcomeFailed, false), nil
 					}
 					return appendSuccess(1), nil
 				})
@@ -197,7 +197,7 @@ func TestAppendStreamFailurePoliciesAndDiagnosticOwnership(t *testing.T) {
 					<-release
 					calls++
 					if calls == 1 {
-						return appendFailure(422, AppendStateRejected, false), nil
+						return appendFailure(422, AppendOutcomeFailed, false), nil
 					}
 					return appendSuccess(1), nil
 				})
@@ -242,10 +242,10 @@ func TestAppendStreamConcurrencyAndShutdownSettlement(t *testing.T) {
 			require.NoError(t, err)
 			if strings.Contains(string(body), `"id":0`) {
 				<-rejected
-				return appendFailure(422, AppendStateRejected, false), nil
+				return appendFailure(422, AppendOutcomeFailed, false), nil
 			}
 			<-unknown
-			return appendFailure(503, AppendStateUnknown, true), nil
+			return appendFailure(503, AppendOutcomeAmbiguous, true), nil
 		})
 		for id := range 3 {
 			require.NoError(t, stream.Send(t.Context(), map[string]int{"id": id}))
@@ -269,10 +269,10 @@ func TestAppendStreamConcurrencyAndShutdownSettlement(t *testing.T) {
 		require.Zero(t, waiting.report)
 		releaseUnknown()
 		report, err := stream.Shutdown(t.Context())
-		require.Equal(t, AppendStateUnknown, requireError(t, err).AppendDetails.Status)
-		require.EqualValues(t, 1, report.UnknownRows)
+		require.Equal(t, AppendOutcomeAmbiguous, requireError(t, err).AppendDetails.Status)
+		require.EqualValues(t, 1, report.AmbiguousRows)
 		require.EqualValues(t, 2, report.FailedRows)
-		require.Equal(t, AppendDeliveryUnknown, report.Outcome)
+		require.Equal(t, AppendDeliveryAmbiguous, report.Outcome)
 		require.EqualValues(t, 2, calls.Load())
 		require.Zero(t, stream.Stats().PendingBytes)
 	})

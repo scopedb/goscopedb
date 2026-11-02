@@ -107,42 +107,42 @@ func (s AppendStreamState) String() string {
 type AppendDeliveryOutcome uint8
 
 const (
-	// AppendDeliveryOK means the interval settled without failed, unknown, or dropped rows.
-	AppendDeliveryOK AppendDeliveryOutcome = iota
+	// AppendDeliverySucceeded means the interval settled without failed, ambiguous, or dropped rows.
+	AppendDeliverySucceeded AppendDeliveryOutcome = iota
 	// AppendDeliveryPartial means some rows committed and some did not settle cleanly.
 	AppendDeliveryPartial
 	// AppendDeliveryFailed means no rows committed and at least one row failed or dropped.
 	AppendDeliveryFailed
-	// AppendDeliveryUnknown means no rows committed and at least one row may have committed.
-	AppendDeliveryUnknown
+	// AppendDeliveryAmbiguous means no rows committed and at least one row may have committed.
+	AppendDeliveryAmbiguous
 )
 
 func (o AppendDeliveryOutcome) String() string {
 	switch o {
-	case AppendDeliveryOK:
-		return "ok"
+	case AppendDeliverySucceeded:
+		return "succeeded"
 	case AppendDeliveryPartial:
 		return "partial"
 	case AppendDeliveryFailed:
 		return "failed"
-	case AppendDeliveryUnknown:
-		return "unknown"
+	case AppendDeliveryAmbiguous:
+		return "ambiguous"
 	default:
 		return fmt.Sprintf("AppendDeliveryOutcome(%d)", o)
 	}
 }
 
 // AppendRetryOptions configures retries of an exact encoded batch for temporary
-// rejections, with optional replay of transient unknown outcomes. A nil Retry
+// HTTP 429 rejections and known-unsent temporary connection failures, with optional replay of transient ambiguous outcomes. A nil Retry
 // uses the defaults; a non-nil option with MaxRetries=0 disables retries.
-// Caller cancellations are never retried. Timeouts with an unknown commit
-// outcome require RetryUnknown; timeouts known to precede dispatch do not.
+// Client timeouts and cancellations with ambiguous outcomes are never retried.
+// Temporary connection failures known to precede dispatch can be retried safely.
 type AppendRetryOptions struct {
 	MaxRetries int
-	// RetryUnknown opts into retries after a transient failure that may have
-	// committed, including attempt timeouts. This can insert duplicate rows. It
-	// defaults to false and does not override cancellation or the delivery budget.
-	RetryUnknown bool
+	// RetryAmbiguous opts into retries after a transient failure that may have
+	// committed. This can insert duplicate rows. It defaults to false and does
+	// not override client timeouts, cancellation, server refusal, or the delivery budget.
+	RetryAmbiguous bool
 	// Zero durations use defaults: 100 ms initial, 5 s maximum backoff, 5 min
 	// elapsed budget per dispatched batch (including HTTP attempts).
 	InitialBackoff time.Duration
@@ -186,13 +186,13 @@ type AppendDeliveryReport struct {
 	CommittedRows uint64
 	// FailedRows is the number of rejected or unsent accepted rows.
 	FailedRows uint64
-	// UnknownRows is the number of rows whose commit outcome is unknown.
-	UnknownRows uint64
+	// AmbiguousRows is the number of rows whose commit outcome is unknown.
+	AmbiguousRows uint64
 	// DroppedRows is the number of TrySend calls rejected locally in the interval.
 	DroppedRows      uint64
 	CommittedBatches uint64
 	FailedBatches    uint64
-	UnknownBatches   uint64
+	AmbiguousBatches uint64
 	Retries          uint64
 	Duration         time.Duration
 }
@@ -220,7 +220,7 @@ type AppendLastFailure struct {
 	Code    string
 	Details json.RawMessage
 	// Status is the aggregate rejected or unknown outcome across all attempts.
-	Status AppendState
+	Status AppendOutcome
 	// HTTPStatus is zero when no HTTP response was available.
 	HTTPStatus int
 	// RequestID is the request identifier reported by the service, when present.
@@ -228,7 +228,7 @@ type AppendLastFailure struct {
 	// RetryAfter is the service-provided retry delay, when present.
 	RetryAfter time.Duration
 	// Retryable reports the underlying error's conservative retry classification;
-	// it is false for unknown outcomes. RetryUnknown may opt into replaying such
+	// it is false for unknown outcomes. RetryAmbiguous may opt into replaying such
 	// outcomes, so this field is not the stream's retry decision.
 	Retryable bool
 	// WriteDetails identifies a client timeout or cancellation, when present.
@@ -246,7 +246,7 @@ type AppendStreamStats struct {
 	AcceptedRows    uint64
 	CommittedRows   uint64
 	FailedRows      uint64
-	UnknownRows     uint64
+	AmbiguousRows   uint64
 	DroppedRows     uint64
 	DroppedByReason AppendDroppedRows
 	Retries         uint64
@@ -378,11 +378,11 @@ type appendCounters struct {
 	acceptedRows     uint64
 	committedRows    uint64
 	failedRows       uint64
-	unknownRows      uint64
+	ambiguousRows    uint64
 	droppedRows      uint64
 	committedBatches uint64
 	failedBatches    uint64
-	unknownBatches   uint64
+	ambiguousBatches uint64
 	retries          uint64
 }
 
@@ -644,7 +644,7 @@ func (s *AppendStream) Stats() AppendStreamStats {
 		AcceptedRows:    s.shared.counters.acceptedRows,
 		CommittedRows:   s.shared.counters.committedRows,
 		FailedRows:      s.shared.counters.failedRows,
-		UnknownRows:     s.shared.counters.unknownRows,
+		AmbiguousRows:   s.shared.counters.ambiguousRows,
 		DroppedRows:     s.shared.counters.droppedRows,
 		DroppedByReason: s.shared.droppedByReason,
 		Retries:         s.shared.counters.retries,

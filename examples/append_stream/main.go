@@ -90,7 +90,7 @@ func run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if finalReport.Outcome != scopedb.AppendDeliveryOK {
+	if finalReport.Outcome != scopedb.AppendDeliverySucceeded {
 		return fmt.Errorf("shutdown did not settle cleanly: %+v", finalReport)
 	}
 	fmt.Printf("shutdown committed %d additional rows\n", finalReport.CommittedRows)

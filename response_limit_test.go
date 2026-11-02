@@ -31,13 +31,13 @@ func TestOversizedResponsesBoundReadsAndRetainedErrors(t *testing.T) {
 		name        string
 		status      int
 		code        string
-		appendState AppendState
+		appendState AppendOutcome
 	}{
 		{name: "statement", status: 503, code: "statement_submission_outcome_unknown"},
-		{name: "catalog", status: 502, code: "catalog_commit_outcome_unknown"},
-		{name: "append acknowledgement", status: 200, appendState: AppendStateUnknown},
-		{name: "append rate limit", status: 429, appendState: AppendStateRejected},
-		{name: "append stream", status: 503, appendState: AppendStateUnknown},
+		{name: "catalog", status: 502},
+		{name: "append acknowledgement", status: 200, appendState: AppendOutcomeAmbiguous},
+		{name: "append rate limit", status: 429, appendState: AppendOutcomeAmbiguous},
+		{name: "append stream", status: 503, appendState: AppendOutcomeAmbiguous},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			// The prefix remains valid JSON if the oversized whitespace is cut,
@@ -71,7 +71,7 @@ func TestOversizedResponsesBoundReadsAndRetainedErrors(t *testing.T) {
 				require.NoError(t, stream.Send(t.Context(), map[string]int{"id": 1}))
 				report, shutdownErr := stream.Shutdown(t.Context())
 				err = shutdownErr
-				require.EqualValues(t, 1, report.UnknownRows)
+				require.EqualValues(t, 1, report.AmbiguousRows)
 			default:
 				_, err = client.Table("events").AppendNDJSON(t.Context(), []byte(`{"id":1}`))
 			}
@@ -84,7 +84,7 @@ func TestOversizedResponsesBoundReadsAndRetainedErrors(t *testing.T) {
 			require.Equal(t, "bounded-response", failure.RequestID)
 			require.Equal(t, 2*time.Second, failure.RetryAfter)
 			require.Equal(t, test.code, failure.Code)
-			require.Equal(t, test.appendState == AppendStateRejected, failure.Retryable)
+			require.Equal(t, test.appendState == AppendOutcomeFailed, failure.Retryable)
 			require.LessOrEqual(t, len(failure.Message), maxDiagnosticBodyBytes)
 			require.Empty(t, failure.Details)
 			if test.appendState != "" {
@@ -133,7 +133,7 @@ func TestResponseLimitPreservesCompleteDiagnosticsAndLargeResults(t *testing.T) 
 				require.ErrorAs(t, err, &failure)
 				require.Equal(t, "schema_mismatch", failure.Code)
 				require.Equal(t, "invalid column", failure.Message)
-				require.Equal(t, AppendStateRejected, failure.AppendDetails.Status)
+				require.Equal(t, AppendOutcomeFailed, failure.AppendDetails.Status)
 			case "query result":
 				result, err := client.Query(t.Context(), "SELECT 'text'")
 				require.NoError(t, err)

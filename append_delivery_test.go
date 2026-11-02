@@ -31,23 +31,23 @@ func TestAppendStreamRetryRequiresSafeRejectionOrReplayOptIn(t *testing.T) {
 	for _, tc := range []struct {
 		name                               string
 		status                             int
-		state                              AppendState
+		state                              AppendOutcome
 		replay, readError, permanentSecond bool
 		calls                              int
 		outcome                            AppendDeliveryOutcome
 	}{
-		{"rate limit", 429, AppendStateRejected, false, false, false, 2, AppendDeliveryOK},
-		{"unknown default", 503, AppendStateUnknown, false, false, false, 1, AppendDeliveryUnknown},
-		{"replay opt in", 503, AppendStateUnknown, true, false, false, 2, AppendDeliveryOK},
-		{"unknown then rejected", 503, AppendStateUnknown, true, false, true, 2, AppendDeliveryUnknown},
-		{"interrupted authentication response", 401, AppendStateUnknown, true, true, false, 1, AppendDeliveryUnknown},
+		{"rate limit", 429, AppendOutcomeFailed, false, false, false, 2, AppendDeliverySucceeded},
+		{"unknown default", 503, AppendOutcomeAmbiguous, false, false, false, 1, AppendDeliveryAmbiguous},
+		{"replay opt in", 503, AppendOutcomeAmbiguous, true, false, false, 2, AppendDeliverySucceeded},
+		{"unknown then rejected", 503, AppendOutcomeAmbiguous, true, false, true, 2, AppendDeliveryAmbiguous},
+		{"interrupted authentication response", 401, AppendOutcomeAmbiguous, true, true, false, 1, AppendDeliveryAmbiguous},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				calls := 0
 				started := time.Now()
 				stream := newTestAppendStream(t, AppendStreamOptions{Retry: &AppendRetryOptions{
-					MaxRetries: 2, RetryUnknown: tc.replay, InitialBackoff: time.Millisecond, MaxBackoff: time.Millisecond,
+					MaxRetries: 2, RetryAmbiguous: tc.replay, InitialBackoff: time.Millisecond, MaxBackoff: time.Millisecond,
 				}}, func(r *http.Request) (*http.Response, error) {
 					body, err := decodeCompressedRequestBody(r)
 					require.NoError(t, err)
@@ -55,7 +55,7 @@ func TestAppendStreamRetryRequiresSafeRejectionOrReplayOptIn(t *testing.T) {
 					calls++
 					if calls > 1 {
 						if tc.permanentSecond {
-							return appendFailure(422, AppendStateRejected, false), nil
+							return appendFailure(422, AppendOutcomeFailed, false), nil
 						}
 						if tc.status == 429 {
 							require.GreaterOrEqual(t, time.Since(started), time.Second)
@@ -76,12 +76,12 @@ func TestAppendStreamRetryRequiresSafeRejectionOrReplayOptIn(t *testing.T) {
 				require.Equal(t, tc.calls, calls, "delivery error: %v", err)
 				require.Equal(t, tc.outcome, report.Outcome)
 				require.EqualValues(t, tc.calls-1, report.Retries)
-				if tc.outcome == AppendDeliveryOK {
+				if tc.outcome == AppendDeliverySucceeded {
 					require.NoError(t, err)
 					require.EqualValues(t, 1, report.CommittedRows)
 				} else {
 					require.Error(t, err)
-					require.EqualValues(t, 1, report.UnknownRows)
+					require.EqualValues(t, 1, report.AmbiguousRows)
 					require.Zero(t, report.FailedRows)
 					if tc.readError {
 						require.ErrorIs(t, err, io.ErrUnexpectedEOF)
@@ -96,16 +96,16 @@ func TestAppendStreamRetryRequiresSafeRejectionOrReplayOptIn(t *testing.T) {
 func TestAppendStreamRetryCountIsBounded(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		calls := 0
-		stream := newTestAppendStream(t, AppendStreamOptions{Retry: &AppendRetryOptions{MaxRetries: 2, RetryUnknown: true}}, func(*http.Request) (*http.Response, error) {
+		stream := newTestAppendStream(t, AppendStreamOptions{Retry: &AppendRetryOptions{MaxRetries: 2, RetryAmbiguous: true}}, func(*http.Request) (*http.Response, error) {
 			calls++
-			return appendFailure(503, AppendStateUnknown, true), nil
+			return appendFailure(503, AppendOutcomeAmbiguous, true), nil
 		})
 		require.NoError(t, stream.Send(t.Context(), map[string]int{"id": 1}))
 		report, err := stream.Shutdown(t.Context())
 		require.ErrorIs(t, err, ErrAppendRetryExhausted)
 		require.Equal(t, 3, calls)
 		require.EqualValues(t, 2, report.Retries)
-		require.EqualValues(t, 1, report.UnknownRows)
+		require.EqualValues(t, 1, report.AmbiguousRows)
 	})
 }
 
@@ -116,25 +116,26 @@ func TestAppendStreamDeliveryBudgetBoundsAttemptsAndBackoff(t *testing.T) {
 				calls := 0
 				stream := newTestAppendStream(t, AppendStreamOptions{
 					AttemptTimeout: new(25 * time.Millisecond),
-					Retry:          &AppendRetryOptions{MaxRetries: 10, RetryUnknown: true, MaxElapsedTime: 40 * time.Millisecond, InitialBackoff: time.Millisecond},
+					Retry:          &AppendRetryOptions{MaxRetries: 10, RetryAmbiguous: true, MaxElapsedTime: 40 * time.Millisecond, InitialBackoff: time.Millisecond},
 				}, func(r *http.Request) (*http.Response, error) {
 					calls++
 					if slowAttempt {
 						<-r.Context().Done()
 						return nil, r.Context().Err()
 					}
-					resp := appendFailure(429, AppendStateRejected, true)
+					resp := appendFailure(429, AppendOutcomeFailed, true)
 					resp.Header.Set("Retry-After", "3600")
 					return resp, nil
 				})
 				require.NoError(t, stream.Send(t.Context(), map[string]int{"id": 1}))
 				report, err := stream.Shutdown(t.Context())
-				require.ErrorIs(t, err, ErrAppendRetryExhausted)
 				if slowAttempt {
 					require.ErrorIs(t, err, context.DeadlineExceeded)
-					require.Equal(t, 2, calls)
-					require.EqualValues(t, 1, report.UnknownRows)
+					require.NotErrorIs(t, err, ErrAppendRetryExhausted)
+					require.Equal(t, 1, calls)
+					require.EqualValues(t, 1, report.AmbiguousRows)
 				} else {
+					require.ErrorIs(t, err, ErrAppendRetryExhausted)
 					require.Equal(t, 1, calls)
 					require.EqualValues(t, 1, report.FailedRows)
 				}
@@ -152,11 +153,11 @@ func TestAppendStreamFailureInterruptsOtherRetryWaits(t *testing.T) {
 		}, func(*http.Request) (*http.Response, error) {
 			calls++
 			if calls == 1 {
-				resp := appendFailure(429, AppendStateRejected, true)
+				resp := appendFailure(429, AppendOutcomeFailed, true)
 				resp.Header.Set("Retry-After", "3600")
 				return resp, nil
 			}
-			return appendFailure(422, AppendStateRejected, false), nil
+			return appendFailure(422, AppendOutcomeFailed, false), nil
 		})
 		require.NoError(t, stream.Send(t.Context(), map[string]int{"id": 1}))
 		synctest.Wait()

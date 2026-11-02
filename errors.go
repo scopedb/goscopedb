@@ -59,8 +59,18 @@ const (
 // committed; replay requires explicit acceptance of possible duplicates.
 type WriteErrorDetails struct {
 	Reason  WriteErrorReason `json:"reason"`
-	Outcome AppendState      `json:"outcome"`
+	Outcome AppendOutcome    `json:"outcome"`
 }
+
+// CatalogMutationOutcome describes whether a failed Catalog mutation committed.
+type CatalogMutationOutcome string
+
+const (
+	// CatalogMutationRejected means the server rejected the mutation.
+	CatalogMutationRejected CatalogMutationOutcome = "rejected"
+	// CatalogMutationUnknown means the mutation may have committed.
+	CatalogMutationUnknown CatalogMutationOutcome = "unknown"
+)
 
 // Error represents a ScopeDB client or API error.
 type Error struct {
@@ -68,13 +78,17 @@ type Error struct {
 	Details json.RawMessage
 	Kind    ErrorKind
 	// Code is the server error code, when provided, or an SDK outcome-unknown
-	// code when a Statement submission or Catalog mutation could not be confirmed.
+	// code when a Statement submission could not be confirmed.
 	// Unknown server codes are retained.
 	Code       string
 	Message    string
 	HTTPStatus int
 	RequestID  string
 	RetryAfter time.Duration
+	// ServerRetryable preserves the server hint independently of safe replay policy.
+	ServerRetryable *bool
+	// CatalogOutcome is empty for reads, dry runs, and local validation failures.
+	CatalogOutcome CatalogMutationOutcome
 	// Retryable classifies temporary failures. After successful submission,
 	// Query and Execute return false because replay would submit another statement.
 	Retryable     bool
@@ -119,7 +133,7 @@ func writeErrorDetails(cause error) *WriteErrorDetails {
 	default:
 		return nil
 	}
-	return &WriteErrorDetails{Reason: reason, Outcome: AppendStateUnknown}
+	return &WriteErrorDetails{Reason: reason, Outcome: AppendOutcomeAmbiguous}
 }
 
 func (e *Error) withWriteContext(ctx context.Context) *Error {

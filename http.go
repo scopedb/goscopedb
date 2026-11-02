@@ -115,7 +115,7 @@ func decodeResponseError(resp *http.Response, body []byte, kind ErrorKind) *Erro
 
 	var payload apiErrorPayload
 	parsed := json.Unmarshal(body, &payload) == nil
-	if parsed && payload.Message == "" && payload.Nested != nil {
+	if parsed && payload.Nested != nil {
 		nested := *payload.Nested
 		if nested.RequestID == "" {
 			nested.RequestID = payload.RequestID
@@ -136,17 +136,11 @@ func decodeResponseError(resp *http.Response, body []byte, kind ErrorKind) *Erro
 			err.RequestID = payload.RequestID
 		}
 		if payload.Retryable != nil {
+			err.ServerRetryable = payload.Retryable
 			err.Retryable = *payload.Retryable
 		}
 		err.Details = payload.Details
-		var details AppendErrorDetails
-		if kind == ErrorKindAppendRowsFailed && json.Unmarshal(payload.Details, &details) == nil &&
-			(details.Status == AppendStateRejected || details.Status == AppendStateUnknown) {
-			if details.RowErrors == nil {
-				details.RowErrors = []AppendRowError{}
-			}
-			err.AppendDetails = &details
-		}
+
 	}
 	return err
 }

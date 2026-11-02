@@ -31,7 +31,7 @@ func (s *AppendStream) sendBatch(batch appendBatch) {
 	backoff := s.config.retry.InitialBackoff
 	deliveryCtx, deliveryCancel := context.WithTimeout(context.Background(), s.config.retry.MaxElapsedTime)
 	defer deliveryCancel()
-	hadUnknown := false
+	hadAmbiguous := false
 retryLoop:
 	for attempt := 0; ; attempt++ {
 		if attempt > 0 {
@@ -60,12 +60,12 @@ retryLoop:
 		// compressing). Those rows were not sent by this attempt.
 		var failure *Error
 		if err != nil && (!errors.As(err, &failure) || failure.AppendDetails == nil) {
-			rejected := appendRejectedError(err.Error())
+			rejected := appendDefiniteFailure(err.Error())
 			rejected.cause = err
 			err = rejected
 		}
-		if err != nil && appendErrorState(err) == AppendStateUnknown {
-			hadUnknown = true
+		if err != nil && appendErrorOutcome(err) == AppendOutcomeAmbiguous {
+			hadAmbiguous = true
 		}
 		if err == nil || !s.shouldRetryAppend(err) {
 			break
@@ -101,8 +101,8 @@ retryLoop:
 	}
 	// A later rejected attempt cannot prove an earlier unknown attempt did not
 	// commit. Only a successful acknowledgement resolves the batch for replay.
-	if err != nil && hadUnknown && appendErrorState(err) != AppendStateUnknown {
-		err = unknownAppendStreamError("an earlier append attempt may have committed; last attempt: "+err.Error(), err)
+	if err != nil && hadAmbiguous && appendErrorOutcome(err) != AppendOutcomeAmbiguous {
+		err = ambiguousAppendStreamError("an earlier append attempt may have committed; last attempt: "+err.Error(), err)
 	}
 	s.results <- appendBatchResult{batch: batch, err: err}
 }
@@ -122,13 +122,16 @@ func (s *AppendStream) shouldRetryAppend(err error) bool {
 	if !ok || failure.AppendDetails == nil {
 		return false
 	}
-	if failure.AppendDetails.Status == AppendStateRejected {
-		return failure.Retryable
-	}
-	if !s.config.retry.RetryUnknown || failure.AppendDetails.Status != AppendStateUnknown {
+	if failure.ServerRetryable != nil && !*failure.ServerRetryable {
 		return false
 	}
-	if errors.Is(err, context.Canceled) || (failure.WriteDetails != nil && failure.WriteDetails.Reason != WriteErrorReasonTimeout) {
+	if failure.AppendDetails.Status == AppendOutcomeFailed {
+		return failure.Retryable
+	}
+	if !s.config.retry.RetryAmbiguous || failure.AppendDetails.Status != AppendOutcomeAmbiguous {
+		return false
+	}
+	if errors.Is(err, context.Canceled) || failure.WriteDetails != nil {
 		return false
 	}
 	// Authentication, schema, and other permanent HTTP errors must not spin.
@@ -137,13 +140,13 @@ func (s *AppendStream) shouldRetryAppend(err error) bool {
 		failure.HTTPStatus >= 500
 }
 
-func unknownAppendStreamError(message string, cause error) error {
+func ambiguousAppendStreamError(message string, cause error) error {
 	result := &Error{
 		Kind:      ErrorKindAppendRowsFailed,
 		Message:   message,
 		Retryable: false,
 		AppendDetails: &AppendErrorDetails{
-			Status:    AppendStateUnknown,
+			Status:    AppendOutcomeAmbiguous,
 			RowErrors: []AppendRowError{},
 		},
 		cause: cause,
@@ -153,6 +156,7 @@ func unknownAppendStreamError(message string, cause error) error {
 	var last *Error
 	if errors.As(cause, &last) {
 		result.Code = last.Code
+		result.ServerRetryable = last.ServerRetryable
 		result.Details = slices.Clone(last.Details)
 		result.WriteDetails = last.WriteDetails
 		result.HTTPStatus = last.HTTPStatus
@@ -166,15 +170,15 @@ func unknownAppendStreamError(message string, cause error) error {
 	return result
 }
 
-func appendErrorState(err error) AppendState {
+func appendErrorOutcome(err error) AppendOutcome {
 	var scopeErr *Error
 	if errors.As(err, &scopeErr) && scopeErr.AppendDetails != nil {
 		return scopeErr.AppendDetails.Status
 	}
-	return AppendStateUnknown
+	return AppendOutcomeAmbiguous
 }
 
-func newAppendLastFailure(err error, state AppendState) *AppendLastFailure {
+func newAppendLastFailure(err error, state AppendOutcome) *AppendLastFailure {
 	failure := &AppendLastFailure{
 		At:      time.Now(),
 		Message: err.Error(),

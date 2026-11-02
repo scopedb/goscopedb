@@ -64,7 +64,7 @@ func run(ctx context.Context, input io.Reader) error {
 		report.AcceptedRows,
 		report.CommittedRows,
 		report.FailedRows,
-		report.UnknownRows,
+		report.AmbiguousRows,
 		report.Duration,
 	)
 	return errors.Join(readErr, writeErr)

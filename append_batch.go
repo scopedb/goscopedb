@@ -231,14 +231,14 @@ func (w *appendWorker) handleResult(result appendBatchResult) {
 		w.stream.shared.mu.Unlock()
 		return
 	}
-	state := appendErrorState(result.err)
-	if state == AppendStateRejected {
+	state := appendErrorOutcome(result.err)
+	if state == AppendOutcomeFailed {
 		w.stream.shared.counters.failedRows += rows
 		w.stream.shared.counters.failedBatches++
 	} else {
-		state = AppendStateUnknown
-		w.stream.shared.counters.unknownRows += rows
-		w.stream.shared.counters.unknownBatches++
+		state = AppendOutcomeAmbiguous
+		w.stream.shared.counters.ambiguousRows += rows
+		w.stream.shared.counters.ambiguousBatches++
 	}
 	w.stream.shared.lastFailure = newAppendLastFailure(result.err, state)
 	w.stream.shared.mu.Unlock()
@@ -276,7 +276,7 @@ func (w *appendWorker) startStopping(err error) {
 		}
 		return
 	}
-	if appendErrorState(err) == AppendStateUnknown && appendErrorState(w.fatal) != AppendStateUnknown {
+	if appendErrorOutcome(err) == AppendOutcomeAmbiguous && appendErrorOutcome(w.fatal) != AppendOutcomeAmbiguous {
 		w.fatal = err
 		w.stream.shared.mu.Lock()
 		w.stream.shared.fatal = err
@@ -346,22 +346,22 @@ func (w *appendWorker) makeReport(startedAt time.Time, counters appendCounters) 
 		AcceptedRows:     counters.acceptedRows - w.baseline.acceptedRows,
 		CommittedRows:    counters.committedRows - w.baseline.committedRows,
 		FailedRows:       counters.failedRows - w.baseline.failedRows,
-		UnknownRows:      counters.unknownRows - w.baseline.unknownRows,
+		AmbiguousRows:    counters.ambiguousRows - w.baseline.ambiguousRows,
 		DroppedRows:      counters.droppedRows - w.baseline.droppedRows,
 		CommittedBatches: counters.committedBatches - w.baseline.committedBatches,
 		FailedBatches:    counters.failedBatches - w.baseline.failedBatches,
-		UnknownBatches:   counters.unknownBatches - w.baseline.unknownBatches,
+		AmbiguousBatches: counters.ambiguousBatches - w.baseline.ambiguousBatches,
 		Retries:          counters.retries - w.baseline.retries,
 		Duration:         time.Since(startedAt),
 	}
-	lost := report.FailedRows + report.UnknownRows + report.DroppedRows
+	lost := report.FailedRows + report.AmbiguousRows + report.DroppedRows
 	switch {
 	case lost == 0:
-		report.Outcome = AppendDeliveryOK
+		report.Outcome = AppendDeliverySucceeded
 	case report.CommittedRows > 0:
 		report.Outcome = AppendDeliveryPartial
-	case report.UnknownRows > 0:
-		report.Outcome = AppendDeliveryUnknown
+	case report.AmbiguousRows > 0:
+		report.Outcome = AppendDeliveryAmbiguous
 	default:
 		report.Outcome = AppendDeliveryFailed
 	}

@@ -52,11 +52,11 @@ func (c *CatalogResource[T]) Get(ctx context.Context) (CatalogSnapshot[T], error
 	if err := decodeCatalogDefinition(data, &definition); err != nil {
 		return CatalogSnapshot[T]{}, newResponseError(resp, ErrorKindCatalogFailed, err.Error(), err)
 	}
-	return CatalogSnapshot[T]{Definition: definition, ETag: resp.Header.Get("ETag")}, nil
+	return CatalogSnapshot[T]{Definition: definition, Version: resp.Header.Get("ETag")}, nil
 }
 
 // Apply replaces the resource with definition. Omitted fields and objects are
-// cleared. With no options, changes apply without an ETag precondition and
+// cleared. With no options, changes apply without a version precondition and
 // potentially destructive changes are rejected. DryRun validates and rolls back.
 // Catalog writes are never automatically retried.
 func (c *CatalogResource[T]) Apply(ctx context.Context, definition T, options ...CatalogOptions) (CatalogResult[T], error) {
@@ -95,11 +95,11 @@ func (c *CatalogResource[T]) mutate(ctx context.Context, method string, data []b
 	if err != nil || len(raw.Before) == 0 || len(raw.After) == 0 || raw.Destructive == nil || etag == "" {
 		failure := newResponseError(resp, ErrorKindCatalogFailed, "invalid catalog response", err)
 		if !controls.DryRun {
-			failure.Code = "catalog_commit_outcome_unknown"
+			failure.CatalogOutcome = CatalogMutationUnknown
 		}
 		return CatalogResult[T]{}, failure
 	}
-	result := CatalogResult[T]{Destructive: *raw.Destructive, ETag: etag}
+	result := CatalogResult[T]{Destructive: *raw.Destructive, Version: etag}
 	err = decodeCatalogDefinition(raw.Before, &result.Before)
 	if err == nil {
 		err = decodeCatalogDefinition(raw.After, &result.After)
@@ -107,7 +107,7 @@ func (c *CatalogResource[T]) mutate(ctx context.Context, method string, data []b
 	if err != nil {
 		failure := newResponseError(resp, ErrorKindCatalogFailed, err.Error(), err)
 		if !controls.DryRun {
-			failure.Code = "catalog_commit_outcome_unknown"
+			failure.CatalogOutcome = CatalogMutationUnknown
 		}
 		return CatalogResult[T]{}, failure
 	}
@@ -147,8 +147,8 @@ func (c *CatalogResource[T]) request(ctx context.Context, method string, data []
 	if method == http.MethodPut {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	if options.IfMatch != "" {
-		req.Header.Set("If-Match", options.IfMatch)
+	if options.ExpectedVersion != "" {
+		req.Header.Set("If-Match", options.ExpectedVersion)
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, nil, err
@@ -163,7 +163,7 @@ func (c *CatalogResource[T]) request(ctx context.Context, method string, data []
 	if err != nil {
 		failure := newError(ErrorKindCatalogFailed, "catalog request failed", err)
 		if writing {
-			failure.Code = "catalog_commit_outcome_unknown"
+			failure.CatalogOutcome = CatalogMutationUnknown
 			failure.Message = "catalog mutation could not be confirmed"
 			failure.WriteDetails = writeErrorDetails(err)
 			failure = failure.withWriteContext(req.Context())
@@ -182,9 +182,7 @@ func (c *CatalogResource[T]) request(ctx context.Context, method string, data []
 			failure.Retryable = false
 			failure.WriteDetails = writeErrorDetails(err)
 			failure = failure.withWriteContext(req.Context())
-			if resp.StatusCode < 400 || resp.StatusCode >= 500 {
-				failure.Code = "catalog_commit_outcome_unknown"
-			}
+			failure.CatalogOutcome = CatalogMutationUnknown
 		}
 		return nil, nil, failure
 	}
@@ -193,8 +191,9 @@ func (c *CatalogResource[T]) request(ctx context.Context, method string, data []
 		// A failed write is not necessarily safe to replay, even for a transient HTTP status.
 		if writing {
 			failure.Retryable = false
-			if failure.Code == "" && (resp.StatusCode < 400 || resp.StatusCode >= 500) {
-				failure.Code = "catalog_commit_outcome_unknown"
+			failure.CatalogOutcome = CatalogMutationUnknown
+			if failure.Code != "" && resp.StatusCode >= 400 && resp.StatusCode < 500 && resp.StatusCode != http.StatusRequestTimeout {
+				failure.CatalogOutcome = CatalogMutationRejected
 			}
 		}
 		key := strings.TrimPrefix(c.client.authorization, "Bearer ")
