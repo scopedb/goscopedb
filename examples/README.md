@@ -4,10 +4,10 @@ Run these examples from the repository root. They use only the public SDK API.
 
 ## Query and catalog examples
 
-| Example                  | Shows                                              | Run                           |
-| ------------------------ | -------------------------------------------------- | ----------------------------- |
-| [`statement`](statement) | Run a query and read its results                   | `go run ./examples/statement` |
-| [`catalog`](catalog)     | Read a schema definition and list its tables       | `go run ./examples/catalog`   |
+| Example                  | Shows                                        | Run                           |
+| ------------------------ | -------------------------------------------- | ----------------------------- |
+| [`statement`](statement) | Run a query and read its results             | `go run ./examples/statement` |
+| [`catalog`](catalog)     | Read a schema definition and list its tables | `go run ./examples/catalog`   |
 
 The shared helper reads:
 
@@ -51,17 +51,7 @@ Start with `append_stream` to write Go structs. The SDK encodes and batches the 
 | [`telemetry`](patterns/telemetry)     | Write logs or events with `TrySend` and continue after write errors | `go run ./examples/patterns/telemetry`                   |
 | [`append_ndjson`](append_ndjson)      | Write one already encoded NDJSON request                            | `go run ./examples/append_ndjson`                        |
 
-## Using an append stream
-
-1. Create a stream with `table.AppendStream(scopedb.AppendStreamOptions{})`.
-2. Add rows to the SDK's queue with `Send(ctx, row)`.
-3. Call `Shutdown(ctx)` when you are done to wait for writes to finish and close the stream.
-
-Call `Flush(ctx)` if you need to wait for current writes while keeping the stream open. Check the errors returned by each call.
-
-The telemetry example uses `TrySend` to add rows without waiting for queue space. It sets `FailurePolicy: scopedb.AppendFailureContinue` and checks the report returned by `Shutdown`.
-
-See the [streaming writes guide](../docs/usage.md#append-rows) for code snippets and report fields.
+For stream admission, delivery reports, and retries, see the [usage guide](../docs/usage.md#append-rows) and [write contracts](../docs/writes.md).
 
 ## Import an NDJSON file
 
@@ -74,10 +64,10 @@ The `bulk_append` example reads standard input one line at a time, skips blank l
 
 Run `go run ./examples/patterns/bulk_append < events.ndjson`. The stream applies backpressure as its queue fills and `Shutdown` waits for accepted rows to settle. On an input or write error, the example reports the error and the delivery counts before exiting with a nonzero status.
 
-Some rows may commit before an import fails. This example disables automatic retries; reconcile an incomplete import before rerunning the file, since replaying it can duplicate rows. Append does not perform ScopeQL transformations. See the [v0.7 migration guide](../docs/migration-0.7.md#append-and-ingeststream) for server-side transformations and delivery differences.
+Some rows may commit before an import fails. This example disables automatic retries; reconcile an incomplete import before rerunning the file, since replaying it can duplicate rows. Transform input before admission when it does not match the destination columns.
 
 ## Compile every example
 
 ```sh
-go test ./...
+go build ./examples/...
 ```

@@ -4,10 +4,6 @@
 
 The official Go client for [ScopeDB](https://www.scopedb.io). Run ScopeQL queries, browse the catalog, and write rows with bounded asynchronous streams. For application writes, start with `Table.AppendStream`.
 
-Upgrading from v0.6? Follow the [v0.7 migration guide](docs/migration-0.7.md), including the move from Ingest to Append.
-
-For the upcoming release, see [Upgrade from 0.7 to 0.8](docs/migration-0.8.md).
-
 ## Install
 
 Requires Go 1.27.3 or later. Use the SDK in a trusted server-side process and keep API keys out of source control.
@@ -90,35 +86,20 @@ fmt.Println("written rows:", report.CommittedRows)
 
 ## Find what you need
 
-| Task                         | Documentation                                                         |
-| ---------------------------- | --------------------------------------------------------------------- |
-| Read query results           | [Result conversion](docs/usage.md#read-query-results)                 |
-| Track or cancel a query      | [Statement handles](docs/usage.md#track-or-cancel-a-query)            |
-| Initialize a table           | [Startup definitions](docs/usage.md#initialize-a-table)               |
-| Read or change table schemas | [Catalog](docs/usage.md#manage-the-catalog)                           |
-| Encode rows for Append       | [JSON encodings](docs/usage.md#json-encoding-for-append)              |
-| Tune batching and retries    | [Delivery and lifetime](docs/usage.md#delivery-and-resource-lifetime) |
-| Write logs or telemetry      | [Continue mode](docs/usage.md#continue-after-write-errors)            |
-| Set timeouts or HTTP options | [Client configuration](docs/usage.md#timeouts-and-http-options)       |
-| Inspect a failure            | [Errors](docs/usage.md#errors)                                        |
-| Upgrade from v0.6            | [Migration guide](docs/migration-0.7.md)                              |
+| Task                                 | Documentation                                      |
+| ------------------------------------ | -------------------------------------------------- |
+| Query, manage schemas, or write rows | [Usage guide](docs/usage.md)                       |
+| Encode rows and tune delivery        | [Write contracts](docs/writes.md)                  |
+| Configure timeouts and HTTP          | [Client configuration](docs/configuration.md)      |
+| Diagnose failures and recover        | [Error handling](docs/errors.md)                   |
+| Run complete programs                | [Examples](examples/README.md)                     |
+| Upgrade an application               | [Release notes and migration guides](CHANGELOG.md) |
 
-For complete programs, see the [examples](examples/README.md). The [SDK guide](https://www.scopedb.io/docs/developer/go), [API reference](https://pkg.go.dev/github.com/scopedb/goscopedb), and [changelog](CHANGELOG.md) provide additional context. Report problems through [GitHub issues](https://github.com/scopedb/goscopedb/issues).
+The [API reference](https://pkg.go.dev/github.com/scopedb/goscopedb) describes individual types and methods. For ScopeQL syntax, see the [query guide](https://www.scopedb.io/docs/guides/query-events) and [language reference](https://www.scopedb.io/docs/reference). Report problems through [GitHub issues](https://github.com/scopedb/goscopedb/issues).
 
-For ScopeQL syntax, see the [quickstart](https://www.scopedb.io/docs/guides/quickstart), [query guide](https://www.scopedb.io/docs/guides/query-events), and [language reference](https://www.scopedb.io/docs/reference).
+## Contribute
 
-## Development
-
-Development tasks are defined in [mise.toml](mise.toml):
-
-```sh
-mise install
-mise run check
-mise run build
-mise run test
-```
-
-For live endpoint tests, see [protocol validation](docs/development.md). Release history and the maintainer runbook are in [CHANGELOG.md](CHANGELOG.md) and [RELEASE.md](RELEASE.md).
+See [development](docs/development.md) for build and test commands and [releasing](RELEASE.md) for the maintainer workflow.
 
 ## License
 

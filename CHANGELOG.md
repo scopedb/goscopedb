@@ -4,18 +4,18 @@ All significant changes to the ScopeDB Go SDK are documented in this file.
 
 ## Unreleased
 
+## v0.8.0 (2026-11-02)
+
 ### Breaking Changes
 
 * Rename Catalog `ETag` / `IfMatch` to `Version` / `ExpectedVersion` and expose mutation certainty through `Error.CatalogOutcome` while preserving server error codes. See [Upgrade from 0.7 to 0.8](docs/migration-0.8.md).
-* Replace `AppendState` with `AppendOutcome` (`Succeeded`, `Failed`, `Ambiguous`), rename `RetryUnknown` and unknown counters to `RetryAmbiguous` and ambiguous counters, and rename delivery outcomes to `AppendDeliverySucceeded` / `AppendDeliveryAmbiguous`.
+* Replace `AppendState` with `AppendOutcome` (`Succeeded`, `Failed`, `Ambiguous`), rename `RetryUnknown` and unknown counters to `RetryAmbiguous` and ambiguous counters, and rename delivery outcomes to `AppendDeliverySucceeded` / `AppendDeliveryAmbiguous`. Outcome string/JSON values remain `committed`, `rejected`, and `unknown`; delivery outcome strings become `succeeded` and `ambiguous`.
 * Retry remote Append failures automatically only for valid HTTP 429 rejections. Client timeouts with ambiguous outcomes are no longer replayed even when `RetryAmbiguous` is enabled; known-unsent temporary connection failures remain safe to retry.
-
 * Require Go 1.27.3 or later to include its `crypto/x509` security update. Upgrade the Go toolchain before updating the SDK.
 
 ### Bug Fixes
 
 * Accept Append HTTP 200 acknowledgements containing only `num_rows_inserted`. Use valid error envelopes and HTTP status to classify outcomes; malformed responses, including bodyless or truncated HTTP 429 responses, and all HTTP 5xx errors remain ambiguous. Honor explicit server retry refusal even for opt-in ambiguous replay.
-
 * Limit HTTP error bodies and Append acknowledgements to 64 KiB and discard oversized diagnostics instead of retaining them in errors or stream statistics. `ErrResponseTooLarge` identifies overflow while HTTP metadata and conservative write-outcome classification remain available.
 * Preserve `Error.StatementID` for statement recovery and stop marking `Query`/`Execute` failures as retryable after submission. Resume waiting on that ID instead of submitting another execution. Lost or malformed submission acknowledgements and unstructured gateway errors report `statement_submission_outcome_unknown`; original causes and HTTP diagnostics remain available.
 * Prefer a cached terminal Statement observation over a late in-flight request failure, so concurrent cancellation, completion, or statement failure is not hidden by an older polling or cancellation error.

@@ -1,64 +1,39 @@
-# Releasing the ScopeDB Go SDK
+# Releasing the Go SDK
 
-The Go module lives at the repository root, so release tags use the `vX.Y.Z` form. The examples below use `v0.7.1`. Tags with the legacy `go/vX.Y.Z` form were retained only to preserve release history from the former monorepo.
+The module lives at the repository root and uses `vX.Y.Z` tags. The tag determines the module version; there is no separate package-version field to update in `go.mod`. Legacy `go/vX.Y.Z` tags belong to the former monorepo and are retained as history.
 
-## Changelog format
+## Prepare the release PR
 
-Use `# Changelog` with a short introduction, an `## Unreleased` section, and `## vX.Y.Z (YYYY-MM-DD)` release headings. Preserve published version numbers and dates. Use `*` bullets with one coherent, user-observable change per source line. Order nonempty sections as `Breaking Changes`, `New Features`, `Bug Fixes`, and `Improvements`.
+Compare changes with the latest published tag and choose the next version. For a pre-1.0 release, API-breaking changes require a new minor version. Move the Unreleased entries into a dated `## vX.Y.Z (YYYY-MM-DD)` section in [CHANGELOG.md](CHANGELOG.md), leaving an empty Unreleased section for subsequent work.
 
-Compare each entry with the latest released version. Explain the impact and migration path for breaking changes, and describe deprecations alongside their replacements. Include documentation or metadata changes when they affect users; omit internal tests, refactors, and CI maintenance. GitHub release notes should use the matching changelog entry.
+Use `*` bullets and the nonempty sections Breaking Changes, New Features, Bug Fixes, and Improvements, in that order. Describe user-observable changes and link breaking changes to the corresponding migration guide. Preserve published entries. Keep implementation refactors, test maintenance, and transient release status out of user-facing notes.
 
-## Prepare and verify
+Verify the candidate using the [development checks](docs/development.md#local-checks). Review exported API documentation, compile examples, and check repository links and the final diff. Update `go.mod` and `go.sum` only when the module's requirements actually change. Open a release PR with its compatibility changes and validation results.
 
-From the repository root:
+## Publish the approved commit
 
-```sh
-go fmt ./...
-go mod tidy
-git diff --exit-code -- go.mod go.sum
-go test ./...
-go test -race ./...
-go vet ./...
-go doc .
-```
-
-Review the public surface and release material:
+After the release PR is merged and publication is authorized, select its commit and version. Replace the placeholders below with the release heading and approved commit:
 
 ```sh
-go list -f '{{range .GoFiles}}{{$.Dir}}/{{.}}{{"\n"}}{{end}}' .
-git diff --check
-git diff -- README.md doc.go CHANGELOG.md RELEASE.md docs examples
-rg -n 'https?://|SCOPEDB_' README.md doc.go CHANGELOG.md RELEASE.md docs examples
+release_version=vX.Y.Z
+release_commit=COMMIT_SHA
+git tag -a "$release_version" "$release_commit" -m "Release $release_version for Go SDK"
+git push origin "$release_version"
 ```
 
-Confirm that `CHANGELOG.md` contains the intended release date, the examples compile, no secret or private endpoint is present, and the final diff contains only intentional changes. Commit and merge the release preparation before tagging.
+Create the GitHub release for that tag using the matching changelog section as its notes. Never move a published version tag; corrections require another version.
 
-## Tag after acknowledgement
+## Verify availability
 
-Immediately before publishing, obtain the required explicit acknowledgement. Then, from the repository root, create the annotated module tag and push only that tag:
-
-```sh
-version=v0.7.1
-git tag -a "$version" -m "Release $version for Go SDK"
-git push origin "$version"
-```
-
-This runbook documents the commands; preparing a release does not authorize running the tag or push commands.
-
-## Verify the published module
-
-After the module proxy has observed the tag, verify it from a fresh temporary module:
+After the module proxy has observed the tag, use a fresh temporary module with `release_version` still set:
 
 ```sh
 release_tmp=$(mktemp -d)
 cd "$release_tmp"
 go mod init example.com/scopedb-release-check
-go get github.com/scopedb/goscopedb@v0.7.1
+go get "github.com/scopedb/goscopedb@$release_version"
 go list -m github.com/scopedb/goscopedb
 go doc github.com/scopedb/goscopedb
 ```
 
-References:
-
-- [Mapping versions to commits](https://go.dev/ref/mod#vcs-version)
-- [Module version numbering](https://go.dev/doc/modules/version-numbers)
+Confirm that the resolved version matches the tag and the package documentation is available.
