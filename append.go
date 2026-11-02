@@ -85,8 +85,21 @@ func (c *Client) appendNDJSON(
 	if err := ctx.Err(); err != nil {
 		return AppendRowsResult{}, err
 	}
+	endpoint, compressed, numRows, err := c.prepareAppendRequest(database, schema, table, ndjson)
+	if err != nil {
+		return AppendRowsResult{}, err
+	}
+	return c.sendPreparedAppend(ctx, endpoint, compressed, numRows, timeout)
+}
+
+func (c *Client) prepareAppendRequest(
+	database string,
+	schema string,
+	table string,
+	ndjson []byte,
+) (string, []byte, int, error) {
 	if len(ndjson) > maxAppendBodyBytes {
-		return AppendRowsResult{}, appendDefiniteFailure(fmt.Sprintf(
+		return "", nil, 0, appendDefiniteFailure(fmt.Sprintf(
 			"append payload exceeds the %d-byte limit",
 			maxAppendBodyBytes,
 		))
@@ -94,7 +107,7 @@ func (c *Client) appendNDJSON(
 
 	numRows := countAppendRows(ndjson)
 	if numRows > maxAppendRows {
-		return AppendRowsResult{}, appendDefiniteFailure(fmt.Sprintf(
+		return "", nil, 0, appendDefiniteFailure(fmt.Sprintf(
 			"append payload exceeds the %d-row limit",
 			maxAppendRows,
 		))
@@ -111,18 +124,27 @@ func (c *Client) appendNDJSON(
 		"ingest",
 	)
 	if err != nil {
-		return AppendRowsResult{}, err
+		return "", nil, 0, err
 	}
 	compressedBody, err := compressRequestBody(ndjson, c.compression)
 	if err != nil {
-		return AppendRowsResult{}, newError(
+		return "", nil, 0, newError(
 			ErrorKindUnexpected,
 			"failed to compress table append request body",
 			err,
 		)
 	}
+	return u.String(), compressedBody.Bytes(), numRows, nil
+}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u.String(), &compressedBody)
+func (c *Client) sendPreparedAppend(
+	ctx context.Context,
+	endpoint string,
+	compressed []byte,
+	numRows int,
+	timeout time.Duration,
+) (AppendRowsResult, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(compressed))
 	if err != nil {
 		return AppendRowsResult{}, newError(ErrorKindUnexpected, "failed to build table append request", err)
 	}
@@ -232,21 +254,13 @@ func appendDefiniteFailure(message string) *Error {
 }
 
 func appendAmbiguousError(message string, cause error, resp *http.Response) *Error {
-	err := &Error{
-		Kind:    ErrorKindAppendRowsFailed,
-		Message: message,
-		AppendDetails: &AppendErrorDetails{
-			Status:    AppendOutcomeAmbiguous,
-			RowErrors: []AppendRowError{},
-		},
-		WriteDetails: writeErrorDetails(cause),
-		cause:        cause,
+	err := newResponseError(resp, ErrorKindAppendRowsFailed, message, cause)
+	err.Retryable = false
+	err.AppendDetails = &AppendErrorDetails{
+		Status:    AppendOutcomeAmbiguous,
+		RowErrors: []AppendRowError{},
 	}
-	if resp != nil {
-		err.HTTPStatus = resp.StatusCode
-		err.RequestID = resp.Header.Get("X-Request-ID")
-		err.RetryAfter = parseRetryAfter(resp.Header.Get("Retry-After"), time.Now())
-	}
+	err.WriteDetails = writeErrorDetails(cause)
 	return err
 }
 

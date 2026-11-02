@@ -124,17 +124,23 @@ func parseErrorEnvelope(resp *http.Response, body []byte) decodedErrorEnvelope {
 		json.Unmarshal(target, &payload) == nil
 	outerValid := true
 	if modern && parsedMap {
-		var outer struct {
-			RequestID string `json:"request_id"`
-			Retryable *bool  `json:"retryable"`
-		}
-		if json.Unmarshal(body, &outer) == nil {
-			payload.RequestID = cmp.Or(payload.RequestID, outer.RequestID)
-			if payload.Retryable == nil {
-				payload.Retryable = outer.Retryable
+		if rawRequestID, ok := envelope["request_id"]; ok {
+			var requestID string
+			if json.Unmarshal(rawRequestID, &requestID) == nil {
+				payload.RequestID = cmp.Or(payload.RequestID, requestID)
+			} else {
+				outerValid = false
 			}
-		} else {
-			outerValid = false
+		}
+		if rawRetryable, ok := envelope["retryable"]; ok {
+			var retryable *bool
+			if json.Unmarshal(rawRetryable, &retryable) == nil {
+				if payload.Retryable == nil {
+					payload.Retryable = retryable
+				}
+			} else {
+				outerValid = false
+			}
 		}
 	}
 	payload.valid = payload.parsed && outerValid &&
@@ -221,6 +227,9 @@ func newResponseError(
 ) *Error {
 	if errors.Is(cause, ErrResponseTooLarge) {
 		message = ErrResponseTooLarge.Error()
+	}
+	if resp == nil {
+		return newError(kind, message, cause)
 	}
 	return &Error{
 		Kind:       kind,

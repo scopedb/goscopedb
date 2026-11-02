@@ -42,13 +42,27 @@ type ResultSet struct {
 	// Schema is the schema of the result set.
 	Schema Schema
 
-	rows json.RawMessage
+	rows [][]*string
 }
 
 // RawRows returns the string-or-null cells from the JSON wire response without
 // converting them to ScopeDB value types.
 func (rs *ResultSet) RawRows() ([][]*string, error) {
-	return decodeResultRows(rs.rows, rs.TotalRows, len(rs.Schema))
+	rows, err := rs.validRows()
+	if err != nil {
+		return nil, err
+	}
+	cloned := make([][]*string, len(rows))
+	for i, row := range rows {
+		clonedRow := make([]*string, len(row))
+		for j, cell := range row {
+			if cell != nil {
+				clonedRow[j] = new(*cell)
+			}
+		}
+		cloned[i] = clonedRow
+	}
+	return cloned, nil
 }
 
 func decodeResultRows(data json.RawMessage, totalRows uint64, columns int) ([][]*string, error) {
@@ -56,11 +70,18 @@ func decodeResultRows(data json.RawMessage, totalRows uint64, columns int) ([][]
 	if err := json.Unmarshal(data, &rows); err != nil {
 		return nil, err
 	}
+	if err := validateResultRows(rows, totalRows, columns); err != nil {
+		return nil, err
+	}
+	return rows, nil
+}
+
+func validateResultRows(rows [][]*string, totalRows uint64, columns int) error {
 	if rows == nil {
-		return nil, errors.New("result rows must be a JSON array")
+		return errors.New("result rows must be a JSON array")
 	}
 	if uint64(len(rows)) != totalRows {
-		return nil, fmt.Errorf(
+		return fmt.Errorf(
 			"result row count mismatch: expected %d, got %d",
 			totalRows,
 			len(rows),
@@ -68,10 +89,17 @@ func decodeResultRows(data json.RawMessage, totalRows uint64, columns int) ([][]
 	}
 	for i, row := range rows {
 		if row == nil || len(row) != columns {
-			return nil, fmt.Errorf("result row %d: schema length does not match record length", i)
+			return fmt.Errorf("result row %d: schema length does not match record length", i)
 		}
 	}
-	return rows, nil
+	return nil
+}
+
+func (rs *ResultSet) validRows() ([][]*string, error) {
+	if err := validateResultRows(rs.rows, rs.TotalRows, len(rs.Schema)); err != nil {
+		return nil, err
+	}
+	return rs.rows, nil
 }
 
 // ToValues returns rows as positional values. Signed and unsigned integers
@@ -82,7 +110,7 @@ func decodeResultRows(data json.RawMessage, totalRows uint64, columns int) ([][]
 // null cells are returned as nil.
 // Conversion errors include the row and column.
 func (rs *ResultSet) ToValues() ([][]Value, error) {
-	rows, err := rs.RawRows()
+	rows, err := rs.validRows()
 	if err != nil {
 		return nil, err
 	}
@@ -107,7 +135,7 @@ func (rs *ResultSet) ToObjects() ([]map[string]Value, error) {
 	if err != nil {
 		return nil, err
 	}
-	rows, err := rs.RawRows()
+	rows, err := rs.validRows()
 	if err != nil {
 		return nil, err
 	}
@@ -126,7 +154,7 @@ func (rs *ResultSet) ToObjects() ([]map[string]Value, error) {
 // First returns the first row keyed by column name. The boolean is false when
 // the result set is empty.
 func (rs *ResultSet) First() (map[string]Value, bool, error) {
-	rows, err := rs.RawRows()
+	rows, err := rs.validRows()
 	if err != nil {
 		return nil, false, err
 	}

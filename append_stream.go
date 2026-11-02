@@ -455,10 +455,7 @@ func (s *AppendStream) Send(ctx context.Context, row any) error {
 		return err
 	}
 	s.noteAccepted(reservedBytes)
-	s.commands <- appendCommand{record: &appendRecord{
-		payload:       payload,
-		reservedBytes: reservedBytes,
-	}}
+	s.commands <- appendCommand{record: payload}
 	return nil
 }
 
@@ -503,10 +500,7 @@ func (s *AppendStream) TrySend(row any) error {
 		return err
 	}
 	s.noteAccepted(reservedBytes)
-	s.commands <- appendCommand{record: &appendRecord{
-		payload:       payload,
-		reservedBytes: reservedBytes,
-	}}
+	s.commands <- appendCommand{record: payload}
 	return nil
 }
 

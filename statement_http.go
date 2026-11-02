@@ -21,7 +21,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"slices"
 	"time"
 
 	"github.com/google/uuid"
@@ -55,6 +54,7 @@ type statementResult struct {
 	Metadata *statementResultMetadata `json:"metadata"`
 	Format   string                   `json:"format"`
 	Rows     json.RawMessage          `json:"rows"`
+	rows     [][]*string
 }
 
 type statementResultMetadata struct {
@@ -85,7 +85,7 @@ func (rs *statementResult) snapshot() *ResultSet {
 	return &ResultSet{
 		TotalRows: *rs.Metadata.NumRows,
 		Schema:    schema,
-		rows:      slices.Clone(rs.Rows),
+		rows:      rs.rows,
 	}
 }
 
@@ -105,20 +105,20 @@ func (c *Client) submitStatement(ctx context.Context, request *statementRequest)
 	}
 
 	if err := ctx.Err(); err != nil {
+		if request.StatementID != nil {
+			return nil, statementError(err, request.StatementID)
+		}
 		return nil, err
 	}
 	resp, err := c.postJSON(ctx, req, body)
 	if err != nil {
-		if resp != nil {
-			err = newResponseError(resp, ErrorKindUnexpected, err.Error(), err)
-		}
-		failure := statementError(err, request.StatementID)
+		failure := statementError(newResponseError(resp, ErrorKindUnexpected, err.Error(), err), request.StatementID)
 		failure.Code = statementSubmissionOutcomeUnknownCode
 		failure.Retryable = false
 		return nil, c.redactError(failure)
 	}
 	defer closeResponseBody(resp.Body)
-	result, validError, err := readStatementResponseWithEnvelope(resp, request.StatementID, "statement response ID does not match submitted ID")
+	result, validError, err := readStatementResponse(resp, request.StatementID, "statement response ID does not match submitted ID")
 	if err != nil {
 		failure := statementError(err, request.StatementID)
 		// Only a valid HTTP 429 response establishes admission refusal before
@@ -153,17 +153,11 @@ func (c *Client) fetchStatement(ctx context.Context, id uuid.UUID) (*statementRe
 	}
 	resp, err := c.do(request)
 	if err != nil {
-		if resp != nil {
-			err = newResponseError(resp, ErrorKindUnexpected, err.Error(), err)
-		}
-		return nil, err
+		return nil, newResponseError(resp, ErrorKindUnexpected, err.Error(), err)
 	}
 	defer closeResponseBody(resp.Body)
-	result, err := readStatementResponse(resp, &id)
-	if err != nil {
-		return nil, c.redactError(statementError(err, &id))
-	}
-	return result, nil
+	result, _, err := readStatementResponse(resp, &id, "statement response ID does not match handle")
+	return result, err
 }
 
 func (c *Client) cancelStatement(ctx context.Context, statementID uuid.UUID) (*statementResponse, error) {
@@ -178,25 +172,14 @@ func (c *Client) cancelStatement(ctx context.Context, statementID uuid.UUID) (*s
 
 	resp, err := c.postJSON(ctx, req, []byte{})
 	if err != nil {
-		if resp != nil {
-			err = newResponseError(resp, ErrorKindUnexpected, err.Error(), err)
-		}
-		return nil, err
+		return nil, newResponseError(resp, ErrorKindUnexpected, err.Error(), err)
 	}
 	defer closeResponseBody(resp.Body)
-	result, err := readStatementResponse(resp, &statementID)
-	if err != nil {
-		return nil, c.redactError(statementError(err, &statementID))
-	}
-	return result, nil
-}
-
-func readStatementResponse(resp *http.Response, expectedID *uuid.UUID) (*statementResponse, error) {
-	result, _, err := readStatementResponseWithEnvelope(resp, expectedID, "statement response ID does not match handle")
+	result, _, err := readStatementResponse(resp, &statementID, "statement response ID does not match handle")
 	return result, err
 }
 
-func readStatementResponseWithEnvelope(resp *http.Response, expectedID *uuid.UUID, mismatchMessage string) (*statementResponse, bool, error) {
+func readStatementResponse(resp *http.Response, expectedID *uuid.UUID, mismatchMessage string) (*statementResponse, bool, error) {
 	maxBytes := 0
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		maxBytes = maxDiagnosticBodyBytes
@@ -232,20 +215,20 @@ func readStatementResponseWithEnvelope(resp *http.Response, expectedID *uuid.UUI
 			nil,
 		)
 	}
+	if stmtResp.ID != uuid.Nil && expectedID != nil && stmtResp.ID != *expectedID {
+		return nil, false, newResponseError(
+			resp,
+			ErrorKindUnexpected,
+			mismatchMessage,
+			nil,
+		)
+	}
 	if err := validateStatementResponse(&stmtResp); err != nil {
 		return nil, false, newResponseError(
 			resp,
 			ErrorKindUnexpected,
 			"invalid statement response: "+err.Error(),
 			err,
-		)
-	}
-	if expectedID != nil && stmtResp.ID != *expectedID {
-		return nil, false, newResponseError(
-			resp,
-			ErrorKindUnexpected,
-			mismatchMessage,
-			nil,
 		)
 	}
 	return &stmtResp, false, nil
@@ -309,9 +292,12 @@ func validateFinishedResult(result *statementResult) error {
 			)
 		}
 	}
-	if _, err := decodeResultRows(result.Rows, *result.Metadata.NumRows, len(result.Metadata.Fields)); err != nil {
+	rows, err := decodeResultRows(result.Rows, *result.Metadata.NumRows, len(result.Metadata.Fields))
+	if err != nil {
 		return fmt.Errorf("invalid finished statement result rows: %w", err)
 	}
+	result.Rows = nil
+	result.rows = rows
 
 	return nil
 }

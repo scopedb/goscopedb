@@ -51,14 +51,10 @@ func TestOversizedResponsesBoundReadsAndRetainedErrors(t *testing.T) {
 				data = strings.Repeat("x", 2*maxDiagnosticBodyBytes)
 			}
 			body := &observedResponseBody{Reader: strings.NewReader(data)}
-			client, err := NewClient(Config{
-				Endpoint: "https://example.com", Compression: CompressionGzip,
-				HTTPClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
-					return &http.Response{StatusCode: test.status, Header: http.Header{"X-Request-Id": {"bounded-response"}, "Retry-After": {"2"}}, Body: body, ContentLength: -1}, nil
-				})},
+			client := newTestClient(t, func(*http.Request) (*http.Response, error) {
+				return &http.Response{StatusCode: test.status, Header: http.Header{"X-Request-Id": {"bounded-response"}, "Retry-After": {"2"}}, Body: body, ContentLength: -1}, nil
 			})
-			require.NoError(t, err)
-			t.Cleanup(client.Close)
+			var err error
 			var stream *AppendStream
 			switch test.name {
 			case "statement":
@@ -78,8 +74,7 @@ func TestOversizedResponsesBoundReadsAndRetainedErrors(t *testing.T) {
 			require.LessOrEqual(t, body.Size()-int64(body.Len()), int64(maxDiagnosticBodyBytes+1))
 			require.True(t, body.closed)
 			require.ErrorIs(t, err, ErrResponseTooLarge)
-			var failure *Error
-			require.ErrorAs(t, err, &failure)
+			failure := requireError(t, err)
 			require.Equal(t, test.status, failure.HTTPStatus)
 			require.Equal(t, "bounded-response", failure.RequestID)
 			require.Equal(t, 2*time.Second, failure.RetryAfter)
@@ -106,31 +101,25 @@ func TestResponseLimitPreservesCompleteDiagnosticsAndLargeResults(t *testing.T) 
 	prefix := `{"code":"schema_mismatch","message":"invalid column","details":{"status":"rejected","row_errors":[]}}`
 	for _, operation := range []string{"error at limit", "query result", "catalog definition"} {
 		t.Run(operation, func(t *testing.T) {
-			client, err := NewClient(Config{
-				Endpoint: "https://example.com", Compression: CompressionGzip,
-				HTTPClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
-					status := http.StatusOK
-					data := ""
-					switch operation {
-					case "error at limit":
-						status = http.StatusUnprocessableEntity
-						data = prefix + strings.Repeat(" ", maxDiagnosticBodyBytes-len(prefix))
-					case "query result":
-						data = `{"statement_id":"` + id.String() + `","created_at":"2026-10-27T00:00:00Z","status":"finished","result_set":{"format":"json","metadata":{"fields":[{"name":"text","data_type":"string"}],"num_rows":1},"rows":[["` + value + `"]]}}`
-					case "catalog definition":
-						data = `{"name":"events","comment":"` + value + `"}`
-					}
-					return &http.Response{StatusCode: status, Header: http.Header{"Etag": {`"1"`}}, Body: &observedResponseBody{Reader: strings.NewReader(data)}}, nil
-				})},
+			client := newTestClient(t, func(*http.Request) (*http.Response, error) {
+				status := http.StatusOK
+				data := ""
+				switch operation {
+				case "error at limit":
+					status = http.StatusUnprocessableEntity
+					data = prefix + strings.Repeat(" ", maxDiagnosticBodyBytes-len(prefix))
+				case "query result":
+					data = `{"statement_id":"` + id.String() + `","created_at":"2026-10-27T00:00:00Z","status":"finished","result_set":{"format":"json","metadata":{"fields":[{"name":"text","data_type":"string"}],"num_rows":1},"rows":[["` + value + `"]]}}`
+				case "catalog definition":
+					data = `{"name":"events","comment":"` + value + `"}`
+				}
+				return &http.Response{StatusCode: status, Header: http.Header{"Etag": {`"1"`}}, Body: &observedResponseBody{Reader: strings.NewReader(data)}}, nil
 			})
-			require.NoError(t, err)
-			t.Cleanup(client.Close)
 			switch operation {
 			case "error at limit":
-				_, err = client.Table("events").AppendNDJSON(t.Context(), []byte(`{"id":1}`))
+				_, err := client.Table("events").AppendNDJSON(t.Context(), []byte(`{"id":1}`))
 				require.NotErrorIs(t, err, ErrResponseTooLarge)
-				var failure *Error
-				require.ErrorAs(t, err, &failure)
+				failure := requireError(t, err)
 				require.Equal(t, "schema_mismatch", failure.Code)
 				require.Equal(t, "invalid column", failure.Message)
 				require.Equal(t, AppendOutcomeFailed, failure.AppendDetails.Status)

@@ -17,7 +17,6 @@
 package scopedb
 
 import (
-	"encoding/json"
 	"testing"
 	"time"
 
@@ -36,12 +35,22 @@ func TestResultPreservesWirePrecisionAndNulls(t *testing.T) {
 			{Name: "object", Type: ObjectDataType},
 			{Name: "missing", Type: NullDataType},
 		},
-		rows: json.RawMessage(`[["-9223372036854775808","18446744073709551615","00aBff","-PT1M0.000000001S","2026-08-08T00:00:00.123456789Z","{\"id\":9007199254740993}",null]]`),
+		rows: [][]*string{{
+			new("-9223372036854775808"),
+			new("18446744073709551615"),
+			new("00aBff"),
+			new("-PT1M0.000000001S"),
+			new("2026-08-08T00:00:00.123456789Z"),
+			new(`{"id":9007199254740993}`),
+			nil,
+		}},
 	}
 	wire, err := result.RawRows()
 	require.NoError(t, err)
 	require.Equal(t, "18446744073709551615", *wire[0][1])
 	require.Nil(t, wire[0][6])
+	*wire[0][1] = "mutated"
+	wire[0][1] = nil
 	values, err := result.ToValues()
 	require.NoError(t, err)
 	require.Equal(t, [][]Value{{int64(-1 << 63), uint64(1<<64 - 1), []byte{0, 0xab, 0xff}, -time.Minute - time.Nanosecond, time.Date(2026, 8, 8, 0, 0, 0, 123456789, time.UTC), `{"id":9007199254740993}`, nil}}, values)
@@ -54,16 +63,18 @@ func TestResultPreservesWirePrecisionAndNulls(t *testing.T) {
 
 func TestResultRejectsInvalidRowsAndLossyObjects(t *testing.T) {
 	for _, tc := range []struct {
-		name, rows string
-		total      uint64
+		name  string
+		rows  [][]*string
+		total uint64
 	}{
-		{"null rows", `null`, 0},
-		{"row count", `[]`, 1},
-		{"column count", `[[]]`, 1},
-		{"invalid cell", `[["not an integer"]]`, 1},
+		{"null rows", nil, 0},
+		{"row count", [][]*string{}, 1},
+		{"column count", [][]*string{{}}, 1},
+		{"null row", [][]*string{nil}, 1},
+		{"invalid cell", [][]*string{{new("not an integer")}}, 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			result := &ResultSet{TotalRows: tc.total, Schema: Schema{{Name: "n", Type: IntDataType}}, rows: json.RawMessage(tc.rows)}
+			result := &ResultSet{TotalRows: tc.total, Schema: Schema{{Name: "n", Type: IntDataType}}, rows: tc.rows}
 			_, err := result.ToValues()
 			require.Error(t, err)
 			if tc.name == "invalid cell" {
@@ -71,7 +82,7 @@ func TestResultRejectsInvalidRowsAndLossyObjects(t *testing.T) {
 			}
 		})
 	}
-	result := &ResultSet{TotalRows: 1, Schema: Schema{{Name: "n", Type: IntDataType}, {Name: "n", Type: IntDataType}}, rows: json.RawMessage(`[["1","2"]]`)}
+	result := &ResultSet{TotalRows: 1, Schema: Schema{{Name: "n", Type: IntDataType}, {Name: "n", Type: IntDataType}}, rows: [][]*string{{new("1"), new("2")}}}
 	_, err := result.ToObjects()
 	require.ErrorContains(t, err, "duplicate result column")
 	_, _, err = result.First()
@@ -79,14 +90,14 @@ func TestResultRejectsInvalidRowsAndLossyObjects(t *testing.T) {
 }
 
 func TestResultFirstConvertsOnlyTheFirstRow(t *testing.T) {
-	result := &ResultSet{TotalRows: 2, Schema: Schema{{Name: "n", Type: IntDataType}}, rows: json.RawMessage(`[["9007199254740993"],["invalid"]]`)}
+	result := &ResultSet{TotalRows: 2, Schema: Schema{{Name: "n", Type: IntDataType}}, rows: [][]*string{{new("9007199254740993")}, {new("invalid")}}}
 	row, found, err := result.First()
 	require.NoError(t, err)
 	require.True(t, found)
 	require.Equal(t, int64(9007199254740993), row["n"])
 	_, err = result.ToObjects()
 	require.ErrorContains(t, err, "result row 1")
-	result.TotalRows, result.rows = 0, json.RawMessage(`[]`)
+	result.TotalRows, result.rows = 0, [][]*string{}
 	row, found, err = result.First()
 	require.NoError(t, err)
 	require.False(t, found)
@@ -110,9 +121,7 @@ func TestResultConversionBoundaries(t *testing.T) {
 		{BinaryDataType, "not hex", nil, true},
 	} {
 		t.Run(string(tc.kind)+"/"+tc.wire, func(t *testing.T) {
-			data, err := json.Marshal([][]string{{tc.wire}})
-			require.NoError(t, err)
-			result := &ResultSet{TotalRows: 1, Schema: Schema{{Name: "value", Type: tc.kind}}, rows: data}
+			result := &ResultSet{TotalRows: 1, Schema: Schema{{Name: "value", Type: tc.kind}}, rows: [][]*string{{new(tc.wire)}}}
 			values, err := result.ToValues()
 			if tc.invalid {
 				require.Error(t, err)

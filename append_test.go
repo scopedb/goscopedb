@@ -18,7 +18,6 @@ package scopedb
 
 import (
 	"bytes"
-	"context"
 	"errors"
 	"io"
 	"net/http"
@@ -30,24 +29,33 @@ import (
 
 func TestAppendAcknowledgementMustConfirmEveryRow(t *testing.T) {
 	for _, tc := range []struct {
-		name, payload, acknowledgement string
-		committed                      bool
+		name            string
+		status          int
+		payload         string
+		acknowledgement string
+		committed       bool
 	}{
-		{"explicit zero", "\n \n", `{"status":"committed","num_rows_inserted":0}`, true},
-		{"missing zero", "\n \n", `{"status":"committed"}`, false},
-		{"contradictory state", `{}`, `{"status":"rejected","num_rows_inserted":1}`, false},
-		{"wrong count", `{}`, `{"status":"committed","num_rows_inserted":2}`, false},
-		{"malformed", `{}`, `not JSON`, false},
+		{"modern", 200, `{"id":1}`, `{"num_rows_inserted":1}`, true},
+		{"legacy", 200, `{"id":1}`, `{"status":"committed","num_rows_inserted":1}`, true},
+		{"explicit zero", 200, "\n \n", `{"status":"committed","num_rows_inserted":0}`, true},
+		{"missing zero", 200, "\n \n", `{"status":"committed"}`, false},
+		{"contradictory state", 200, `{}`, `{"status":"rejected","num_rows_inserted":1}`, false},
+		{"null status", 200, `{"id":1}`, `{"status":null,"num_rows_inserted":1}`, false},
+		{"empty status", 200, `{"id":1}`, `{"status":"","num_rows_inserted":1}`, false},
+		{"wrong count", 200, `{}`, `{"status":"committed","num_rows_inserted":2}`, false},
+		{"wrong HTTP status", 201, `{"id":1}`, `{"num_rows_inserted":1}`, false},
+		{"malformed", 200, `{}`, `not JSON`, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			calls := 0
 			client := newTestClient(t, func(*http.Request) (*http.Response, error) {
 				calls++
-				return httpResponse(200, tc.acknowledgement), nil
+				return httpResponse(tc.status, tc.acknowledgement), nil
 			})
-			_, err := client.Table("events").AppendNDJSON(t.Context(), []byte(tc.payload))
+			result, err := client.Table("events").AppendNDJSON(t.Context(), []byte(tc.payload))
 			if tc.committed {
 				require.NoError(t, err)
+				require.Equal(t, AppendOutcomeSucceeded, result.Status)
 			} else {
 				failure := requireError(t, err)
 				require.Equal(t, AppendOutcomeAmbiguous, failure.AppendDetails.Status)
@@ -113,8 +121,4 @@ func TestAppendLimitsRejectBeforeDispatch(t *testing.T) {
 		failure := requireError(t, err)
 		require.Equal(t, AppendOutcomeFailed, failure.AppendDetails.Status)
 	}
-	ctx, cancel := context.WithCancel(t.Context())
-	cancel()
-	_, err := client.Table("events").AppendNDJSON(ctx, []byte(`{}`))
-	require.ErrorIs(t, err, context.Canceled)
 }

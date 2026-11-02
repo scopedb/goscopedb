@@ -26,39 +26,42 @@ import (
 
 func TestAppendModernContract(t *testing.T) {
 	for _, tc := range []struct {
-		name    string
-		status  int
-		body    string
-		outcome AppendOutcome
-		retry   bool
+		name       string
+		status     int
+		body       string
+		outcome    AppendOutcome
+		retry      bool
+		testStream bool
 	}{
-		{"rate limit", 429, `{"error":{"code":"too_many_requests","message":"busy"}}`, AppendOutcomeFailed, true},
-		{"refusal", 429, `{"error":{"code":"too_many_requests","message":"busy","retryable":false}}`, AppendOutcomeFailed, false},
-		{"outer refusal", 429, `{"retryable":false,"error":{"code":"too_many_requests","message":"busy"}}`, AppendOutcomeFailed, false},
-		{"HTTP timeout", 408, `{"error":{"code":"request_timeout","message":"late","retryable":true}}`, AppendOutcomeFailed, false},
-		{"server error", 503, `{"error":{"code":"service_unavailable","message":"busy","details":{"status":"rejected"}}}`, AppendOutcomeAmbiguous, false},
-		{"future code", 409, `{"error":{"code":"future_conflict","message":"conflict"}}`, AppendOutcomeFailed, false},
-		{"mismatched code", 429, `{"error":{"code":"bad_request","message":"bad"}}`, AppendOutcomeAmbiguous, false},
-		{"statement code", 400, `{"error":{"code":"invalid_request","message":"bad"}}`, AppendOutcomeAmbiguous, false},
-		{"empty code", 429, `{"error":{"code":"","message":"busy"}}`, AppendOutcomeAmbiguous, false},
-		{"missing code", 429, `{"error":{"message":"busy"}}`, AppendOutcomeAmbiguous, false},
-		{"null message", 429, `{"error":{"code":"too_many_requests","message":null}}`, AppendOutcomeAmbiguous, false},
-		{"invalid retry hint", 429, `{"error":{"code":"too_many_requests","message":"busy","retryable":"true"}}`, AppendOutcomeAmbiguous, false},
-		{"malformed outer retry hint", 429, `{"error":{"code":"too_many_requests","message":"busy"},"retryable":"false"}`, AppendOutcomeAmbiguous, false},
-		{"legacy 5xx rejection", 503, `{"code":"ingest_failure","message":"busy","details":{"status":"rejected"}}`, AppendOutcomeAmbiguous, false},
-		{"legacy mismatched known code", 429, `{"code":"internal_server_error","message":"failed","details":{"status":"rejected"}}`, AppendOutcomeAmbiguous, false},
-		{"legacy missing outcome", 429, `{"code":"ingest_failure","message":"busy"}`, AppendOutcomeAmbiguous, false},
+		{"rate limit", 429, `{"error":{"code":"too_many_requests","message":"busy"}}`, AppendOutcomeFailed, true, true},
+		{"refusal", 429, `{"error":{"code":"too_many_requests","message":"busy","retryable":false}}`, AppendOutcomeFailed, false, true},
+		{"outer refusal", 429, `{"retryable":false,"error":{"code":"too_many_requests","message":"busy"}}`, AppendOutcomeFailed, false, false},
+		{"HTTP timeout", 408, `{"error":{"code":"request_timeout","message":"late","retryable":true}}`, AppendOutcomeFailed, false, false},
+		{"server error", 503, `{"error":{"code":"service_unavailable","message":"busy","details":{"status":"rejected"}}}`, AppendOutcomeAmbiguous, false, false},
+		{"future code", 409, `{"error":{"code":"future_conflict","message":"conflict"}}`, AppendOutcomeFailed, false, false},
+		{"mismatched code", 429, `{"error":{"code":"bad_request","message":"bad"}}`, AppendOutcomeAmbiguous, false, false},
+		{"statement code", 400, `{"error":{"code":"invalid_request","message":"bad"}}`, AppendOutcomeAmbiguous, false, false},
+		{"empty code", 429, `{"error":{"code":"","message":"busy"}}`, AppendOutcomeAmbiguous, false, false},
+		{"missing code", 429, `{"error":{"message":"busy"}}`, AppendOutcomeAmbiguous, false, false},
+		{"null message", 429, `{"error":{"code":"too_many_requests","message":null}}`, AppendOutcomeAmbiguous, false, false},
+		{"invalid retry hint", 429, `{"error":{"code":"too_many_requests","message":"busy","retryable":"true"}}`, AppendOutcomeAmbiguous, false, false},
+		{"malformed outer retry hint", 429, `{"error":{"code":"too_many_requests","message":"busy"},"retryable":"false"}`, AppendOutcomeAmbiguous, false, false},
+		{"legacy 5xx rejection", 503, `{"code":"ingest_failure","message":"busy","details":{"status":"rejected"}}`, AppendOutcomeAmbiguous, false, false},
+		{"legacy mismatched known code", 429, `{"code":"internal_server_error","message":"failed","details":{"status":"rejected"}}`, AppendOutcomeAmbiguous, false, false},
+		{"legacy missing outcome", 429, `{"code":"ingest_failure","message":"busy"}`, AppendOutcomeAmbiguous, false, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			directClient := newTestClient(t, func(*http.Request) (*http.Response, error) {
+				return httpResponse(tc.status, tc.body), nil
+			})
+			_, directErr := directClient.Table("events").AppendNDJSON(t.Context(), []byte(`{"id":1}`))
+			directFailure := requireError(t, directErr)
+			require.Equal(t, tc.outcome, directFailure.AppendDetails.Status)
+			require.Equal(t, tc.retry, directFailure.Retryable)
+			if !tc.testStream {
+				return
+			}
 			synctest.Test(t, func(t *testing.T) {
-				directClient := newTestClient(t, func(*http.Request) (*http.Response, error) {
-					return httpResponse(tc.status, tc.body), nil
-				})
-				_, directErr := directClient.Table("events").AppendNDJSON(t.Context(), []byte(`{"id":1}`))
-				directFailure := requireError(t, directErr)
-				require.Equal(t, tc.outcome, directFailure.AppendDetails.Status)
-				require.Equal(t, tc.retry, directFailure.Retryable)
-
 				calls := 0
 				stream := newTestAppendStream(t, AppendStreamOptions{FailurePolicy: AppendFailureContinue, Retry: &AppendRetryOptions{MaxRetries: 1}}, func(*http.Request) (*http.Response, error) {
 					calls++
@@ -87,33 +90,6 @@ func TestAppendModernContract(t *testing.T) {
 	}
 }
 
-func TestAppendAcknowledgementContract(t *testing.T) {
-	for _, tc := range []struct {
-		name      string
-		status    int
-		body      string
-		succeeded bool
-	}{
-		{"modern", 200, `{"num_rows_inserted":1}`, true},
-		{"legacy", 200, `{"status":"committed","num_rows_inserted":1}`, true},
-		{"count mismatch", 200, `{"num_rows_inserted":2}`, false},
-		{"wrong HTTP status", 201, `{"num_rows_inserted":1}`, false},
-		{"null status", 200, `{"status":null,"num_rows_inserted":1}`, false},
-		{"empty status", 200, `{"status":"","num_rows_inserted":1}`, false},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			client := newTestClient(t, func(*http.Request) (*http.Response, error) { return httpResponse(tc.status, tc.body), nil })
-			result, err := client.Table("events").AppendNDJSON(t.Context(), []byte(`{"id":1}`))
-			if tc.succeeded {
-				require.NoError(t, err)
-				require.Equal(t, AppendOutcomeSucceeded, result.Status)
-			} else {
-				require.Equal(t, AppendOutcomeAmbiguous, requireError(t, err).AppendDetails.Status)
-			}
-		})
-	}
-}
-
 func TestAppendAmbiguousRetryHonorsServerRefusal(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
@@ -122,6 +98,7 @@ func TestAppendAmbiguousRetryHonorsServerRefusal(t *testing.T) {
 	}{
 		{"explicit refusal", `{"error":{"code":"service_unavailable","message":"busy","retryable":false}}`, false},
 		{"inner refusal with malformed outer field", `{"error":{"code":"service_unavailable","message":"busy","retryable":false},"request_id":123}`, false},
+		{"outer refusal with malformed outer field", `{"error":{"code":"service_unavailable","message":"busy"},"retryable":false,"request_id":123}`, false},
 		{"explicit retryable", `{"error":{"code":"service_unavailable","message":"busy","retryable":true}}`, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

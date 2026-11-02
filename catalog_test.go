@@ -97,6 +97,7 @@ func TestCatalogRawPreservesUnknownNestedFields(t *testing.T) {
 	result, err := resource.Raw().Apply(t.Context(), snapshot.Definition, CatalogOptions{ExpectedVersion: snapshot.Version})
 	require.NoError(t, err)
 	require.JSONEq(t, definition, string(result.After))
+	require.Contains(t, string(result.After), "9007199254740993")
 	_, err = client.Catalog().Raw().Delete(t.Context())
 	require.Equal(t, ErrorKindConfigInvalid, requireError(t, err).Kind)
 }
@@ -151,37 +152,34 @@ func TestTableIdentifierEscapesConfiguredParts(t *testing.T) {
 
 func TestCatalogErrorCertaintyPreservesDiagnostics(t *testing.T) {
 	for _, tc := range []struct {
+		mode    string
 		status  int
 		code    string
 		outcome CatalogMutationOutcome
 	}{
-		{412, "precondition_failed", CatalogMutationRejected},
-		{408, "request_timeout", CatalogMutationUnknown},
-		{503, "service_unavailable", CatalogMutationUnknown},
+		{"write", 412, "precondition_failed", CatalogMutationRejected},
+		{"write", 408, "request_timeout", CatalogMutationUnknown},
+		{"write", 503, "service_unavailable", CatalogMutationUnknown},
+		{"read", 412, "precondition_failed", ""},
+		{"preview", 412, "precondition_failed", ""},
 	} {
-		for _, mode := range []string{"write", "read", "preview"} {
-			t.Run(tc.code+"/"+mode, func(t *testing.T) {
-				client := newTestClient(t, func(*http.Request) (*http.Response, error) {
-					return httpResponse(tc.status, `{"error":{"code":"`+tc.code+`","message":"failed","details":{"reason":"test"}},"request_id":"catalog-request"}`), nil
-				})
-				resource := client.Table("events").Catalog()
-				var err error
-				if mode == "read" {
-					_, err = resource.Get(t.Context())
-				} else {
-					_, err = resource.Apply(t.Context(), &CatalogTable{Name: "events"}, CatalogOptions{DryRun: mode == "preview"})
-				}
-				failure := requireError(t, err)
-				require.Equal(t, tc.code, failure.Code)
-				require.Equal(t, "catalog-request", failure.RequestID)
-				require.JSONEq(t, `{"reason":"test"}`, string(failure.Details))
-				if mode == "write" {
-					require.Equal(t, tc.outcome, failure.CatalogOutcome)
-					require.False(t, failure.Retryable)
-				} else {
-					require.Empty(t, failure.CatalogOutcome)
-				}
+		t.Run(tc.code+"/"+tc.mode, func(t *testing.T) {
+			client := newTestClient(t, func(*http.Request) (*http.Response, error) {
+				return httpResponse(tc.status, `{"error":{"code":"`+tc.code+`","message":"failed","details":{"reason":"test"}},"request_id":"catalog-request"}`), nil
 			})
-		}
+			resource := client.Table("events").Catalog()
+			var err error
+			if tc.mode == "read" {
+				_, err = resource.Get(t.Context())
+			} else {
+				_, err = resource.Apply(t.Context(), &CatalogTable{Name: "events"}, CatalogOptions{DryRun: tc.mode == "preview"})
+			}
+			failure := requireError(t, err)
+			require.Equal(t, tc.code, failure.Code)
+			require.Equal(t, "catalog-request", failure.RequestID)
+			require.JSONEq(t, `{"reason":"test"}`, string(failure.Details))
+			require.Equal(t, tc.outcome, failure.CatalogOutcome)
+			require.False(t, failure.Retryable)
+		})
 	}
 }

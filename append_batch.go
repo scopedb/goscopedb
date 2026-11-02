@@ -21,13 +21,8 @@ import (
 )
 
 type appendCommand struct {
-	record  *appendRecord
+	record  []byte
 	barrier *appendBarrier
-}
-
-type appendRecord struct {
-	payload       []byte
-	reservedBytes int
 }
 
 type appendBarrier struct {
@@ -57,42 +52,35 @@ type appendBatchResult struct {
 type appendWorker struct {
 	stream *AppendStream
 
-	current        []appendRecord
-	currentBytes   int
-	ready          []appendBatch
-	inFlight       int
-	barrier        *appendBarrier
-	failureBarrier *appendBarrier
-	baseline       appendCounters
-	stopping       bool
-	fatal          error
-	timer          *time.Timer
-	timerC         <-chan time.Time
+	current  appendBatch
+	ready    []appendBatch
+	inFlight int
+	barrier  *appendBarrier
+	baseline appendCounters
+	stopping bool
+	fatal    error
+	timer    *time.Timer
+	timerC   <-chan time.Time
 }
 
 func (w *appendWorker) run() {
 	for {
 		w.dispatchReady()
 		if w.stopping {
-			if w.failureBarrier != nil {
-				if w.inFlight == 0 {
+			if w.barrier == nil {
+				w.drainAfterFailure()
+			}
+			if w.inFlight == 0 {
+				if w.barrier != nil {
 					if w.finishBarrier() {
 						return
 					}
 					continue
 				}
-			} else {
-				w.drainAfterFailure()
-				if w.failureBarrier != nil {
-					continue
-				}
-			}
-			if w.inFlight == 0 {
-				w.stream.finishTerminal(w.makeReport(time.Now(), w.snapshotCounters()), w.fatal, AppendStreamFailed)
+				w.stream.finishTerminal(w.makeReport(time.Time{}, w.snapshotCounters()), w.fatal, AppendStreamFailed)
 				return
 			}
-		}
-		if w.barrier != nil && len(w.ready) == 0 && w.inFlight == 0 {
+		} else if w.barrier != nil && len(w.ready) == 0 && w.inFlight == 0 {
 			if w.finishBarrier() {
 				return
 			}
@@ -100,7 +88,7 @@ func (w *appendWorker) run() {
 		}
 
 		var commandC <-chan appendCommand
-		if (!w.stopping && w.barrier == nil) || (w.stopping && w.failureBarrier == nil) {
+		if w.barrier == nil {
 			commandC = w.stream.commands
 		}
 		select {
@@ -117,40 +105,40 @@ func (w *appendWorker) run() {
 }
 
 func (w *appendWorker) handleCommand(command appendCommand) {
-	if command.record != nil {
+	if len(command.record) > 0 {
 		if w.stopping {
-			w.failUnsent(1, command.record.reservedBytes)
+			w.failUnsent(1, len(command.record)+1)
 			return
 		}
-		w.addRecord(*command.record)
+		w.addRecord(command.record)
 		return
 	}
 	if command.barrier == nil {
 		return
 	}
-	if w.stopping {
-		w.failureBarrier = command.barrier
-		return
+	if !w.stopping {
+		w.finalizeCurrent()
 	}
-	w.finalizeCurrent()
 	w.barrier = command.barrier
 }
 
-func (w *appendWorker) addRecord(record appendRecord) {
-	additional := len(record.payload)
-	if len(w.current) > 0 {
+func (w *appendWorker) addRecord(record []byte) {
+	additional := len(record)
+	if w.current.rows > 0 {
 		additional++
 	}
-	if len(w.current) > 0 && (w.currentBytes+additional > w.stream.config.targetBatchBytes || len(w.current) >= w.stream.config.maxBatchRows) {
+	if w.current.rows > 0 && (len(w.current.payload)+additional > w.stream.config.targetBatchBytes || w.current.rows >= w.stream.config.maxBatchRows) {
 		w.finalizeCurrent()
-		additional = len(record.payload)
 	}
-	if len(w.current) == 0 {
+	if w.current.rows == 0 {
 		w.startTimer()
+	} else {
+		w.current.payload = append(w.current.payload, '\n')
 	}
-	w.current = append(w.current, record)
-	w.currentBytes += additional
-	if w.currentBytes >= w.stream.config.targetBatchBytes || len(w.current) >= w.stream.config.maxBatchRows {
+	w.current.payload = append(w.current.payload, record...)
+	w.current.rows++
+	w.current.reservedBytes += len(record) + 1
+	if len(w.current.payload) >= w.stream.config.targetBatchBytes || w.current.rows >= w.stream.config.maxBatchRows {
 		w.finalizeCurrent()
 	}
 }
@@ -172,26 +160,12 @@ func (w *appendWorker) stopTimer() {
 }
 
 func (w *appendWorker) finalizeCurrent() {
-	if len(w.current) == 0 {
+	if w.current.rows == 0 {
 		return
 	}
 	w.stopTimer()
-	payload := make([]byte, 0, w.currentBytes)
-	reservedBytes := 0
-	for index := range w.current {
-		if index > 0 {
-			payload = append(payload, '\n')
-		}
-		payload = append(payload, w.current[index].payload...)
-		reservedBytes += w.current[index].reservedBytes
-	}
-	w.ready = append(w.ready, appendBatch{
-		payload:       payload,
-		rows:          len(w.current),
-		reservedBytes: reservedBytes,
-	})
-	w.current = nil
-	w.currentBytes = 0
+	w.ready = append(w.ready, w.current)
+	w.current = appendBatch{}
 }
 
 func (w *appendWorker) dispatchReady() {
@@ -252,19 +226,14 @@ func (w *appendWorker) startStopping(err error) {
 		w.stream.shared.mu.Unlock()
 		w.stream.closeAdmission()
 		w.stream.admissionMu.Unlock()
-		for _, record := range w.current {
-			w.failUnsent(1, record.reservedBytes)
+		if w.current.rows > 0 {
+			w.failUnsent(w.current.rows, w.current.reservedBytes)
+			w.current = appendBatch{}
 		}
-		w.current = nil
-		w.currentBytes = 0
 		for _, batch := range w.ready {
 			w.failUnsent(batch.rows, batch.reservedBytes)
 		}
 		w.ready = nil
-		if w.barrier != nil {
-			w.failureBarrier = w.barrier
-			w.barrier = nil
-		}
 		return
 	}
 	if appendErrorOutcome(err) == AppendOutcomeAmbiguous && appendErrorOutcome(w.fatal) != AppendOutcomeAmbiguous {
@@ -286,14 +255,11 @@ func (w *appendWorker) failUnsent(rows int, reservedBytes int) {
 }
 
 func (w *appendWorker) drainAfterFailure() {
-	for {
+	for w.barrier == nil {
 		select {
 		case command := <-w.stream.commands:
 			<-w.stream.commandSlots
 			w.handleCommand(command)
-			if w.failureBarrier != nil {
-				return
-			}
 		default:
 			return
 		}
@@ -302,13 +268,11 @@ func (w *appendWorker) drainAfterFailure() {
 
 func (w *appendWorker) finishBarrier() bool {
 	barrier := w.barrier
+	w.barrier = nil
 	var err error
 	state := AppendStreamClosed
 	if w.stopping {
-		barrier, err, state = w.failureBarrier, w.fatal, AppendStreamFailed
-		w.failureBarrier = nil
-	} else {
-		w.barrier = nil
+		err, state = w.fatal, AppendStreamFailed
 	}
 	counters := w.snapshotCounters()
 	counters.acceptedRows = barrier.acceptedRows
@@ -333,6 +297,10 @@ func (w *appendWorker) snapshotCounters() appendCounters {
 }
 
 func (w *appendWorker) makeReport(startedAt time.Time, counters appendCounters) AppendDeliveryReport {
+	var duration time.Duration
+	if !startedAt.IsZero() {
+		duration = time.Since(startedAt)
+	}
 	report := AppendDeliveryReport{
 		AcceptedRows:     counters.acceptedRows - w.baseline.acceptedRows,
 		CommittedRows:    counters.committedRows - w.baseline.committedRows,
@@ -343,7 +311,7 @@ func (w *appendWorker) makeReport(startedAt time.Time, counters appendCounters) 
 		FailedBatches:    counters.failedBatches - w.baseline.failedBatches,
 		AmbiguousBatches: counters.ambiguousBatches - w.baseline.ambiguousBatches,
 		Retries:          counters.retries - w.baseline.retries,
-		Duration:         time.Since(startedAt),
+		Duration:         duration,
 	}
 	lost := report.FailedRows + report.AmbiguousRows + report.DroppedRows
 	switch {
