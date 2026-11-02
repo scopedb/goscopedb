@@ -55,12 +55,11 @@ Handle methods are safe to call concurrently. Once a terminal response is cached
 
 A context deadline stops local requests or waiting; it does not cancel the server statement. Call `Cancel` with a fresh, bounded context when server cancellation is required. If submission loses its response, execution may still have started. Set `Statement.ID` before submission when the application needs a known ID for reconciliation.
 
-`Statement.ID` chooses the statement ID; otherwise ScopeDB generates one. `StatementHandle.ID()` returns the ID confirmed by ScopeDB. `MaxElapsed` is a `time.Duration` that limits server-side time from submission, including queueing, preparation, and execution. Polling does not reset it. Zero uses the server default of one hour; negative durations are invalid. A context deadline limits local waiting independently:
+`Statement.ID` chooses the statement ID; otherwise ScopeDB generates one. `StatementHandle.ID()` returns the handle's statement ID, which is confirmed by ScopeDB when the handle comes from `Submit`. `MaxElapsed` is a `time.Duration` that limits server-side time from submission, including queueing, preparation, and execution. Polling does not reset it. Zero uses the server default of one hour; negative durations are invalid. A context deadline limits local waiting independently:
 
 ```go
 statement := client.Statement("FROM events")
-statementID := uuid.New()   // github.com/google/uuid
-statement.ID = &statementID // Optional.
+statement.ID = new(uuid.New()) // Optional; uses github.com/google/uuid.
 statement.MaxElapsed = 30 * time.Second
 handle, err := statement.Submit(ctx)
 if err != nil {
@@ -111,8 +110,7 @@ if err != nil {
 	return err
 }
 definition := snapshot.Definition
-retention := int32(30)
-definition.RetentionDays = &retention
+definition.RetentionDays = new(int32(30))
 plan, err := catalog.Apply(ctx, definition, scopedb.CatalogOptions{DryRun: true, ExpectedVersion: snapshot.Version})
 if err != nil {
 	return err
@@ -181,7 +179,7 @@ for _, event := range []Event{
 	{ID: 2, Name: "second"},
 } {
 	if err := stream.Send(ctx, event); err != nil {
-		_, _ = stream.Shutdown(ctx)
+		_, _ = stream.Shutdown(context.WithoutCancel(ctx))
 		return err
 	}
 }
@@ -200,7 +198,7 @@ For a long-running stream, call `Flush` when you need to wait for the rows sent 
 ```go
 report, err := stream.Flush(ctx)
 if err != nil {
-	_, _ = stream.Shutdown(ctx)
+	_, _ = stream.Shutdown(context.WithoutCancel(ctx))
 	return err
 }
 fmt.Println("written rows:", report.CommittedRows)

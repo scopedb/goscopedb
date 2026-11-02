@@ -17,16 +17,21 @@
 package scopedb
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"slices"
 	"time"
 
 	"github.com/google/uuid"
 )
 
-const statementResultFormat = "json"
+const (
+	statementResultFormat                 = "json"
+	statementSubmissionOutcomeUnknownCode = "statement_submission_outcome_unknown"
+)
 
 type statementRequest struct {
 	StatementID    *uuid.UUID `json:"statement_id,omitempty"`
@@ -55,7 +60,7 @@ type statementResult struct {
 
 type statementResultMetadata struct {
 	Fields  []*statementResultField `json:"fields"`
-	NumRows uint64                  `json:"num_rows"`
+	NumRows *uint64                 `json:"num_rows"`
 }
 
 type statementResultField struct {
@@ -64,7 +69,7 @@ type statementResultField struct {
 }
 
 func (rs *statementResult) snapshot() *ResultSet {
-	if rs == nil || rs.Metadata == nil {
+	if rs == nil || rs.Metadata == nil || rs.Metadata.NumRows == nil {
 		return nil
 	}
 	schema := make(Schema, len(rs.Metadata.Fields))
@@ -79,9 +84,9 @@ func (rs *statementResult) snapshot() *ResultSet {
 	}
 
 	return &ResultSet{
-		TotalRows: rs.Metadata.NumRows,
+		TotalRows: *rs.Metadata.NumRows,
 		Schema:    schema,
-		rows:      rs.Rows,
+		rows:      slices.Clone(rs.Rows),
 	}
 }
 
@@ -105,22 +110,25 @@ func (c *Client) submitStatement(ctx context.Context, request *statementRequest)
 	}
 	resp, err := c.postJSON(ctx, req, body)
 	if err != nil {
+		if resp != nil {
+			err = newResponseError(resp, ErrorKindUnexpected, err.Error(), err)
+		}
 		failure := statementError(err, request.StatementID)
-		failure.Code = "statement_submission_outcome_unknown"
+		failure.Code = statementSubmissionOutcomeUnknownCode
 		failure.Retryable = false
 		return nil, c.redactError(failure)
 	}
 	defer closeResponseBody(resp.Body)
-	result, validError, err := readStatementResponseWithEnvelope(resp)
+	result, validError, err := readStatementResponseWithEnvelope(resp, request.StatementID, "statement response ID does not match submitted ID")
 	if err != nil {
 		failure := statementError(err, request.StatementID)
 		// Only a valid HTTP 429 response establishes admission refusal before
-		// registration. A malformed acknowledgement, 408/5xx response, or
-		// unstructured gateway error may follow registration.
-		if (resp.StatusCode >= 200 && resp.StatusCode < 300) ||
+		// registration. A malformed acknowledgement, redirect, 408/5xx response,
+		// or unstructured gateway error may follow registration.
+		if resp.StatusCode < 400 ||
 			(!validError && (resp.StatusCode == http.StatusRequestTimeout ||
 				resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500)) {
-			failure.Code = "statement_submission_outcome_unknown"
+			failure.Code = statementSubmissionOutcomeUnknownCode
 		}
 		if !validError || resp.StatusCode != http.StatusTooManyRequests {
 			failure.Retryable = false
@@ -149,7 +157,7 @@ func (c *Client) fetchStatement(ctx context.Context, id uuid.UUID) (*statementRe
 		return nil, err
 	}
 	defer closeResponseBody(resp.Body)
-	result, err := readStatementResponse(resp)
+	result, err := readStatementResponse(resp, &id)
 	if err != nil {
 		return nil, c.redactError(statementError(err, &id))
 	}
@@ -171,19 +179,19 @@ func (c *Client) cancelStatement(ctx context.Context, statementID uuid.UUID) (*s
 		return nil, err
 	}
 	defer closeResponseBody(resp.Body)
-	result, err := readStatementResponse(resp)
+	result, err := readStatementResponse(resp, &statementID)
 	if err != nil {
 		return nil, c.redactError(statementError(err, &statementID))
 	}
 	return result, nil
 }
 
-func readStatementResponse(resp *http.Response) (*statementResponse, error) {
-	result, _, err := readStatementResponseWithEnvelope(resp)
+func readStatementResponse(resp *http.Response, expectedID *uuid.UUID) (*statementResponse, error) {
+	result, _, err := readStatementResponseWithEnvelope(resp, expectedID, "statement response ID does not match handle")
 	return result, err
 }
 
-func readStatementResponseWithEnvelope(resp *http.Response) (*statementResponse, bool, error) {
+func readStatementResponseWithEnvelope(resp *http.Response, expectedID *uuid.UUID, mismatchMessage string) (*statementResponse, bool, error) {
 	maxBytes := 0
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		maxBytes = maxDiagnosticBodyBytes
@@ -224,6 +232,14 @@ func readStatementResponseWithEnvelope(resp *http.Response) (*statementResponse,
 			ErrorKindUnexpected,
 			"invalid statement response: "+err.Error(),
 			err,
+		)
+	}
+	if expectedID != nil && stmtResp.ID != *expectedID {
+		return nil, false, newResponseError(
+			resp,
+			ErrorKindUnexpected,
+			mismatchMessage,
+			nil,
 		)
 	}
 	return &stmtResp, false, nil
@@ -272,6 +288,9 @@ func validateFinishedResult(result *statementResult) error {
 	if result.Metadata.Fields == nil {
 		return fmt.Errorf("finished statement result_set metadata has no fields")
 	}
+	if result.Metadata.NumRows == nil {
+		return fmt.Errorf("finished statement result_set metadata has no num_rows")
+	}
 	for i, field := range result.Metadata.Fields {
 		if field == nil {
 			return fmt.Errorf("finished statement result_set field %d is null", i)
@@ -283,6 +302,10 @@ func validateFinishedResult(result *statementResult) error {
 				field.DataType,
 			)
 		}
+	}
+	rows := bytes.TrimSpace(result.Rows)
+	if len(rows) == 0 || rows[0] != '[' {
+		return fmt.Errorf("finished statement result_set has no rows")
 	}
 
 	return nil

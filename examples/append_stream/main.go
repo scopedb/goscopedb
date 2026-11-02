@@ -19,6 +19,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"sync"
@@ -61,15 +62,15 @@ func run(ctx context.Context) error {
 
 	now := time.Now().UTC()
 	if err := sendConcurrently(ctx, stream, now); err != nil {
-		_, _ = stream.Shutdown(ctx)
-		return err
+		_, shutdownErr := stream.Shutdown(context.WithoutCancel(ctx))
+		return errors.Join(err, shutdownErr)
 	}
 
 	// Flush is a remote commit barrier for the accepted prefix in strict mode.
 	report, err := stream.Flush(ctx)
 	if err != nil {
-		_, _ = stream.Shutdown(ctx)
-		return err
+		_, shutdownErr := stream.Shutdown(context.WithoutCancel(ctx))
+		return errors.Join(err, shutdownErr)
 	}
 	fmt.Printf("flush committed %d of %d accepted rows\n", report.CommittedRows, report.AcceptedRows)
 
@@ -81,12 +82,12 @@ func run(ctx context.Context) error {
 		Name:       "example.stream",
 		Attributes: map[string]string{"source": "go"},
 	}); err != nil {
-		_, _ = stream.Shutdown(ctx)
-		return err
+		_, shutdownErr := stream.Shutdown(context.WithoutCancel(ctx))
+		return errors.Join(err, shutdownErr)
 	}
 
 	// Shutdown closes admission and settles any rows accepted after the flush.
-	finalReport, err := stream.Shutdown(ctx)
+	finalReport, err := stream.Shutdown(context.WithoutCancel(ctx))
 	if err != nil {
 		return err
 	}
@@ -101,11 +102,9 @@ func sendConcurrently(ctx context.Context, stream *scopedb.AppendStream, now tim
 	const producerCount = 4
 
 	var producers sync.WaitGroup
-	errors := make(chan error, producerCount)
+	errs := make(chan error, producerCount)
 	for producer := range producerCount {
-		producers.Add(1)
-		go func() {
-			defer producers.Done()
+		producers.Go(func() {
 			for id := producer + 1; id <= 100; id += producerCount {
 				row := Event{
 					ID:         id,
@@ -117,15 +116,15 @@ func sendConcurrently(ctx context.Context, stream *scopedb.AppendStream, now tim
 				// Send is safe for concurrent producers and waits for bounded
 				// local capacity. It does not wait for a remote commit.
 				if err := stream.Send(ctx, row); err != nil {
-					errors <- err
+					errs <- err
 					return
 				}
 			}
-		}()
+		})
 	}
 	producers.Wait()
-	close(errors)
-	for err := range errors {
+	close(errs)
+	for err := range errs {
 		return err
 	}
 	return nil

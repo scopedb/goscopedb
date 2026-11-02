@@ -53,8 +53,7 @@ func run(ctx context.Context) error {
 	}
 
 	statement := client.Statement("SELECT 2 AS value")
-	statementID := uuid.New() // Optional: omit ID to let ScopeDB generate one.
-	statement.ID = &statementID
+	statement.ID = new(uuid.New()) // Optional: omit ID to let ScopeDB generate one.
 	statement.MaxElapsed = 30 * time.Second
 	handle, err := statement.Submit(ctx)
 	if err != nil {

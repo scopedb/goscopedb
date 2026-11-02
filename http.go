@@ -17,6 +17,8 @@
 package scopedb
 
 import (
+	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -96,41 +98,53 @@ func readResponseBody(body io.Reader, maxBytes int) ([]byte, error) {
 	return data, err
 }
 
-type apiErrorPayload struct {
-	Code      string           `json:"code"`
-	Message   string           `json:"message"`
-	Details   json.RawMessage  `json:"details"`
-	RequestID string           `json:"request_id"`
-	Retryable *bool            `json:"retryable"`
-	Nested    *apiErrorPayload `json:"error"`
-}
-
 type decodedErrorEnvelope struct {
 	Code      *string         `json:"code"`
 	Message   *string         `json:"message"`
+	RequestID string          `json:"request_id"`
 	Retryable *bool           `json:"retryable"`
 	Details   json.RawMessage `json:"details"`
 	modern    bool
+	parsed    bool
 	valid     bool
 }
 
 func parseErrorEnvelope(resp *http.Response, body []byte) decodedErrorEnvelope {
 	var envelope map[string]json.RawMessage
-	parsed := json.Unmarshal(body, &envelope) == nil
+	parsedMap := json.Unmarshal(body, &envelope) == nil && envelope != nil
 	nested, modern := envelope["error"]
+	target := body
 	if modern {
-		body = nested
+		target = nested
 	}
 	var payload decodedErrorEnvelope
 	payload.modern = modern
-	payload.valid = parsed && json.Unmarshal(body, &payload) == nil &&
+	trimmedTarget := bytes.TrimSpace(target)
+	payload.parsed = parsedMap && len(trimmedTarget) > 0 && trimmedTarget[0] == '{' &&
+		json.Unmarshal(target, &payload) == nil
+	outerValid := true
+	if modern && parsedMap {
+		var outer struct {
+			RequestID string `json:"request_id"`
+			Retryable *bool  `json:"retryable"`
+		}
+		if json.Unmarshal(body, &outer) == nil {
+			payload.RequestID = cmp.Or(payload.RequestID, outer.RequestID)
+			if payload.Retryable == nil {
+				payload.Retryable = outer.Retryable
+			}
+		} else {
+			outerValid = false
+		}
+	}
+	payload.valid = payload.parsed && outerValid &&
 		payload.Code != nil && *payload.Code != "" && payload.Message != nil &&
 		resp.StatusCode >= 400 && resp.StatusCode < 600 &&
-		(!modern || validHTTPErrorCode(*payload.Code, resp.StatusCode))
+		validHTTPErrorCode(*payload.Code, resp.StatusCode, modern)
 	return payload
 }
 
-func validHTTPErrorCode(code string, status int) bool {
+func validHTTPErrorCode(code string, status int, modern bool) bool {
 	if code == "" {
 		return false
 	}
@@ -154,8 +168,10 @@ func validHTTPErrorCode(code string, status int) bool {
 		expected = 500
 	case "service_unavailable":
 		expected = 503
-	case "statement_timeout", "invalid_request", "unauthorized", "payload_too_large", "timeout", "unavailable", "internal_error":
+	case "statement_timeout":
 		return false
+	case "invalid_request", "unauthorized", "payload_too_large", "timeout", "unavailable", "internal_error":
+		return !modern
 	default:
 		return true
 	}
@@ -175,42 +191,24 @@ func (c *Client) redactError(failure *Error) *Error {
 }
 
 func decodeResponseError(resp *http.Response, body []byte, kind ErrorKind) *Error {
-	message := string(body)
-	if message == "" {
-		message = resp.Status
-		if message == "" {
-			message = fmt.Sprintf("HTTP %d", resp.StatusCode)
-		}
+	payload := parseErrorEnvelope(resp, body)
+	var message string
+	if payload.parsed && payload.Message != nil {
+		message = *payload.Message
 	}
-
-	var payload apiErrorPayload
-	parsed := json.Unmarshal(body, &payload) == nil
-	if parsed && payload.Nested != nil {
-		nested := *payload.Nested
-		if nested.RequestID == "" {
-			nested.RequestID = payload.RequestID
-		}
-		if nested.Retryable == nil {
-			nested.Retryable = payload.Retryable
-		}
-		payload = nested
-	}
-	if parsed && payload.Message != "" {
-		message = payload.Message
-	}
+	message = cmp.Or(message, string(body), resp.Status, fmt.Sprintf("HTTP %d", resp.StatusCode))
 
 	err := newResponseError(resp, kind, message, nil)
-	if parsed {
-		err.Code = payload.Code
-		if payload.RequestID != "" {
-			err.RequestID = payload.RequestID
+	if payload.parsed {
+		if payload.Code != nil {
+			err.Code = *payload.Code
 		}
+		err.RequestID = cmp.Or(payload.RequestID, err.RequestID)
 		if payload.Retryable != nil {
 			err.ServerRetryable = payload.Retryable
 			err.Retryable = *payload.Retryable
 		}
 		err.Details = payload.Details
-
 	}
 	return err
 }

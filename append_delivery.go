@@ -58,11 +58,12 @@ retryLoop:
 		// In-flight failures always carry AppendDetails. Errors without them
 		// happened before dispatch (for example, the retry budget expired while
 		// compressing). Those rows were not sent by this attempt.
-		var failure *Error
-		if err != nil && (!errors.As(err, &failure) || failure.AppendDetails == nil) {
-			rejected := appendDefiniteFailure(err.Error())
-			rejected.cause = err
-			err = rejected
+		if err != nil {
+			if failure, ok := errors.AsType[*Error](err); !ok || failure.AppendDetails == nil {
+				rejected := appendDefiniteFailure(err.Error())
+				rejected.cause = err
+				err = rejected
+			}
 		}
 		if err != nil && appendErrorOutcome(err) == AppendOutcomeAmbiguous {
 			hadAmbiguous = true
@@ -75,8 +76,7 @@ retryLoop:
 			break
 		}
 		var retryAfter time.Duration
-		var scopeErr *Error
-		if errors.As(err, &scopeErr) {
+		if scopeErr, ok := errors.AsType[*Error](err); ok {
 			retryAfter = scopeErr.RetryAfter
 		}
 		delay := appendRetryDelay(backoff, retryAfter)
@@ -153,8 +153,7 @@ func ambiguousAppendStreamError(message string, cause error) error {
 	}
 	// Preserve the last attempt's diagnostic metadata while the state describes
 	// the outcome across all attempts, including an earlier lost response.
-	var last *Error
-	if errors.As(cause, &last) {
+	if last, ok := errors.AsType[*Error](cause); ok {
 		result.Code = last.Code
 		result.ServerRetryable = last.ServerRetryable
 		result.Details = slices.Clone(last.Details)
@@ -171,8 +170,7 @@ func ambiguousAppendStreamError(message string, cause error) error {
 }
 
 func appendErrorOutcome(err error) AppendOutcome {
-	var scopeErr *Error
-	if errors.As(err, &scopeErr) && scopeErr.AppendDetails != nil {
+	if scopeErr, ok := errors.AsType[*Error](err); ok && scopeErr.AppendDetails != nil {
 		return scopeErr.AppendDetails.Status
 	}
 	return AppendOutcomeAmbiguous
@@ -184,8 +182,8 @@ func newAppendLastFailure(err error, state AppendOutcome) *AppendLastFailure {
 		Message: err.Error(),
 		Status:  state,
 	}
-	var scopeErr *Error
-	if !errors.As(err, &scopeErr) {
+	scopeErr, ok := errors.AsType[*Error](err)
+	if !ok {
 		return failure
 	}
 	failure.Code = scopeErr.Code

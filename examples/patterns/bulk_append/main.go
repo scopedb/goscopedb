@@ -58,7 +58,7 @@ func run(ctx context.Context, input io.Reader) error {
 	}
 
 	readErr := sendRows(ctx, stream, input)
-	report, writeErr := stream.Shutdown(ctx)
+	report, writeErr := stream.Shutdown(context.WithoutCancel(ctx))
 	fmt.Printf(
 		"accepted=%d committed=%d failed=%d ambiguous=%d duration=%s\n",
 		report.AcceptedRows,
@@ -72,8 +72,10 @@ func run(ctx context.Context, input io.Reader) error {
 
 func sendRows(ctx context.Context, stream *scopedb.AppendStream, input io.Reader) error {
 	scanner := bufio.NewScanner(input)
-	// One row must fit in the SDK's 8 MiB uncompressed request limit.
-	scanner.Buffer(make([]byte, 64*1024), 8*1024*1024)
+	// One row must fit in the SDK's 8 MiB uncompressed request limit; reserve
+	// two extra bytes so a full-size line before CRLF or EOF is not rejected by
+	// the scanner before Send checks the trimmed object length.
+	scanner.Buffer(make([]byte, 64*1024), 8*1024*1024+2)
 	for line := 1; scanner.Scan(); line++ {
 		row := bytes.TrimSpace(scanner.Bytes())
 		if len(row) == 0 {

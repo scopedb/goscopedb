@@ -164,10 +164,12 @@ func TestStatementSubmissionOutcome(t *testing.T) {
 		{name: "in-flight context timeout", cancelInFlight: true, code: "statement_submission_outcome_unknown"},
 		{name: "gateway", status: 503, body: "unavailable", code: "statement_submission_outcome_unknown"},
 		{name: "invalid acknowledgement", status: 200, body: `{}`, code: "statement_submission_outcome_unknown"},
-		{name: "mismatched ID", status: 200, body: statementJSON(uuid.New(), "running", ""), knownID: true},
+		{name: "mismatched ID", status: 200, body: statementJSON(uuid.New(), "running", ""), knownID: true, code: "statement_submission_outcome_unknown"},
+		{name: "unfollowed redirect", status: 307, body: "", knownID: true, code: "statement_submission_outcome_unknown"},
 		{name: "coded server error", status: 503, body: `{"error":{"code":"service_unavailable","message":"busy","retryable":true}}`, code: "service_unavailable", retryable: false},
 		{name: "confirmed rejection", status: 429, body: `{"error":{"code":"too_many_requests","message":"rejected","retryable":true}}`, code: "too_many_requests", retryable: true},
 		{name: "invalid 429 envelope", status: 429, body: `{"error":{"code":"bad_request","message":"rejected"}}`, code: "statement_submission_outcome_unknown", retryable: false},
+		{name: "malformed outer 429 envelope", status: 429, body: `{"error":{"code":"too_many_requests","message":"rejected"},"retryable":"false"}`, knownID: true, code: "statement_submission_outcome_unknown", retryable: false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx, cancel := context.WithCancelCause(t.Context())
@@ -180,7 +182,9 @@ func TestStatementSubmissionOutcome(t *testing.T) {
 				if tc.cause != nil {
 					return nil, tc.cause
 				}
-				return httpResponse(tc.status, tc.body), nil
+				resp := httpResponse(tc.status, tc.body)
+				resp.Header.Set("X-Request-ID", "submit-request")
+				return resp, nil
 			})
 			statement := client.Statement("FROM staging INSERT INTO events")
 			id := uuid.New()
@@ -191,6 +195,10 @@ func TestStatementSubmissionOutcome(t *testing.T) {
 			failure := requireError(t, err)
 			require.Equal(t, tc.code, failure.Code)
 			require.Equal(t, tc.retryable, failure.Retryable)
+			if tc.status != 0 {
+				require.Equal(t, tc.status, failure.HTTPStatus)
+				require.Equal(t, "submit-request", failure.RequestID)
+			}
 			if tc.knownID {
 				require.Equal(t, id, *failure.StatementID)
 			} else {
@@ -230,6 +238,7 @@ func TestStatementTerminalWinsOverInFlightRequest(t *testing.T) {
 	}{
 		{"wait", "http error", "cancelled", ""},
 		{"refresh", "stale success", "finished", finishedResult},
+		{"refresh", "mismatched ID", "finished", finishedResult},
 		{"cancel", "transport error", "failed", `,"error":{"code":"internal_server_error","message":"execution failed","details":{"phase":"execute"}}`},
 	} {
 		t.Run(tc.operation+"/"+tc.late, func(t *testing.T) {
@@ -247,6 +256,8 @@ func TestStatementTerminalWinsOverInFlightRequest(t *testing.T) {
 							return httpResponse(503, `{"message":"stale failure"}`), nil
 						case "transport error":
 							return nil, errors.New("connection lost")
+						case "mismatched ID":
+							return httpResponse(200, statementJSON(uuid.New(), "running", "")), nil
 						default:
 							return httpResponse(200, statementJSON(id, "running", "")), nil
 						}
@@ -313,6 +324,10 @@ func TestStatementRejectsIncompleteOrMismatchedResponses(t *testing.T) {
 		statementJSON(uuid.New(), "running", ""),
 		statementJSON(id, "failed", ""),
 		statementJSON(id, "finished", ""),
+		statementJSON(id, "finished", `,"result_set":{"format":"json","metadata":{"fields":[]},"rows":[]}`),
+		statementJSON(id, "finished", `,"result_set":{"format":"json","metadata":{"fields":[],"num_rows":0}}`),
+		statementJSON(id, "finished", `,"result_set":{"format":"json","metadata":{"fields":[],"num_rows":0},"rows":null}`),
+		statementJSON(id, "finished", `,"result_set":{"format":"json","metadata":{"fields":[],"num_rows":0},"rows":{}}`),
 		statementJSON(id, "finished", `,"result_set":{"format":"json","metadata":{"fields":[null],"num_rows":0},"rows":[]}`),
 		statementJSON(id, "finished", strings.Replace(finishedResult, `"int"`, `"unsigned"`, 1)),
 	} {

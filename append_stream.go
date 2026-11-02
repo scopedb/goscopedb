@@ -17,6 +17,7 @@
 package scopedb
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -303,63 +304,42 @@ func (t *Table) AppendStream(options AppendStreamOptions) (*AppendStream, error)
 func normalizeAppendStreamOptions(options AppendStreamOptions, writeTimeout time.Duration) (normalizedAppendStreamOptions, error) {
 	config := normalizedAppendStreamOptions{
 		failurePolicy:        options.FailurePolicy,
-		targetBatchBytes:     options.TargetBatchBytes,
-		maxBatchRows:         options.MaxBatchRows,
-		flushInterval:        options.FlushInterval,
-		maxBufferedBytes:     options.MaxBufferedBytes,
-		maxConcurrentBatches: options.MaxConcurrentBatches,
+		targetBatchBytes:     cmp.Or(options.TargetBatchBytes, defaultAppendTargetBatchBytes),
+		maxBatchRows:         cmp.Or(options.MaxBatchRows, defaultAppendMaxBatchRows),
+		flushInterval:        cmp.Or(options.FlushInterval, defaultAppendFlushInterval),
+		maxBufferedBytes:     cmp.Or(options.MaxBufferedBytes, defaultAppendMaxBufferedBytes),
+		maxConcurrentBatches: cmp.Or(options.MaxConcurrentBatches, defaultAppendMaxConcurrentBatches),
 		attemptTimeout:       writeTimeout,
+		retry:                AppendRetryOptions{MaxRetries: defaultAppendMaxRetries},
 	}
-	config.retry = AppendRetryOptions{MaxRetries: defaultAppendMaxRetries}
 	if options.Retry != nil {
 		config.retry = *options.Retry
 	}
 	if config.retry.MaxRetries < 0 || config.retry.InitialBackoff < 0 || config.retry.MaxBackoff < 0 || config.retry.MaxElapsedTime < 0 {
 		return config, newError(ErrorKindConfigInvalid, "retry limits must not be negative", nil)
 	}
-	if config.retry.InitialBackoff == 0 {
-		config.retry.InitialBackoff = defaultAppendInitialBackoff
-	}
-	if config.retry.MaxBackoff == 0 {
-		config.retry.MaxBackoff = defaultAppendMaxBackoff
-	}
-	if config.retry.MaxElapsedTime == 0 {
-		config.retry.MaxElapsedTime = defaultAppendRetryElapsedTime
-	}
+	config.retry.InitialBackoff = cmp.Or(config.retry.InitialBackoff, defaultAppendInitialBackoff)
+	config.retry.MaxBackoff = cmp.Or(config.retry.MaxBackoff, defaultAppendMaxBackoff)
+	config.retry.MaxElapsedTime = cmp.Or(config.retry.MaxElapsedTime, defaultAppendRetryElapsedTime)
 	if config.retry.InitialBackoff > config.retry.MaxBackoff {
 		return config, newError(ErrorKindConfigInvalid, "initial retry backoff exceeds maximum backoff", nil)
 	}
 	if config.failurePolicy != AppendFailureStop && config.failurePolicy != AppendFailureContinue {
 		return config, newError(ErrorKindConfigInvalid, "failure policy is invalid", nil)
 	}
-	if config.targetBatchBytes == 0 {
-		config.targetBatchBytes = defaultAppendTargetBatchBytes
-	}
 	if config.targetBatchBytes < 0 || config.targetBatchBytes > maxAppendBodyBytes {
 		return config, newError(ErrorKindConfigInvalid,
 			fmt.Sprintf("target batch bytes must be from 1 to %d", maxAppendBodyBytes), nil)
-	}
-	if config.maxBatchRows == 0 {
-		config.maxBatchRows = defaultAppendMaxBatchRows
 	}
 	if config.maxBatchRows < 0 || config.maxBatchRows > maxAppendRows {
 		return config, newError(ErrorKindConfigInvalid,
 			fmt.Sprintf("max batch rows must be from 1 to %d", maxAppendRows), nil)
 	}
-	if config.flushInterval == 0 {
-		config.flushInterval = defaultAppendFlushInterval
-	}
 	if config.flushInterval < 0 {
 		return config, newError(ErrorKindConfigInvalid, "flush interval must be greater than zero", nil)
 	}
-	if config.maxBufferedBytes == 0 {
-		config.maxBufferedBytes = defaultAppendMaxBufferedBytes
-	}
 	if config.maxBufferedBytes < 0 {
 		return config, newError(ErrorKindConfigInvalid, "max buffered bytes must be greater than zero", nil)
-	}
-	if config.maxConcurrentBatches == 0 {
-		config.maxConcurrentBatches = defaultAppendMaxConcurrentBatches
 	}
 	if config.maxConcurrentBatches < 0 || config.maxConcurrentBatches > maxAppendConcurrentBatches {
 		return config, newError(ErrorKindConfigInvalid,
@@ -541,7 +521,7 @@ func (s *AppendStream) trySendCapacityError() error {
 
 // Flush dispatches all rows admitted before this barrier and waits for settlement.
 // Its report covers activity since the previous completed barrier. Continue mode
-// may return a non-OK report without an error; callers must inspect Outcome.
+// may return a non-succeeded report without an error; callers must inspect Outcome.
 // Canceling ctx stops only this wait; an already enqueued barrier keeps running.
 // If ctx ends first, Flush returns a zero report and ctx.Err(). The barrier
 // still advances the report interval when it completes; inspect lifetime Stats
@@ -613,7 +593,7 @@ func (s *AppendStream) waitBarrier(ctx context.Context, barrier *appendBarrier) 
 
 // Shutdown permanently closes admission and settles every admitted row.
 // It is idempotent and returns the original final report on repeated calls.
-// Continue mode may return a non-OK report without an error.
+// Continue mode may return a non-succeeded report without an error.
 // Canceling ctx stops only the caller's wait.
 // If ctx ends first, Shutdown returns a zero report and ctx.Err().
 func (s *AppendStream) Shutdown(ctx context.Context) (AppendDeliveryReport, error) {

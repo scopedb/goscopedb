@@ -72,7 +72,7 @@ if err != nil {
 	return err
 }
 if err := stream.Send(ctx, map[string]any{"id": 1, "name": "page_view"}); err != nil {
-	_, _ = stream.Shutdown(ctx)
+	_, _ = stream.Shutdown(context.WithoutCancel(ctx))
 	return err
 }
 report, err := stream.Shutdown(ctx)

@@ -75,9 +75,6 @@ func (s *Statement) Submit(ctx context.Context) (*StatementHandle, error) {
 		}
 		return nil, err
 	}
-	if s.ID != nil && resp.ID != *s.ID {
-		return nil, statementError(newError(ErrorKindUnexpected, "statement response ID does not match submitted ID", nil), s.ID)
-	}
 
 	handle := s.c.StatementHandle(resp.ID)
 	handle.resp.Store(resp)
@@ -182,6 +179,9 @@ func (h *StatementHandle) observe(resp *statementResponse, err error) (*Statemen
 		return nil, statementError(err, &h.id)
 	}
 	if resp.ID != h.id {
+		if cached := h.resp.Load(); cached != nil && cached.Status.Terminated() {
+			return cached.snapshot(), nil
+		}
 		return nil, statementError(newError(ErrorKindUnexpected, "statement response ID does not match handle", nil), &h.id)
 	}
 	for {

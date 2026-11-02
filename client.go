@@ -17,6 +17,7 @@
 package scopedb
 
 import (
+	"cmp"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -48,10 +49,7 @@ func NewClient(config Config) (*Client, error) {
 		)
 	}
 
-	compression := config.Compression
-	if compression == "" {
-		compression = CompressionZstd
-	}
+	compression := cmp.Or(config.Compression, CompressionZstd)
 	if compression != CompressionZstd && compression != CompressionGzip {
 		return nil, newError(
 			ErrorKindConfigInvalid,
@@ -129,8 +127,8 @@ func (c *Client) resourceURL(segments ...string) (*url.URL, error) {
 		return nil, newError(ErrorKindConfigInvalid, "invalid ScopeDB endpoint path", err)
 	}
 
-	u := *c.endpoint
+	u := c.endpoint.Clone()
 	u.Path = path
 	u.RawPath = rawPath
-	return &u, nil
+	return u, nil
 }

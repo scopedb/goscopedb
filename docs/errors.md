@@ -3,8 +3,7 @@
 Inspect `*scopedb.Error` for the server code, structured details, HTTP status, request ID, and retry delay. Use `errors.Is` for underlying transport/context causes and sentinels; do not parse message text to decide whether an operation committed.
 
 ```go
-var scopeErr *scopedb.Error
-if errors.As(err, &scopeErr) {
+if scopeErr, ok := errors.AsType[*scopedb.Error](err); ok {
 	log.Printf("kind=%s code=%s status=%d request_id=%s",
 		scopeErr.Kind, scopeErr.Code, scopeErr.HTTPStatus, scopeErr.RequestID)
 }
@@ -21,8 +20,7 @@ Use `StatementDetails.Code` to distinguish `StatementErrorCodeBadRequest` (inval
 After successful submission, `Query` and `Execute` errors retain `StatementID` and have `Retryable == false`, because calling them again would submit a new execution. After deciding a polling failure is recoverable, resume the same statement:
 
 ```go
-var scopeErr *scopedb.Error
-if errors.As(err, &scopeErr) && scopeErr.StatementID != nil {
+if scopeErr, ok := errors.AsType[*scopedb.Error](err); ok && scopeErr.StatementID != nil {
 	result, err := client.StatementHandle(*scopeErr.StatementID).Wait(recoveryCtx)
 	if err != nil {
 		return err

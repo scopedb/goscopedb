@@ -76,8 +76,7 @@ func run(ctx context.Context) error {
 
 	result, err := table.AppendNDJSON(ctx, ndjson.Bytes())
 	if err != nil {
-		var scopeErr *scopedb.Error
-		if errors.As(err, &scopeErr) && scopeErr.AppendDetails != nil &&
+		if scopeErr, ok := errors.AsType[*scopedb.Error](err); ok && scopeErr.AppendDetails != nil &&
 			scopeErr.AppendDetails.Status == scopedb.AppendOutcomeAmbiguous {
 			log.Print("append may have committed; replaying this payload may create duplicates")
 		}
