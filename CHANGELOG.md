@@ -20,13 +20,15 @@ All significant changes to the ScopeDB Go SDK are documented in this file.
 * Reject malformed Statement result row counts, column counts, and wire cell types before caching a successful terminal observation, so the same handle can fetch a valid result after an invalid response. Value conversion remains deferred until reading rows.
 * Preserve HTTP status, request ID, and retry delay when a custom redirect policy rejects Catalog requests or Statement refresh/cancellation requests.
 * Send `Statement.MaxElapsed` as `timeout_seconds` so current servers enforce the configured elapsed time limit instead of silently using the default. Request JSON results through the `format` query parameter on submission.
-* Accept Append HTTP 200 acknowledgements containing only `num_rows_inserted`. Use valid error envelopes and HTTP status to classify outcomes; malformed responses, including bodyless or truncated HTTP 429 responses, and all HTTP 5xx errors remain ambiguous. Expose the server's raw retry hint on `Error.ServerRetryable` and honor explicit server retry refusal even for opt-in ambiguous replay.
+* Accept Append HTTP 200 acknowledgements containing only `num_rows_inserted`. Use valid error envelopes and HTTP status to classify outcomes; malformed responses, including bodyless or truncated HTTP 429 responses, and all HTTP 5xx errors remain ambiguous. Expose the server's retry hint on `Error.ServerRetryable`.
 * Limit HTTP error bodies and Append acknowledgements to 64 KiB and discard oversized diagnostics instead of retaining them in errors or stream statistics. `ErrResponseTooLarge` identifies overflow while HTTP metadata and conservative write-outcome classification remain available.
 * Preserve `Error.StatementID` for statement recovery and stop marking `Query`/`Execute` failures as retryable after submission. Resume waiting on that ID instead of submitting another execution. Lost, interrupted, or malformed submission acknowledgements and unstructured gateway errors report `statement_submission_outcome_unknown`, and only valid HTTP 429 admission refusals remain retryable on submission; original causes and HTTP diagnostics remain available.
 * Prefer a cached terminal Statement observation over a late in-flight request failure, so concurrent cancellation, completion, or statement failure is not hidden by an older polling or cancellation error.
 
 ### Improvements
 
+* Decode Statement result rows once and reuse them across snapshots and conversions, avoiding repeated JSON decoding. `RawRows` returns an independent copy that callers can modify.
+* Reuse prepared Append stream batches across retries, avoiding repeated request encoding and compression.
 * Reuse zstd and gzip compression state to reduce allocations when sending Statements and Append requests.
 * Keep up to 100 idle HTTP/1.1 connections per host in the default SDK transport, avoiding connection churn between concurrent request bursts.
 
