@@ -190,7 +190,7 @@ func (c *Client) redactError(failure *Error) *Error {
 	return failure
 }
 
-func decodeResponseError(resp *http.Response, body []byte, kind ErrorKind) *Error {
+func decodeResponseError(resp *http.Response, body []byte, kind ErrorKind) (*Error, decodedErrorEnvelope) {
 	payload := parseErrorEnvelope(resp, body)
 	var message string
 	if payload.parsed && payload.Message != nil {
@@ -210,7 +210,7 @@ func decodeResponseError(resp *http.Response, body []byte, kind ErrorKind) *Erro
 		}
 		err.Details = payload.Details
 	}
-	return err
+	return err, payload
 }
 
 func newResponseError(

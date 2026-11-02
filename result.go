@@ -48,22 +48,26 @@ type ResultSet struct {
 // RawRows returns the string-or-null cells from the JSON wire response without
 // converting them to ScopeDB value types.
 func (rs *ResultSet) RawRows() ([][]*string, error) {
+	return decodeResultRows(rs.rows, rs.TotalRows, len(rs.Schema))
+}
+
+func decodeResultRows(data json.RawMessage, totalRows uint64, columns int) ([][]*string, error) {
 	var rows [][]*string
-	if err := json.Unmarshal(rs.rows, &rows); err != nil {
+	if err := json.Unmarshal(data, &rows); err != nil {
 		return nil, err
 	}
 	if rows == nil {
 		return nil, errors.New("result rows must be a JSON array")
 	}
-	if uint64(len(rows)) != rs.TotalRows {
+	if uint64(len(rows)) != totalRows {
 		return nil, fmt.Errorf(
 			"result row count mismatch: expected %d, got %d",
-			rs.TotalRows,
+			totalRows,
 			len(rows),
 		)
 	}
 	for i, row := range rows {
-		if row == nil || len(row) != len(rs.Schema) {
+		if row == nil || len(row) != columns {
 			return nil, fmt.Errorf("result row %d: schema length does not match record length", i)
 		}
 	}

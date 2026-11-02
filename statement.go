@@ -178,12 +178,6 @@ func (h *StatementHandle) observe(resp *statementResponse, err error) (*Statemen
 		}
 		return nil, statementError(err, &h.id)
 	}
-	if resp.ID != h.id {
-		if cached := h.resp.Load(); cached != nil && cached.Status.Terminated() {
-			return cached.snapshot(), nil
-		}
-		return nil, statementError(newError(ErrorKindUnexpected, "statement response ID does not match handle", nil), &h.id)
-	}
 	for {
 		previous := h.resp.Load()
 		// Requests can complete out of order. Never replace a terminal response

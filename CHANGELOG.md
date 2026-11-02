@@ -16,6 +16,8 @@ All significant changes to the ScopeDB Go SDK are documented in this file.
 
 ### Bug Fixes
 
+* Reject malformed Statement result row counts, column counts, and wire cell types before caching a successful terminal observation, so the same handle can fetch a valid result after an invalid response. Value conversion remains deferred until reading rows.
+* Preserve HTTP status, request ID, and retry delay when a custom redirect policy rejects Catalog requests or Statement refresh/cancellation requests.
 * Send `Statement.MaxElapsed` as `timeout_seconds` so current servers enforce the configured elapsed time limit instead of silently using the default. Request JSON results through the `format` query parameter on submission.
 * Accept Append HTTP 200 acknowledgements containing only `num_rows_inserted`. Use valid error envelopes and HTTP status to classify outcomes; malformed responses, including bodyless or truncated HTTP 429 responses, and all HTTP 5xx errors remain ambiguous. Expose the server's raw retry hint on `Error.ServerRetryable` and honor explicit server retry refusal even for opt-in ambiguous replay.
 * Limit HTTP error bodies and Append acknowledgements to 64 KiB and discard oversized diagnostics instead of retaining them in errors or stream statistics. `ErrResponseTooLarge` identifies overflow while HTTP metadata and conservative write-outcome classification remain available.
