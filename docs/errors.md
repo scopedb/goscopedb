@@ -11,6 +11,8 @@ if scopeErr, ok := errors.AsType[*scopedb.Error](err); ok {
 
 `Kind` identifies the operation-level category. Unknown server codes remain available in `Code`, and `Details` retains code-specific JSON. `ServerRetryable` preserves the server's hint; `Retryable` reflects SDK classification. Neither alone proves that replaying a write is safe.
 
+A valid `retryable: false` at either the outer envelope or nested error takes precedence over `true`, including when other diagnostic fields are malformed. Missing, null, or incorrectly typed hints do not establish a server retry decision. A malformed envelope still cannot establish that a write was rejected.
+
 ## Statements
 
 A failed execution exposes `StatementDetails`; confirmed server cancellation is identified by `errors.Is(err, scopedb.ErrStatementCancelled)`. A local `context.Canceled` stops the client's request or wait without confirming server cancellation.

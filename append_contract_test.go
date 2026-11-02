@@ -36,6 +36,7 @@ func TestAppendModernContract(t *testing.T) {
 		{"rate limit", 429, `{"error":{"code":"too_many_requests","message":"busy"}}`, AppendOutcomeFailed, true, true},
 		{"refusal", 429, `{"error":{"code":"too_many_requests","message":"busy","retryable":false}}`, AppendOutcomeFailed, false, true},
 		{"outer refusal", 429, `{"retryable":false,"error":{"code":"too_many_requests","message":"busy"}}`, AppendOutcomeFailed, false, false},
+		{"outer refusal overrides inner permission", 429, `{"retryable":false,"error":{"code":"too_many_requests","message":"busy","retryable":true}}`, AppendOutcomeFailed, false, true},
 		{"HTTP timeout", 408, `{"error":{"code":"request_timeout","message":"late","retryable":true}}`, AppendOutcomeFailed, false, false},
 		{"server error", 503, `{"error":{"code":"service_unavailable","message":"busy","details":{"status":"rejected"}}}`, AppendOutcomeAmbiguous, false, false},
 		{"future code", 409, `{"error":{"code":"future_conflict","message":"conflict"}}`, AppendOutcomeFailed, false, false},
@@ -99,6 +100,11 @@ func TestAppendAmbiguousRetryHonorsServerRefusal(t *testing.T) {
 		{"explicit refusal", `{"error":{"code":"service_unavailable","message":"busy","retryable":false}}`, false},
 		{"inner refusal with malformed outer field", `{"error":{"code":"service_unavailable","message":"busy","retryable":false},"request_id":123}`, false},
 		{"outer refusal with malformed outer field", `{"error":{"code":"service_unavailable","message":"busy"},"retryable":false,"request_id":123}`, false},
+		{"outer refusal overrides inner permission", `{"error":{"code":"service_unavailable","message":"busy","retryable":true},"retryable":false}`, false},
+		{"inner refusal overrides outer permission", `{"error":{"code":"service_unavailable","message":"busy","retryable":false},"retryable":true}`, false},
+		{"outer refusal with malformed inner field", `{"error":{"code":"service_unavailable","message":123},"retryable":false}`, false},
+		{"inner refusal with malformed inner field", `{"error":{"code":"service_unavailable","message":123,"retryable":false}}`, false},
+		{"invalid hint is not a refusal", `{"error":{"code":"service_unavailable","message":"busy","retryable":"false"}}`, true},
 		{"explicit retryable", `{"error":{"code":"service_unavailable","message":"busy","retryable":true}}`, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

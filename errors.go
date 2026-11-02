@@ -86,6 +86,8 @@ type Error struct {
 	RequestID  string
 	RetryAfter time.Duration
 	// ServerRetryable preserves the server hint independently of safe replay policy.
+	// A valid false hint at either envelope level takes precedence over true,
+	// even when other diagnostic fields are malformed.
 	ServerRetryable *bool
 	// CatalogOutcome is empty for reads, dry runs, and local validation failures.
 	CatalogOutcome CatalogMutationOutcome

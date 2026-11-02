@@ -17,7 +17,6 @@
 package scopedb
 
 import (
-	"bytes"
 	"cmp"
 	"context"
 	"encoding/json"
@@ -102,7 +101,7 @@ type decodedErrorEnvelope struct {
 	Code      *string         `json:"code"`
 	Message   *string         `json:"message"`
 	RequestID string          `json:"request_id"`
-	Retryable *bool           `json:"retryable"`
+	Retryable *bool           `json:"-"`
 	Details   json.RawMessage `json:"details"`
 	modern    bool
 	parsed    bool
@@ -114,14 +113,22 @@ func parseErrorEnvelope(resp *http.Response, body []byte) decodedErrorEnvelope {
 	parsedMap := json.Unmarshal(body, &envelope) == nil && envelope != nil
 	nested, modern := envelope["error"]
 	target := body
+	fields := envelope
 	if modern {
 		target = nested
+		fields = nil
+		if json.Unmarshal(target, &fields) != nil {
+			fields = nil
+		}
 	}
 	var payload decodedErrorEnvelope
 	payload.modern = modern
-	trimmedTarget := bytes.TrimSpace(target)
-	payload.parsed = parsedMap && len(trimmedTarget) > 0 && trimmedTarget[0] == '{' &&
+	payload.parsed = parsedMap && fields != nil &&
 		json.Unmarshal(target, &payload) == nil
+	// Retry refusal remains meaningful even when other diagnostic fields are invalid.
+	var retryValid bool
+	payload.Retryable, retryValid = decodeRetryHint(fields["retryable"])
+	payload.parsed = payload.parsed && retryValid
 	outerValid := true
 	if modern && parsedMap {
 		if rawRequestID, ok := envelope["request_id"]; ok {
@@ -133,9 +140,8 @@ func parseErrorEnvelope(resp *http.Response, body []byte) decodedErrorEnvelope {
 			}
 		}
 		if rawRetryable, ok := envelope["retryable"]; ok {
-			var retryable *bool
-			if json.Unmarshal(rawRetryable, &retryable) == nil {
-				if payload.Retryable == nil {
+			if retryable, valid := decodeRetryHint(rawRetryable); valid {
+				if payload.Retryable == nil || (retryable != nil && !*retryable) {
 					payload.Retryable = retryable
 				}
 			} else {
@@ -148,6 +154,17 @@ func parseErrorEnvelope(resp *http.Response, body []byte) decodedErrorEnvelope {
 		resp.StatusCode >= 400 && resp.StatusCode < 600 &&
 		validHTTPErrorCode(*payload.Code, resp.StatusCode, modern)
 	return payload
+}
+
+func decodeRetryHint(raw json.RawMessage) (*bool, bool) {
+	if len(raw) == 0 {
+		return nil, true
+	}
+	var hint *bool
+	if json.Unmarshal(raw, &hint) != nil {
+		return nil, false
+	}
+	return hint, true
 }
 
 func validHTTPErrorCode(code string, status int, modern bool) bool {
@@ -210,11 +227,13 @@ func decodeResponseError(resp *http.Response, body []byte, kind ErrorKind) (*Err
 			err.Code = *payload.Code
 		}
 		err.RequestID = cmp.Or(payload.RequestID, err.RequestID)
-		if payload.Retryable != nil {
-			err.ServerRetryable = payload.Retryable
+		err.Details = payload.Details
+	}
+	if payload.Retryable != nil {
+		err.ServerRetryable = payload.Retryable
+		if payload.parsed || !*payload.Retryable {
 			err.Retryable = *payload.Retryable
 		}
-		err.Details = payload.Details
 	}
 	return err, payload
 }
