@@ -8,6 +8,7 @@ All significant changes to the ScopeDB Go SDK are documented in this file.
 
 ### Breaking Changes
 
+* Remove `Statement.MaxEstimated`, which no longer has a server-side equivalent. Replace the old Statement failure constants with `StatementErrorCodeBadRequest`, `StatementErrorCodeInternalServerError`, and `StatementErrorCodeTimeout`. See [Statement migration](docs/migration-0.8.md#statement-recovery-and-diagnostics).
 * Rename Catalog `ETag` / `IfMatch` to `Version` / `ExpectedVersion` and expose mutation certainty through `Error.CatalogOutcome` while preserving server error codes. See [Upgrade from 0.7 to 0.8](docs/migration-0.8.md).
 * Replace `AppendState` with `AppendOutcome` (`Succeeded`, `Failed`, `Ambiguous`), rename `RetryUnknown` and unknown counters to `RetryAmbiguous` and ambiguous counters, and rename delivery outcomes to `AppendDeliverySucceeded` / `AppendDeliveryAmbiguous`. Outcome string/JSON values remain `committed`, `rejected`, and `unknown`; delivery outcome strings become `succeeded` and `ambiguous`.
 * Retry remote Append failures automatically only for valid HTTP 429 rejections. Client timeouts with ambiguous outcomes are no longer replayed even when `RetryAmbiguous` is enabled; known-unsent temporary connection failures remain safe to retry.
@@ -15,6 +16,7 @@ All significant changes to the ScopeDB Go SDK are documented in this file.
 
 ### Bug Fixes
 
+* Send `Statement.MaxElapsed` as `timeout_seconds` so current servers enforce the configured elapsed time limit instead of silently using the default. Request JSON results through the `format` query parameter on submission.
 * Accept Append HTTP 200 acknowledgements containing only `num_rows_inserted`. Use valid error envelopes and HTTP status to classify outcomes; malformed responses, including bodyless or truncated HTTP 429 responses, and all HTTP 5xx errors remain ambiguous. Honor explicit server retry refusal even for opt-in ambiguous replay.
 * Limit HTTP error bodies and Append acknowledgements to 64 KiB and discard oversized diagnostics instead of retaining them in errors or stream statistics. `ErrResponseTooLarge` identifies overflow while HTTP metadata and conservative write-outcome classification remain available.
 * Preserve `Error.StatementID` for statement recovery and stop marking `Query`/`Execute` failures as retryable after submission. Resume waiting on that ID instead of submitting another execution. Lost or malformed submission acknowledgements and unstructured gateway errors report `statement_submission_outcome_unknown`; original causes and HTTP diagnostics remain available.

@@ -55,14 +55,13 @@ Handle methods are safe to call concurrently. Once a terminal response is cached
 
 A context deadline stops local requests or waiting; it does not cancel the server statement. Call `Cancel` with a fresh, bounded context when server cancellation is required. If submission loses its response, execution may still have started. Set `Statement.ID` before submission when the application needs a known ID for reconciliation.
 
-`Statement.ID` chooses the statement ID; otherwise ScopeDB generates one. `StatementHandle.ID()` returns the ID confirmed by ScopeDB. `MaxElapsed` limits server-side elapsed time, including queueing, and `MaxEstimated` limits the estimated execution duration. Both use `time.Duration`; zero omits the setting. The server defaults to one hour for elapsed time and no estimate limit. A context deadline limits local waiting independently:
+`Statement.ID` chooses the statement ID; otherwise ScopeDB generates one. `StatementHandle.ID()` returns the ID confirmed by ScopeDB. `MaxElapsed` is a `time.Duration` that limits server-side time from submission, including queueing, preparation, and execution. Polling does not reset it. Zero uses the server default of one hour; negative durations are invalid. A context deadline limits local waiting independently:
 
 ```go
 statement := client.Statement("FROM events")
 statementID := uuid.New()   // github.com/google/uuid
 statement.ID = &statementID // Optional.
 statement.MaxElapsed = 30 * time.Second
-statement.MaxEstimated = 10 * time.Second
 handle, err := statement.Submit(ctx)
 if err != nil {
 	return err

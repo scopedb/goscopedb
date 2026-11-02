@@ -46,7 +46,8 @@ func TestClientWireRequests(t *testing.T) {
 				if strings.HasSuffix(r.URL.Path, "/statements") {
 					require.Equal(t, "/proxy/v1/statements", r.URL.Path)
 					require.Equal(t, strconv.Itoa(len(body)), r.Header.Get("X-ScopeDB-Uncompressed-Content-Length"))
-					require.JSONEq(t, `{"statement":"SELECT 42","format":"json"}`, string(body))
+					require.Equal(t, "json", r.URL.Query().Get("format"))
+					require.JSONEq(t, `{"statement":"SELECT 42"}`, string(body))
 					_, _ = w.Write([]byte(statementJSON(id, "finished", finishedResult)))
 				} else {
 					require.Equal(t, "/proxy/v1/catalog/databases/db%2Farchive/schemas/public/tables/events%3F%23%2Fraw/ingest", r.URL.EscapedPath())

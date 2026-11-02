@@ -49,7 +49,8 @@ func TestStatementResumesWithoutResubmission(t *testing.T) {
 					submissions++
 					body, err := decodeCompressedRequestBody(r)
 					require.NoError(t, err)
-					require.JSONEq(t, `{"statement_id":"`+id.String()+`","statement":"FROM staging INSERT INTO events","format":"json","max_elapsed_seconds":0.25}`, string(body))
+					require.Equal(t, "json", r.URL.Query().Get("format"))
+					require.JSONEq(t, `{"statement_id":"`+id.String()+`","statement":"FROM staging INSERT INTO events","timeout_seconds":0.25}`, string(body))
 					return httpResponse(200, statementJSON(id, "running", "")), nil
 				}
 				require.Equal(t, "/v1/statements/"+id.String(), r.URL.Path)
@@ -88,6 +89,62 @@ func TestStatementResumesWithoutResubmission(t *testing.T) {
 			require.Equal(t, int64(42), row["n"])
 			require.Equal(t, 1, submissions)
 		})
+	}
+}
+
+func TestStatementRejectsNegativeTimeoutBeforeSubmission(t *testing.T) {
+	client := newTestClient(t, func(*http.Request) (*http.Response, error) {
+		t.Fatal("invalid timeout must not submit a statement")
+		return nil, nil
+	})
+	statement := client.Statement("SELECT 1")
+	statement.MaxElapsed = -time.Nanosecond
+	_, err := statement.Submit(t.Context())
+	require.Equal(t, ErrorKindConfigInvalid, requireError(t, err).Kind)
+}
+
+func TestStatementFailurePreservesServerDiagnostics(t *testing.T) {
+	for _, tc := range []struct {
+		code string
+		want StatementErrorCode
+	}{
+		{"statement_timeout", StatementErrorCodeTimeout},
+		{"future_failure", StatementErrorCode("future_failure")},
+	} {
+		for _, deferred := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/deferred=%t", tc.code, deferred), func(t *testing.T) {
+				id := uuid.New()
+				submissions, polls := 0, 0
+				client := newTestClient(t, func(r *http.Request) (*http.Response, error) {
+					if r.Method == http.MethodPost {
+						submissions++
+						if deferred {
+							return httpResponse(http.StatusAccepted, statementJSON(id, "pending", "")), nil
+						}
+					} else {
+						polls++
+					}
+					extra := fmt.Sprintf(`,"error":{"code":%q,"message":"statement failed","details":{"timeout_seconds":0.25}}`, tc.code)
+					return httpResponse(http.StatusOK, statementJSON(id, "failed", extra)), nil
+				})
+				_, err := client.Query(t.Context(), "SELECT 1")
+				failure := requireError(t, err)
+				require.Equal(t, ErrorKindStatementFailed, failure.Kind)
+				require.Equal(t, tc.code, failure.Code)
+				require.NotNil(t, failure.StatementDetails)
+				require.Equal(t, tc.want, failure.StatementDetails.Code)
+				require.JSONEq(t, `{"timeout_seconds":0.25}`, string(failure.Details))
+				require.Equal(t, failure.Details, failure.StatementDetails.Details)
+				require.Equal(t, id, *failure.StatementID)
+				require.False(t, failure.Retryable)
+				require.Equal(t, 1, submissions)
+				if deferred {
+					require.Equal(t, 1, polls)
+				} else {
+					require.Zero(t, polls)
+				}
+			})
+		}
 	}
 }
 
@@ -160,7 +217,7 @@ func TestStatementTerminalWinsOverInFlightRequest(t *testing.T) {
 	}{
 		{"wait", "http error", "cancelled", ""},
 		{"refresh", "stale success", "finished", finishedResult},
-		{"cancel", "transport error", "failed", `,"error":{"code":"statement_failed","message":"execution failed","details":{"phase":"execute"}}`},
+		{"cancel", "transport error", "failed", `,"error":{"code":"internal_server_error","message":"execution failed","details":{"phase":"execute"}}`},
 	} {
 		t.Run(tc.operation+"/"+tc.late, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
@@ -220,6 +277,7 @@ func TestStatementTerminalWinsOverInFlightRequest(t *testing.T) {
 					require.NotErrorIs(t, err, context.Canceled)
 				case "failed":
 					failure := requireError(t, err)
+					require.Equal(t, StatementErrorCodeInternalServerError, failure.StatementDetails.Code)
 					require.Equal(t, "execution failed", failure.Message)
 					require.JSONEq(t, `{"phase":"execute"}`, string(failure.StatementDetails.Details))
 				case "finished":
