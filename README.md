@@ -99,7 +99,7 @@ The [API reference](https://pkg.go.dev/github.com/scopedb/goscopedb) describes i
 
 ## Contribute
 
-See [development](docs/development.md) for build and test commands and [releasing](RELEASE.md) for the maintainer workflow.
+See the [contribution guide](CONTRIBUTING.md) for development setup and checks.
 
 ## License
 
