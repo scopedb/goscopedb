@@ -20,7 +20,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 )
 
@@ -94,37 +96,37 @@ func (c *CatalogResource[T]) mutate(ctx context.Context, method string, data []b
 	}
 	err = json.Unmarshal(data, &raw)
 	etag := resp.Header.Get("ETag")
-	if err != nil || len(raw.Before) == 0 || len(raw.After) == 0 || raw.Destructive == nil || etag == "" {
-		failure := newResponseError(resp, ErrorKindCatalogFailed, "invalid catalog response", err)
-		if !controls.DryRun {
-			failure.CatalogOutcome = CatalogMutationUnknown
+	message := "invalid catalog response"
+	if err == nil && len(raw.Before) > 0 && len(raw.After) > 0 && raw.Destructive != nil && etag != "" {
+		result := CatalogResult[T]{Destructive: *raw.Destructive, Version: etag}
+		err = decodeCatalogDefinition(raw.Before, &result.Before)
+		if err == nil {
+			err = decodeCatalogDefinition(raw.After, &result.After)
 		}
-		return CatalogResult[T]{}, failure
-	}
-	result := CatalogResult[T]{Destructive: *raw.Destructive, Version: etag}
-	err = decodeCatalogDefinition(raw.Before, &result.Before)
-	if err == nil {
-		err = decodeCatalogDefinition(raw.After, &result.After)
-	}
-	if err != nil {
-		failure := newResponseError(resp, ErrorKindCatalogFailed, err.Error(), err)
-		if !controls.DryRun {
-			failure.CatalogOutcome = CatalogMutationUnknown
+		if err == nil {
+			return result, nil
 		}
-		return CatalogResult[T]{}, failure
+		message = err.Error()
 	}
-	return result, nil
+	failure := newResponseError(resp, ErrorKindCatalogFailed, message, err)
+	if !controls.DryRun {
+		failure.CatalogOutcome = CatalogMutationUnknown
+	}
+	return CatalogResult[T]{}, failure
 }
 
 func decodeCatalogDefinition(data []byte, target any) error {
 	data = bytes.TrimSpace(data)
-	if !json.Valid(data) || (data[0] != '{' && !bytes.Equal(data, []byte("null"))) {
+	if len(data) == 0 || (data[0] != '{' && !bytes.Equal(data, []byte("null"))) {
 		return fmt.Errorf("catalog definition must be an object or null")
 	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(target); err != nil {
 		return fmt.Errorf("cannot decode complete catalog definition (use Raw for unsupported fields): %w", err)
+	}
+	if err := decoder.Decode(new(any)); !errors.Is(err, io.EOF) {
+		return fmt.Errorf("catalog definition must be a single JSON value")
 	}
 	return nil
 }
@@ -163,11 +165,9 @@ func (c *CatalogResource[T]) request(ctx context.Context, method string, data []
 	}
 	resp, err := c.client.do(req)
 	if err != nil {
-		failure := newError(ErrorKindCatalogFailed, "catalog request failed", err)
-		if resp != nil {
-			failure = newResponseError(resp, ErrorKindCatalogFailed, failure.Message, err)
-		}
+		failure := newResponseError(resp, ErrorKindCatalogFailed, "catalog request failed", err)
 		if writing {
+			failure.Retryable = false
 			failure.CatalogOutcome = CatalogMutationUnknown
 			failure.Message = "catalog mutation could not be confirmed"
 			failure.WriteDetails = writeErrorDetails(err)

@@ -27,7 +27,12 @@ import (
 )
 
 func (s *AppendStream) sendBatch(batch appendBatch) {
-	var err error
+	var (
+		err        error
+		endpoint   string
+		compressed []byte
+		numRows    int
+	)
 	backoff := s.config.retry.InitialBackoff
 	deliveryCtx, deliveryCancel := context.WithTimeout(context.Background(), s.config.retry.MaxElapsedTime)
 	defer deliveryCancel()
@@ -47,14 +52,25 @@ retryLoop:
 			s.shared.counters.retries++
 			s.shared.mu.Unlock()
 		}
-		_, err = s.client.appendNDJSON(
-			deliveryCtx,
-			s.database,
-			s.schema,
-			s.table,
-			batch.payload,
-			s.config.attemptTimeout,
-		)
+		if err = deliveryCtx.Err(); err == nil {
+			if attempt == 0 {
+				endpoint, compressed, numRows, err = s.client.prepareAppendRequest(
+					s.database,
+					s.schema,
+					s.table,
+					batch.payload,
+				)
+			}
+			if err == nil {
+				_, err = s.client.sendPreparedAppend(
+					deliveryCtx,
+					endpoint,
+					compressed,
+					numRows,
+					s.config.attemptTimeout,
+				)
+			}
+		}
 		// In-flight failures always carry AppendDetails. Errors without them
 		// happened before dispatch (for example, the retry budget expired while
 		// compressing). Those rows were not sent by this attempt.
@@ -141,30 +157,31 @@ func (s *AppendStream) shouldRetryAppend(err error) bool {
 }
 
 func ambiguousAppendStreamError(message string, cause error) error {
-	result := &Error{
-		Kind:      ErrorKindAppendRowsFailed,
-		Message:   message,
-		Retryable: false,
-		AppendDetails: &AppendErrorDetails{
-			Status:    AppendOutcomeAmbiguous,
-			RowErrors: []AppendRowError{},
-		},
-		cause: cause,
-	}
+	result := newError(ErrorKindAppendRowsFailed, message, cause)
+	rowErrors := []AppendRowError{}
+	var rowErrorsTruncated bool
 	// Preserve the last attempt's diagnostic metadata while the state describes
 	// the outcome across all attempts, including an earlier lost response.
 	if last, ok := errors.AsType[*Error](cause); ok {
-		result.Code = last.Code
-		result.ServerRetryable = last.ServerRetryable
+		*result = *last
+		result.Kind = ErrorKindAppendRowsFailed
+		result.Message = message
+		result.Retryable = false
 		result.Details = slices.Clone(last.Details)
-		result.WriteDetails = last.WriteDetails
-		result.HTTPStatus = last.HTTPStatus
-		result.RequestID = last.RequestID
-		result.RetryAfter = last.RetryAfter
-		if last.AppendDetails != nil {
-			result.AppendDetails.RowErrors = slices.Clone(last.AppendDetails.RowErrors)
-			result.AppendDetails.RowErrorsTruncated = last.AppendDetails.RowErrorsTruncated
+		if last.WriteDetails != nil {
+			details := *last.WriteDetails
+			result.WriteDetails = &details
 		}
+		if last.AppendDetails != nil {
+			rowErrors = slices.Clone(last.AppendDetails.RowErrors)
+			rowErrorsTruncated = last.AppendDetails.RowErrorsTruncated
+		}
+		result.cause = cause
+	}
+	result.AppendDetails = &AppendErrorDetails{
+		Status:             AppendOutcomeAmbiguous,
+		RowErrors:          rowErrors,
+		RowErrorsTruncated: rowErrorsTruncated,
 	}
 	return result
 }

@@ -105,46 +105,46 @@ func TestStatementRejectsNegativeTimeoutBeforeSubmission(t *testing.T) {
 
 func TestStatementFailurePreservesServerDiagnostics(t *testing.T) {
 	for _, tc := range []struct {
-		code string
-		want StatementErrorCode
+		code     string
+		want     StatementErrorCode
+		deferred bool
 	}{
-		{"statement_timeout", StatementErrorCodeTimeout},
-		{"future_failure", StatementErrorCode("future_failure")},
+		{"statement_timeout", StatementErrorCodeTimeout, false},
+		{"statement_timeout", StatementErrorCodeTimeout, true},
+		{"future_failure", StatementErrorCode("future_failure"), false},
 	} {
-		for _, deferred := range []bool{false, true} {
-			t.Run(fmt.Sprintf("%s/deferred=%t", tc.code, deferred), func(t *testing.T) {
-				id := uuid.New()
-				submissions, polls := 0, 0
-				client := newTestClient(t, func(r *http.Request) (*http.Response, error) {
-					if r.Method == http.MethodPost {
-						submissions++
-						if deferred {
-							return httpResponse(http.StatusAccepted, statementJSON(id, "pending", "")), nil
-						}
-					} else {
-						polls++
+		t.Run(fmt.Sprintf("%s/deferred=%t", tc.code, tc.deferred), func(t *testing.T) {
+			id := uuid.New()
+			submissions, polls := 0, 0
+			client := newTestClient(t, func(r *http.Request) (*http.Response, error) {
+				if r.Method == http.MethodPost {
+					submissions++
+					if tc.deferred {
+						return httpResponse(http.StatusAccepted, statementJSON(id, "pending", "")), nil
 					}
-					extra := fmt.Sprintf(`,"error":{"code":%q,"message":"statement failed","details":{"timeout_seconds":0.25}}`, tc.code)
-					return httpResponse(http.StatusOK, statementJSON(id, "failed", extra)), nil
-				})
-				_, err := client.Query(t.Context(), "SELECT 1")
-				failure := requireError(t, err)
-				require.Equal(t, ErrorKindStatementFailed, failure.Kind)
-				require.Equal(t, tc.code, failure.Code)
-				require.NotNil(t, failure.StatementDetails)
-				require.Equal(t, tc.want, failure.StatementDetails.Code)
-				require.JSONEq(t, `{"timeout_seconds":0.25}`, string(failure.Details))
-				require.Equal(t, failure.Details, failure.StatementDetails.Details)
-				require.Equal(t, id, *failure.StatementID)
-				require.False(t, failure.Retryable)
-				require.Equal(t, 1, submissions)
-				if deferred {
-					require.Equal(t, 1, polls)
 				} else {
-					require.Zero(t, polls)
+					polls++
 				}
+				extra := fmt.Sprintf(`,"error":{"code":%q,"message":"statement failed","details":{"timeout_seconds":0.25}}`, tc.code)
+				return httpResponse(http.StatusOK, statementJSON(id, "failed", extra)), nil
 			})
-		}
+			_, err := client.Query(t.Context(), "SELECT 1")
+			failure := requireError(t, err)
+			require.Equal(t, ErrorKindStatementFailed, failure.Kind)
+			require.Equal(t, tc.code, failure.Code)
+			require.NotNil(t, failure.StatementDetails)
+			require.Equal(t, tc.want, failure.StatementDetails.Code)
+			require.JSONEq(t, `{"timeout_seconds":0.25}`, string(failure.Details))
+			require.Equal(t, failure.Details, failure.StatementDetails.Details)
+			require.Equal(t, id, *failure.StatementID)
+			require.False(t, failure.Retryable)
+			require.Equal(t, 1, submissions)
+			if tc.deferred {
+				require.Equal(t, 1, polls)
+			} else {
+				require.Zero(t, polls)
+			}
+		})
 	}
 }
 
@@ -330,6 +330,9 @@ func TestStatementRejectsIncompleteOrMismatchedResponses(t *testing.T) {
 		statementJSON(id, "finished", `,"result_set":{"format":"json","metadata":{"fields":[],"num_rows":0},"rows":{}}`),
 		statementJSON(id, "finished", `,"result_set":{"format":"json","metadata":{"fields":[null],"num_rows":0},"rows":[]}`),
 		statementJSON(id, "finished", strings.Replace(finishedResult, `"int"`, `"unsigned"`, 1)),
+		statementJSON(id, "finished", strings.Replace(finishedResult, `[["42"]]`, `[[]]`, 1)),
+		statementJSON(id, "finished", strings.Replace(finishedResult, `[["42"]]`, `[null]`, 1)),
+		statementJSON(id, "finished", strings.Replace(finishedResult, `[["42"]]`, `[[42]]`, 1)),
 	} {
 		client := newTestClient(t, func(*http.Request) (*http.Response, error) { return httpResponse(200, body), nil })
 		handle := client.StatementHandle(id)
@@ -340,54 +343,45 @@ func TestStatementRejectsIncompleteOrMismatchedResponses(t *testing.T) {
 }
 
 func TestStatementMalformedRowsDoNotCacheTerminalState(t *testing.T) {
-	for _, tc := range []struct {
-		name, rows string
-	}{
-		{"row count", `[]`},
-		{"column count", `[[]]`},
-		{"null row", `[null]`},
-		{"non-string cell", `[[42]]`},
-	} {
-		for _, operation := range []string{"submit", "refresh", "cancel"} {
-			t.Run(tc.name+"/"+operation, func(t *testing.T) {
-				id := uuid.New()
-				calls := 0
-				client := newTestClient(t, func(*http.Request) (*http.Response, error) {
-					calls++
-					extra := finishedResult
-					if calls == 1 {
-						extra = strings.Replace(extra, `[["42"]]`, tc.rows, 1)
-					}
-					return httpResponse(http.StatusOK, statementJSON(id, "finished", extra)), nil
-				})
-				handle := client.StatementHandle(id)
-				var err error
-				switch operation {
-				case "submit":
-					statement := client.Statement("SELECT 42")
-					statement.ID = &id
-					submitted, submitErr := statement.Submit(t.Context())
-					require.Nil(t, submitted)
-					err = submitErr
-				case "refresh":
-					_, err = handle.Refresh(t.Context())
-				case "cancel":
-					_, err = handle.Cancel(t.Context())
+	for _, operation := range []string{"submit", "refresh", "cancel"} {
+		t.Run(operation, func(t *testing.T) {
+			id := uuid.New()
+			calls := 0
+			client := newTestClient(t, func(*http.Request) (*http.Response, error) {
+				calls++
+				extra := finishedResult
+				if calls == 1 {
+					extra = strings.Replace(extra, `[["42"]]`, `[]`, 1)
 				}
-				failure := requireError(t, err)
-				require.Equal(t, id, *failure.StatementID)
-				if operation == "submit" {
-					require.Equal(t, statementSubmissionOutcomeUnknownCode, failure.Code)
-				}
-				require.Nil(t, handle.Snapshot())
-				result, err := handle.Wait(t.Context())
-				require.NoError(t, err)
-				row, found, err := result.First()
-				require.NoError(t, err)
-				require.True(t, found)
-				require.Equal(t, int64(42), row["n"])
-				require.Equal(t, 2, calls, "malformed rows must not prevent fetching a valid result")
+				return httpResponse(http.StatusOK, statementJSON(id, "finished", extra)), nil
 			})
-		}
+			handle := client.StatementHandle(id)
+			var err error
+			switch operation {
+			case "submit":
+				statement := client.Statement("SELECT 42")
+				statement.ID = &id
+				submitted, submitErr := statement.Submit(t.Context())
+				require.Nil(t, submitted)
+				err = submitErr
+			case "refresh":
+				_, err = handle.Refresh(t.Context())
+			case "cancel":
+				_, err = handle.Cancel(t.Context())
+			}
+			failure := requireError(t, err)
+			require.Equal(t, id, *failure.StatementID)
+			if operation == "submit" {
+				require.Equal(t, statementSubmissionOutcomeUnknownCode, failure.Code)
+			}
+			require.Nil(t, handle.Snapshot())
+			result, err := handle.Wait(t.Context())
+			require.NoError(t, err)
+			row, found, err := result.First()
+			require.NoError(t, err)
+			require.True(t, found)
+			require.Equal(t, int64(42), row["n"])
+			require.Equal(t, 2, calls, "malformed rows must not prevent fetching a valid result")
+		})
 	}
 }

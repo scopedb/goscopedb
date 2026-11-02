@@ -70,9 +70,6 @@ func (s *Statement) Submit(ctx context.Context) (*StatementHandle, error) {
 		TimeoutSeconds: s.MaxElapsed.Seconds(),
 	})
 	if err != nil {
-		if s.ID != nil {
-			return nil, statementError(err, s.ID)
-		}
 		return nil, err
 	}
 
@@ -176,7 +173,7 @@ func (h *StatementHandle) observe(resp *statementResponse, err error) (*Statemen
 		if cached := h.resp.Load(); cached != nil && cached.Status.Terminated() {
 			return cached.snapshot(), nil
 		}
-		return nil, statementError(err, &h.id)
+		return nil, h.c.redactError(statementError(err, &h.id))
 	}
 	for {
 		previous := h.resp.Load()
