@@ -20,7 +20,7 @@ defer client.Close()
 
 `AppendStreamOptions.AttemptTimeout` changes from `time.Duration` to `*time.Duration`. Omit it to inherit the client setting, replace a positive `AttemptTimeout: duration` with `AttemptTimeout: new(duration)`, or set `new(time.Duration)` to disable the attempt limit. An explicit `AttemptTimeout: 0` in old source must become an omitted field or nil to preserve the default. Negative values are invalid.
 
-Caller context deadlines and HTTP-client timeouts still apply. Append streams also have a five-minute default delivery/retry budget per dispatched batch; disabling the attempt timeout does not disable that budget. See [timeouts and HTTP options](usage.md#timeouts-and-http-options) for timeout scope and interruption diagnostics.
+Caller context deadlines and HTTP-client timeouts still apply. Append streams also have a five-minute default delivery/retry budget per dispatched batch; disabling the attempt timeout does not disable that budget. See [timeouts](configuration.md#timeouts) for timeout scope and interruption diagnostics.
 
 ## Statements and Catalog
 
@@ -41,7 +41,7 @@ Replace paginated Catalog list/fetch/iterator methods with `client.Catalog().Get
 
 ## Append and IngestStream
 
-The `AppendState` enum values and stream delivery/report types remain. Missing or unreadable outcomes are unknown. As in v0.6.3, unknown outcomes are not retried by default; the new `RetryUnknown` option enables explicit replay when the application accepts possible duplicates.
+The `AppendState` enum values and stream delivery/report types remain in v0.7. Missing or unreadable outcomes are unknown. As in v0.6.3, unknown outcomes are not retried by default; the new `RetryUnknown` option enables explicit replay when the application accepts possible duplicates.
 
 `Client.IngestStream`, `IngestStream`, `IngestStreamOptions`, and `IngestResult` have been removed. Select the destination with `client.Table(name)` and use `Table.AppendStream` for Go values or `Table.AppendNDJSON` for an existing NDJSON payload.
 
@@ -52,7 +52,7 @@ Review these behavior changes when migrating:
 - Append batches allow up to 8 MiB of uncompressed NDJSON and 200,000 rows. Reduce an old ingest batch-byte target above 8 MiB. The default stream batch target decreases from 8 MiB to 4 MiB.
 - `Flush` and `Shutdown` return an `AppendDeliveryReport` for activity since the previous completed barrier, including barriers whose caller stopped waiting. Read `CommittedRows` instead of `IngestResult.NumRowsInserted`, and check `Outcome` when using the continue policy.
 - Append streams send up to four batches concurrently by default. Set `MaxConcurrentBatches: 1` when the producer needs sequential requests; queries still require `ORDER BY` for ordered results.
-- Append streams retry confirmed temporary rejections by default. `RetryUnknown: true` opts into retrying transient unknown outcomes, including attempt timeouts, which can duplicate rows. Cancellation and the delivery budget still stop retries. Set `MaxRetries: 0` to disable all SDK retries. Direct `AppendNDJSON` makes one SDK attempt; HTTP redirects follow the configured HTTP client's policy.
+- Append streams retry confirmed temporary rejections by default. `RetryUnknown: true` opts into retrying transient unknown outcomes, which can duplicate rows. Attempt timeout replay is available starting in v0.7.1. Cancellation and the delivery budget still stop retries. Set `MaxRetries: 0` to disable all SDK retries. Direct `AppendNDJSON` makes one SDK attempt; HTTP redirects follow the configured HTTP client's policy.
 
 ## Changes in v0.7.1
 

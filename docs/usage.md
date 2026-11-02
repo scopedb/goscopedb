@@ -70,18 +70,11 @@ if err != nil {
 fmt.Println("statement ID:", handle.ID())
 ```
 
-When `Wait` or `Execute` returns a `*scopedb.Error` with kind `ErrorKindStatementFailed`, `Message` and `Code` expose the server's failure reason. `StatementDetails` also preserves the code-specific JSON details. HTTP errors expose their server code through the same `Code` field:
+For statement failure details and resuming after a transport error, see [error handling](errors.md#statements).
 
-```go
-var scopeErr *scopedb.Error
-if errors.As(err, &scopeErr) && scopeErr.StatementDetails != nil {
-	fmt.Println("statement error code:", scopeErr.StatementDetails.Code)
-	fmt.Println("statement error:", scopeErr.StatementDetails.Message)
-	fmt.Println("details:", string(scopeErr.StatementDetails.Details))
-}
-```
+## Manage the catalog
 
-## Initialize a table
+### Initialize a table
 
 At application startup, apply the complete expected definition and start writing after it succeeds. `Table` defaults to database `scopedb` and schema `public`; set its `Database` and `Schema` fields to use another location. The parent database and schema must exist.
 
@@ -108,7 +101,7 @@ The default call applies immediately and rejects changes that may lose data. App
 
 Pass one `CatalogOptions` value when you need a dry run, a version precondition, or explicit authorization for destructive changes. The same optional options are accepted by Catalog `Apply` and `Delete`.
 
-## Manage the catalog
+### Review and apply a change
 
 The Catalog API reads complete definitions and replaces resources atomically.
 
@@ -159,13 +152,11 @@ fmt.Println(string(plan.After))
 
 `Raw()` is also available on each resource selector. Typed and raw resources share the same HTTP behavior, options, and errors.
 
-Errors use `*scopedb.Error`, including the server `Code`, HTTP status, and request ID. Catalog writes are never automatically retried. `CatalogOutcome == CatalogMutationRejected` confirms rejection; `CatalogMutationUnknown` means the mutation may have committed. Read the catalog and plan again before replaying an unknown outcome. Reads, dry runs, and local validation failures have no mutation outcome. Server `Code` and diagnostics are preserved.
+Catalog writes make one attempt. If a mutation fails, inspect its [commit outcome](errors.md#catalog-mutations) before replaying it.
 
 `Version` covers the entire tenant catalog, including when reading a single table: unrelated catalog changes can invalidate it, while data appends do not advance it. Preserve the token including its quotes. Dry runs return the base version; writes return the resulting version, and no-op writes retain the version. `ExpectedVersion` is checked atomically; stale tokens fail with HTTP 412 and `precondition_failed`.
 
 ## Append rows
-
-A successful Append requires HTTP 200 and a valid `num_rows_inserted` matching the submitted row count; the wire response does not require `status`. Valid nested HTTP 4xx errors confirm failure, and HTTP 5xx errors remain ambiguous even when legacy details say rejected. Known error codes must agree with the HTTP status; unknown codes are preserved. Invalid acknowledgements and incomplete or malformed error envelopes remain ambiguous.
 
 Use `AppendStream` to write Go structs or maps to an existing table. The SDK encodes and batches the rows for you.
 
@@ -245,29 +236,9 @@ if report.Outcome != scopedb.AppendDeliverySucceeded {
 }
 ```
 
-`TrySend` adds a row without waiting for queue space. Check the report returned by `Flush` or `Shutdown`: `CommittedRows` counts confirmed writes, `FailedRows` counts failed rows, `AmbiguousRows` counts writes without a confirmed result, and `DroppedRows` counts rows rejected by `TrySend`. Each report covers activity since the previous completed barrier, including barriers whose caller stopped waiting. `Stats()` holds lifetime totals, pending rows/bytes, in-flight batches, and the latest failure diagnostics. Admission errors returned by `Send` are not counted as dropped rows; count those at the producer. Calling `Shutdown` repeatedly returns its original final report, so do not add it to totals twice. If a `Flush` wait is interrupted, that barrier still completes and advances the report interval; use lifetime counters and `Stats().LastReport` to inspect delivery rather than assuming a later report includes those rows. Continue mode does not retain failed payloads for replay; use an application-owned durable queue when losing rows is unacceptable.
+`TrySend` attempts admission without waiting for queue space. In continue mode, a nil barrier error does not mean every row committed: inspect `report.Outcome` and the row counters. See [delivery reports](writes.md#delivery-reports) for interval and lifetime accounting.
 
-For a fleet already seeing HTTP 429s, start with one stream per destination in each process and `MaxConcurrentBatches: 1`. Concurrency is per stream: twelve processes with a default stream each can issue up to 48 concurrent append requests. This bounds requests in flight, not requests per second or total volume. Observe `Stats().Retries`, `PendingRows`, `PendingBytes`, and `LastFailure.HTTPStatus`; reduce producer rate or coordinate admission across processes if the shared limit is still exceeded. Retries use jittered backoff and honor `Retry-After` even when it exceeds `MaxBackoff`; the delivery budget bounds the wait.
-
-### Delivery and resource lifetime
-
-Streams retry valid HTTP 429 rejections and temporary connection failures known to occur before dispatch. A missing, malformed, truncated, or inconsistent error body is ambiguous, even for HTTP 429. A connection timeout is retryable; caller cancellation and certificate verification failures are not. HTTP 503 responses without ingest details remain unknown because the write may have committed. The default allows eight retries with bounded backoff and a five-minute elapsed budget per dispatched batch. Missing responses and unknown outcomes stop delivery under the default stop policy. If the application accepts possible duplicates, opt into at-least-once replay:
-
-```go
-stream, err := table.AppendStream(scopedb.AppendStreamOptions{
-	Retry: &scopedb.AppendRetryOptions{MaxRetries: 8, RetryAmbiguous: true},
-})
-if err != nil {
-	return err
-}
-// Send rows, then call stream.Shutdown(ctx) and inspect its report and error.
-```
-
-A later successful acknowledgement confirms the logical rows were written at least once, not how many copies exist. A later rejection cannot resolve an earlier unknown attempt. `RetryAmbiguous` excludes client timeouts and cancellations after connection acquisition. Explicit server retry refusal and exhaustion of the delivery budget also stop retries. `Retry: &scopedb.AppendRetryOptions{MaxRetries: 0}` disables all SDK retries. Direct `AppendNDJSON` always makes one SDK attempt.
-
-The default stream targets 4 MiB batches, flushes partial batches after one second, accepts at most 200,000 rows per batch, and sends up to four batches concurrently. Each request is capped at 8 MiB of uncompressed NDJSON; streams split batches automatically at either protocol limit. `MaxBufferedBytes` defaults to 64 MiB. Set `MaxConcurrentBatches: 1` for serial requests. `MaxBufferedBytes` bounds accepted encoded rows, including in-flight batches; it excludes temporary encoding/compression buffers and rows held by blocked `Send` callers. Limit producer concurrency when bounding total process memory.
-
-Always call `Shutdown` to close admission and settle accepted rows. Cancelling a `Send` context before admission leaves that row unaccepted. Cancelling a `Flush` or `Shutdown` wait does not abandon accepted rows or roll back writes; use a live context to wait again, and inspect `Stats()` for cumulative delivery. `Client.Close` only releases idle HTTP connections and does not shut down streams.
+Choose batching, concurrency, and retry settings using the [write delivery guide](writes.md).
 
 ### Append NDJSON directly
 
@@ -284,85 +255,4 @@ fmt.Println("committed rows:", result.NumRowsInserted)
 
 One request supports up to 8 MiB of uncompressed NDJSON and 200,000 rows. Direct appends do not split oversized input or retry; the caller owns that request boundary.
 
-### JSON encoding for Append
-
-Each nonblank line must be a JSON object keyed by destination column name. `Send` uses standard `encoding/json`, including struct tags and custom `MarshalJSON` methods, without schema-aware conversions. Local admission checks only that the encoded value is an object within the row-size limit. ScopeDB validates the destination fields and types when it processes the batch.
-
-| Column type | JSON input                                              | Go value or example                                                                                                                                                       |
-| ----------- | ------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `int`       | Signed 64-bit integer token                             | `int64(42)`; quoted numbers, `42.0`, and `42e0` are not accepted integer tokens.                                                                                          |
-| `uint`      | Nonnegative integer token through `9223372036854775807` | `uint64(42)`; larger values are rejected even though query results support the full `uint64` range.                                                                       |
-| `float`     | Finite number                                           | `float64(1.5)`; integer tokens must be exactly representable as a float. Overflow and nonzero values that underflow to zero are rejected.                                 |
-| `boolean`   | Boolean                                                 | `true` or `false`.                                                                                                                                                        |
-| `string`    | String                                                  | `"hello"`; numbers and objects are not implicitly converted to text.                                                                                                      |
-| `timestamp` | RFC 3339 string with an explicit offset                 | `time.Time` or `"2026-10-23T12:34:56.123456789Z"`; values must fit signed 64-bit nanoseconds since the Unix epoch. Numeric epochs and timezone-free strings are rejected. |
-| `interval`  | Fixed-duration ISO 8601 `PT` string                     | `"PT1H2M3.000000004S"` or `"-PT0.5S"`; up to nine fractional second digits, within signed 64-bit nanoseconds. Calendar years/months/days are not accepted.                |
-| `binary`    | Canonical padded standard Base64 string                 | A non-nil `[]byte` encodes automatically; `[]byte("hello")` becomes `"aGVsbG8="`.                                                                                         |
-| `object`    | JSON object                                             | A struct, map, or `json.RawMessage` containing an object; pass the object rather than serialized JSON in a string.                                                        |
-| `array`     | JSON array                                              | A slice or array; elements may have different JSON types.                                                                                                                 |
-| `any`       | Any JSON value                                          | Numbers, booleans, strings, arrays, and objects retain their JSON kinds. A timestamp-looking string remains a string.                                                     |
-
-Missing ordinary columns and explicit `null` become SQL NULL. Nested nulls in objects and arrays remain JSON nulls. Computed columns must be omitted. Unknown fields, duplicate object keys (including nested keys), and type mismatches reject the entire request; other requests in a stream may already have committed. Inspect `Error.Code` and `Error.Details` for whole-request diagnostics. `Error.AppendDetails.RowErrors` and `RowErrorsTruncated` preserve optional legacy diagnostics only; do not infer row outcomes from message text. With the default stop policy, these failures surface from `Flush` or `Shutdown`; continue mode reports them in delivery counts and `Stats().LastFailure`.
-
-ScopeDB parses all NDJSON integer tokens as signed 64-bit integers, including values inside objects and arrays. `encoding/json` preserves integer-valued Go types without a floating-point conversion, but values above `9223372036854775807` remain invalid input. Avoid a numeric field's `json:",string"` option for integer columns. An integer-valued Go float may encode without a decimal point; for floats beyond the signed integer range, supply an explicit floating-point JSON token with `json.RawMessage`, such as `1e20`. NaN and infinities fail local JSON encoding.
-
-`time.Duration` encodes as an integer count of nanoseconds, which is not accepted for interval columns; format a `PT` string instead. `time.Time` preserves fractional seconds, but still must fit the timestamp range above. Nil slices, maps, and pointers normally encode as `null`; a nil top-level row is not an object and fails admission. Preserve exact imported JSON with `json.RawMessage`, or decode with `json.Decoder.UseNumber` before editing it. The [bulk import example](../examples/patterns/bulk_append) preserves numbers without passing through `float64`.
-
-See the examples for [streaming writes](../examples/append_stream), [file imports](../examples/patterns/bulk_append), [telemetry](../examples/patterns/telemetry), and [NDJSON](../examples/append_ndjson).
-
-## Timeouts and HTTP options
-
-`NewClient` validates the endpoint and returns an error for invalid configuration. Set `Config.HTTPClient` when the application needs to own HTTP timeouts, proxies, TLS, or connection pooling. `Client.Close` closes idle connections only for the HTTP client created by the SDK; it never closes a caller-provided client. SDK-owned clients default to keeping up to 100 idle HTTP/1.1 connections per host, supporting reuse across concurrent streams and queries. They use Go's default redirect policy. To customize redirects, supply an `http.Client` with `CheckRedirect` through `Config.HTTPClient`.
-
-[Go's default redirect behavior](https://pkg.go.dev/net/http#Client.Do) changes POST requests to GET without a body for HTTP 301, 302, and 303; HTTP 307 and 308 preserve the method and body when the body can be recreated. Redirects happen within one SDK attempt; `AppendRetryOptions` does not control them and `Stats().Retries` does not count them.
-
-Every table append or Catalog mutation HTTP request has an SDK timeout of 30 seconds by default. Queries and Catalog reads have no additional SDK deadline; bound them with the caller context or HTTP client. `Config.WriteTimeout` is a `*time.Duration`: nil uses the default, a pointer to zero disables the limit, and a pointer to a positive duration overrides it. Negative durations are invalid. `NewClient` copies the value, so changing the original variable does not change an existing client.
-
-```go
-client, err := scopedb.NewClient(scopedb.Config{
-	Endpoint:     os.Getenv("SCOPEDB_ENDPOINT"),
-	APIKey:       os.Getenv("SCOPEDB_API_KEY"),
-	WriteTimeout: new(2 * time.Minute), // Omit for 30 seconds; use new(time.Duration) to disable.
-})
-if err != nil {
-	return err
-}
-defer client.Close()
-```
-
-The write timeout starts after local encoding, compression, and request preparation and covers one HTTP attempt, including redirects and reading the complete response body. Caller context deadlines on direct appends and Catalog requests still apply, as do HTTP-client timeouts. Catalog dry runs use the same timeout but cannot commit, so they do not return `WriteDetails` or report an unknown commit.
-
-Streams inherit the write timeout when `AppendStreamOptions.AttemptTimeout` is nil; a non-nil pointer overrides it, with zero disabling the per-attempt limit. The stream copies this value at construction. Its separate delivery/retry budget still applies. Admission, retry backoff, and an entire `Flush`/`Shutdown` barrier are outside the write timeout. Contexts passed to stream methods bound admission or waiting, without cancelling already accepted rows.
-
-For Append, client timeouts after a connection is acquired preserve the existing `*scopedb.Error` kind and cause and add `WriteDetails` with `Reason: scopedb.WriteErrorReasonTimeout` and `Outcome: scopedb.AppendOutcomeAmbiguous`; `Error.Retryable` is false. Connection failures before dispatch report `AppendOutcomeFailed`; a timeout in that phase can be retried safely. A custom HTTP transport that does not provide connection trace events is classified conservatively as unknown. In-flight caller cancellation uses `WriteErrorReasonCancelled`; cancellation before sending preserves the original context error. These fields remain available on subsequent errors returned by the stream. A timeout does not roll back a write. Append streams do not replay client timeouts or cancellations with ambiguous outcomes, even with `AppendRetryOptions.RetryAmbiguous`. A valid server HTTP 408 error is a definite failure but is not automatically retried.
-
-Statement and table append request bodies, including direct `AppendNDJSON` requests and `AppendStream` batches, use zstd compression by default. Set `Config.Compression` to `CompressionGzip` when gzip is required. Catalog requests use uncompressed JSON. Append limits are based on the uncompressed NDJSON body.
-
-## Errors
-
-`scopedb.Error` exposes the server message, code, and structured details without requiring applications to parse the message. Catalog errors redact the configured API key from messages and codes:
-
-```go
-var scopeErr *scopedb.Error
-if errors.As(err, &scopeErr) {
-	log.Printf("kind=%s status=%d request_id=%s retryable=%t retry_after=%s",
-		scopeErr.Kind,
-		scopeErr.HTTPStatus,
-		scopeErr.RequestID,
-		scopeErr.Retryable,
-		scopeErr.RetryAfter,
-	)
-}
-```
-
-HTTP error bodies and Append acknowledgements are limited to 64 KiB after transport decompression. The SDK reads at most one extra byte to detect overflow, closes the response without draining the remainder, and discards the oversized body instead of retaining it in errors or `Stats().LastFailure`. Detect this with `errors.Is(err, scopedb.ErrResponseTooLarge)`; HTTP status and diagnostic headers (`RequestID` and `RetryAfter`) remain available. An oversized Append acknowledgement or error body has an ambiguous commit outcome, including HTTP 429. Successful Statement results and Catalog definitions are outside this diagnostic limit.
-
-The main kinds are `ErrorKindConfigInvalid`, `ErrorKindStatementFailed`, `ErrorKindCatalogFailed`, `ErrorKindAppendRowsFailed`, and `ErrorKindUnexpected`. Use `errors.Is` and `errors.As` to inspect the underlying cause. Append streams preserve the last attempt's `Code` and `Details` in returned errors and `Stats().LastFailure`; the delivery outcome remains unknown if an earlier attempt may have committed.
-
-`Retryable` classifies a temporary failure; it does not prove that replay is safe. For direct appends, require both `Retryable` and `AppendDetails.Status == scopedb.AppendOutcomeFailed` before retrying, and honor `RetryAfter` within an application-owned budget. An unknown outcome may already be committed and needs reconciliation. Avoid wrapping a retrying stream in a second retry loop.
-
-After successful submission, errors from `Query` and `Execute` carry `Error.StatementID` and have `Retryable == false`: repeating either method would submit another execution. After deciding a polling failure is recoverable, use `client.StatementHandle(*scopeErr.StatementID).Wait(recoveryCtx)` with a live context to resume the same statement. Check that `StatementID` is non-nil first. Errors from a retained handle's `Refresh` or `Wait` keep their temporary classification. Polling failures are returned without automatic retries. Transport and local context errors retain their causes through `errors.Is` and `errors.As`.
-
-A lost submission acknowledgement, malformed success response, or unstructured HTTP 408/429/5xx response uses code `statement_submission_outcome_unknown` and is not marked retryable. Set `Statement.ID` before submission to retain a caller-known ID on submission errors even when the response is lost. An error's ID identifies the attempted statement; it does not prove acceptance or guarantee that the server still retains its result. Confirmed temporary submission rejections retain their retryable classification.
-
-A terminal observation cached by a concurrent handle request takes precedence over a late request failure. For example, once `Cancel` confirms cancellation, an older failing poll reports that cancellation rather than its stale HTTP error.
+See [row encoding](writes.md#row-encoding) for column types and numeric boundaries.

@@ -1,6 +1,6 @@
 # Upgrade from 0.7 to 0.8
 
-The next minor release aligns Catalog concurrency and Append delivery with the current API contract. These changes are currently unreleased; update application code when upgrading to 0.8. Go 1.27.3 or later is required.
+This guide covers changes from v0.7.1 to v0.8.0. Upgrade to Go 1.27.3 or later before updating the SDK. The module and import paths remain `github.com/scopedb/goscopedb`.
 
 ## Catalog versions
 
@@ -44,8 +44,14 @@ Use `Error.CatalogOutcome` instead of checking an SDK-generated `catalog_commit_
 
 `AppendOutcome` retains the historical string/JSON spellings `committed`, `rejected`, and `unknown`. Delivery outcome `String()` values change from `ok` / `unknown` to `succeeded` / `ambiguous`; update telemetry consumers. Confirmed row counts remain `CommittedRows` and `NumRowsInserted`.
 
-HTTP 200 with a matching `num_rows_inserted` confirms success without requiring a wire `status` field. Legacy `status: "committed"` acknowledgements remain accepted. Valid nested HTTP 4xx errors establish failure; HTTP 5xx errors remain ambiguous. Known codes must match their HTTP status; unknown codes are retained. Missing or malformed bodies, inconsistent codes, invalid acknowledgements, and row-count mismatches are ambiguous. Optional legacy row diagnostics remain available, but modern errors describe the entire request; do not parse messages for per-row outcomes.
+Append acknowledgements no longer require a wire `status` field. If a custom transport or proxy inspects responses, accept HTTP 200 with a matching `num_rows_inserted`. Modern errors describe the whole request; use `Code` and `Details` instead of relying on per-row diagnostics. See the [delivery contract](writes.md#outcomes-and-retries) for response validation.
 
 Streams automatically retry valid HTTP 429 rejections and temporary connection failures proven to precede dispatch. Unlike 0.7.1, a bodyless, malformed, or truncated 429 is ambiguous and is not replayed by default. Valid HTTP 408 failures are not automatically retried, even with a positive server retry hint. Client timeouts after connection acquisition are no longer replayed even with `RetryAmbiguous: true`. Timeouts proven to precede dispatch remain safe to retry; cancellation remains terminal.
 
 `RetryAmbiguous` permits bounded replay of other transient ambiguous failures and may duplicate rows. `Error.ServerRetryable` retains the server hint; explicit refusal prevents replay even with opt-in enabled. A later definite failure cannot resolve an earlier ambiguous attempt. Direct `AppendNDJSON` makes one SDK attempt.
+
+## Statement recovery and diagnostics
+
+After submission, `Query` and `Execute` failures now have `Retryable == false` and retain `Error.StatementID`. Resume that statement with `StatementHandle(id).Wait(ctx)` instead of submitting the query again. Set `Statement.ID` before submission if the application also needs recovery when the submission response is lost. See [statement recovery](errors.md#statements).
+
+HTTP error bodies and Append acknowledgements are now limited to 64 KiB. Use `errors.Is(err, scopedb.ErrResponseTooLarge)` to detect overflow; HTTP metadata remains available, but the oversized body is discarded. Successful query results and Catalog definitions are not subject to this diagnostic limit.

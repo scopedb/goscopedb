@@ -113,7 +113,7 @@ const (
 	AppendDeliveryPartial
 	// AppendDeliveryFailed means no rows committed and at least one row failed or dropped.
 	AppendDeliveryFailed
-	// AppendDeliveryAmbiguous means no rows committed and at least one row may have committed.
+	// AppendDeliveryAmbiguous means no rows are confirmed committed and at least one row may have committed.
 	AppendDeliveryAmbiguous
 )
 
@@ -233,7 +233,7 @@ type AppendLastFailure struct {
 	Retryable bool
 	// WriteDetails identifies a client timeout or cancellation, when present.
 	WriteDetails *WriteErrorDetails
-	// RowErrors contains structured validation failures reported for the batch.
+	// RowErrors preserves optional legacy row diagnostics; modern errors describe the whole request.
 	RowErrors []AppendRowError
 	// RowErrorsTruncated reports whether the service omitted additional row errors.
 	RowErrorsTruncated bool
