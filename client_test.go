@@ -24,6 +24,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -109,17 +110,59 @@ func TestClientRedirectPolicyAndOwnership(t *testing.T) {
 	require.Equal(t, http.StatusTemporaryRedirect, requireError(t, err).HTTPStatus)
 	injected.Close()
 	require.False(t, transport.closed, "the injected transport belongs to its caller")
+}
 
-	refused, err := NewClient(Config{Endpoint: server.URL, HTTPClient: &http.Client{
-		Transport:     transport,
-		CheckRedirect: func(*http.Request, []*http.Request) error { return errors.New("redirects disabled") },
-	}})
+func TestRedirectErrorsPreserveHTTPDiagnostics(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Request-ID", "redirect-request")
+		w.Header().Set("Retry-After", "2")
+		http.Redirect(w, r, "/destination", http.StatusTemporaryRedirect)
+	}))
+	t.Cleanup(server.Close)
+	refusal := errors.New("redirects disabled")
+	httpClient := server.Client()
+	httpClient.CheckRedirect = func(*http.Request, []*http.Request) error { return refusal }
+	t.Cleanup(httpClient.CloseIdleConnections)
+	client, err := NewClient(Config{Endpoint: server.URL, HTTPClient: httpClient})
 	require.NoError(t, err)
-	_, err = refused.Table("events").AppendNDJSON(t.Context(), []byte(`{}`))
-	appendErr := requireError(t, err)
-	require.Equal(t, http.StatusTemporaryRedirect, appendErr.HTTPStatus)
-	require.Equal(t, "redirect-request", appendErr.RequestID)
-	require.Equal(t, AppendOutcomeAmbiguous, appendErr.AppendDetails.Status)
+	id := uuid.New()
+	for _, operation := range []string{"append", "submit", "refresh", "cancel", "catalog read", "catalog write"} {
+		t.Run(operation, func(t *testing.T) {
+			var err error
+			switch operation {
+			case "append":
+				_, err = client.Table("events").AppendNDJSON(t.Context(), []byte(`{}`))
+			case "submit":
+				statement := client.Statement("SELECT 42")
+				statement.ID = &id
+				_, err = statement.Submit(t.Context())
+			case "refresh":
+				_, err = client.StatementHandle(id).Refresh(t.Context())
+			case "cancel":
+				_, err = client.StatementHandle(id).Cancel(t.Context())
+			case "catalog read":
+				_, err = client.Table("events").Catalog().Get(t.Context())
+			case "catalog write":
+				_, err = client.Table("events").Catalog().Apply(t.Context(), &CatalogTable{Name: "events"})
+			}
+			require.ErrorIs(t, err, refusal)
+			failure := requireError(t, err)
+			require.Equal(t, http.StatusTemporaryRedirect, failure.HTTPStatus)
+			require.Equal(t, "redirect-request", failure.RequestID)
+			require.Equal(t, 2*time.Second, failure.RetryAfter)
+			require.False(t, failure.Retryable)
+			switch operation {
+			case "append":
+				require.Equal(t, AppendOutcomeAmbiguous, failure.AppendDetails.Status)
+			case "submit", "refresh", "cancel":
+				require.Equal(t, id, *failure.StatementID)
+			case "catalog write":
+				require.Equal(t, CatalogMutationUnknown, failure.CatalogOutcome)
+			case "catalog read":
+				require.Empty(t, failure.CatalogOutcome)
+			}
+		})
+	}
 }
 
 type trackedTransport struct {

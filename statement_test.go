@@ -338,3 +338,56 @@ func TestStatementRejectsIncompleteOrMismatchedResponses(t *testing.T) {
 		require.Nil(t, handle.Snapshot())
 	}
 }
+
+func TestStatementMalformedRowsDoNotCacheTerminalState(t *testing.T) {
+	for _, tc := range []struct {
+		name, rows string
+	}{
+		{"row count", `[]`},
+		{"column count", `[[]]`},
+		{"null row", `[null]`},
+		{"non-string cell", `[[42]]`},
+	} {
+		for _, operation := range []string{"submit", "refresh", "cancel"} {
+			t.Run(tc.name+"/"+operation, func(t *testing.T) {
+				id := uuid.New()
+				calls := 0
+				client := newTestClient(t, func(*http.Request) (*http.Response, error) {
+					calls++
+					extra := finishedResult
+					if calls == 1 {
+						extra = strings.Replace(extra, `[["42"]]`, tc.rows, 1)
+					}
+					return httpResponse(http.StatusOK, statementJSON(id, "finished", extra)), nil
+				})
+				handle := client.StatementHandle(id)
+				var err error
+				switch operation {
+				case "submit":
+					statement := client.Statement("SELECT 42")
+					statement.ID = &id
+					submitted, submitErr := statement.Submit(t.Context())
+					require.Nil(t, submitted)
+					err = submitErr
+				case "refresh":
+					_, err = handle.Refresh(t.Context())
+				case "cancel":
+					_, err = handle.Cancel(t.Context())
+				}
+				failure := requireError(t, err)
+				require.Equal(t, id, *failure.StatementID)
+				if operation == "submit" {
+					require.Equal(t, statementSubmissionOutcomeUnknownCode, failure.Code)
+				}
+				require.Nil(t, handle.Snapshot())
+				result, err := handle.Wait(t.Context())
+				require.NoError(t, err)
+				row, found, err := result.First()
+				require.NoError(t, err)
+				require.True(t, found)
+				require.Equal(t, int64(42), row["n"])
+				require.Equal(t, 2, calls, "malformed rows must not prevent fetching a valid result")
+			})
+		}
+	}
+}

@@ -164,6 +164,9 @@ func (c *CatalogResource[T]) request(ctx context.Context, method string, data []
 	resp, err := c.client.do(req)
 	if err != nil {
 		failure := newError(ErrorKindCatalogFailed, "catalog request failed", err)
+		if resp != nil {
+			failure = newResponseError(resp, ErrorKindCatalogFailed, failure.Message, err)
+		}
 		if writing {
 			failure.CatalogOutcome = CatalogMutationUnknown
 			failure.Message = "catalog mutation could not be confirmed"
@@ -189,12 +192,12 @@ func (c *CatalogResource[T]) request(ctx context.Context, method string, data []
 		return nil, nil, failure
 	}
 	if resp.StatusCode != http.StatusOK {
-		failure := decodeResponseError(resp, body, ErrorKindCatalogFailed)
+		failure, payload := decodeResponseError(resp, body, ErrorKindCatalogFailed)
 		// A failed write is not necessarily safe to replay, even for a transient HTTP status.
 		if writing {
 			failure.Retryable = false
 			failure.CatalogOutcome = CatalogMutationUnknown
-			if parseErrorEnvelope(resp, body).valid && resp.StatusCode >= 400 && resp.StatusCode < 500 && resp.StatusCode != http.StatusRequestTimeout {
+			if payload.valid && resp.StatusCode >= 400 && resp.StatusCode < 500 && resp.StatusCode != http.StatusRequestTimeout {
 				failure.CatalogOutcome = CatalogMutationRejected
 			}
 		}

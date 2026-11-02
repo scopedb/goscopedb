@@ -252,9 +252,8 @@ func appendAmbiguousError(message string, cause error, resp *http.Response) *Err
 
 // decodeAppendError keeps certainty separate from status-based retry hints.
 func decodeAppendError(resp *http.Response, body []byte) *Error {
-	failure := decodeResponseError(resp, body, ErrorKindAppendRowsFailed)
+	failure, payload := decodeResponseError(resp, body, ErrorKindAppendRowsFailed)
 	failure.AppendDetails = &AppendErrorDetails{Status: AppendOutcomeAmbiguous, RowErrors: []AppendRowError{}}
-	payload := parseErrorEnvelope(resp, body)
 	if payload.valid && !payload.modern {
 		var details AppendErrorDetails
 		if json.Unmarshal(payload.Details, &details) == nil &&

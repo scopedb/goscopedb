@@ -17,7 +17,6 @@
 package scopedb
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -154,6 +153,9 @@ func (c *Client) fetchStatement(ctx context.Context, id uuid.UUID) (*statementRe
 	}
 	resp, err := c.do(request)
 	if err != nil {
+		if resp != nil {
+			err = newResponseError(resp, ErrorKindUnexpected, err.Error(), err)
+		}
 		return nil, err
 	}
 	defer closeResponseBody(resp.Body)
@@ -176,6 +178,9 @@ func (c *Client) cancelStatement(ctx context.Context, statementID uuid.UUID) (*s
 
 	resp, err := c.postJSON(ctx, req, []byte{})
 	if err != nil {
+		if resp != nil {
+			err = newResponseError(resp, ErrorKindUnexpected, err.Error(), err)
+		}
 		return nil, err
 	}
 	defer closeResponseBody(resp.Body)
@@ -206,7 +211,8 @@ func readStatementResponseWithEnvelope(resp *http.Response, expectedID *uuid.UUI
 		)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, parseErrorEnvelope(resp, data).valid, decodeResponseError(resp, data, ErrorKindUnexpected)
+		failure, payload := decodeResponseError(resp, data, ErrorKindUnexpected)
+		return nil, payload.valid, failure
 	}
 
 	var stmtResp statementResponse
@@ -303,9 +309,8 @@ func validateFinishedResult(result *statementResult) error {
 			)
 		}
 	}
-	rows := bytes.TrimSpace(result.Rows)
-	if len(rows) == 0 || rows[0] != '[' {
-		return fmt.Errorf("finished statement result_set has no rows")
+	if _, err := decodeResultRows(result.Rows, *result.Metadata.NumRows, len(result.Metadata.Fields)); err != nil {
+		return fmt.Errorf("invalid finished statement result rows: %w", err)
 	}
 
 	return nil
