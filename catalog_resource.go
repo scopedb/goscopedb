@@ -22,7 +22,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"strings"
 )
 
 // CatalogResource manages a selected catalog definition. Obtain one through the
@@ -70,6 +69,9 @@ func (c *CatalogResource[T]) Apply(ctx context.Context, definition T, options ..
 // Delete removes a single database, schema, table, or view.
 // With no options, potentially destructive changes are rejected.
 func (c *CatalogResource[T]) Delete(ctx context.Context, options ...CatalogOptions) (CatalogResult[T], error) {
+	if len(c.resource) <= 1 {
+		return CatalogResult[T]{}, newError(ErrorKindConfigInvalid, "the root catalog does not support Delete; apply an empty document instead", nil)
+	}
 	return c.mutate(ctx, http.MethodDelete, nil, options...)
 }
 
@@ -192,16 +194,11 @@ func (c *CatalogResource[T]) request(ctx context.Context, method string, data []
 		if writing {
 			failure.Retryable = false
 			failure.CatalogOutcome = CatalogMutationUnknown
-			if failure.Code != "" && resp.StatusCode >= 400 && resp.StatusCode < 500 && resp.StatusCode != http.StatusRequestTimeout {
+			if parseErrorEnvelope(resp, body).valid && resp.StatusCode >= 400 && resp.StatusCode < 500 && resp.StatusCode != http.StatusRequestTimeout {
 				failure.CatalogOutcome = CatalogMutationRejected
 			}
 		}
-		key := strings.TrimPrefix(c.client.authorization, "Bearer ")
-		if key != "" {
-			failure.Message = strings.ReplaceAll(failure.Message, key, "[redacted]")
-			failure.Code = strings.ReplaceAll(failure.Code, key, "[redacted]")
-		}
-		return nil, nil, failure
+		return nil, nil, c.client.redactError(failure)
 	}
 	return body, resp, nil
 }
