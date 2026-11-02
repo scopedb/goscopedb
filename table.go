@@ -17,9 +17,10 @@
 package scopedb
 
 import (
-	"bytes"
+	"cmp"
 	"context"
 	"fmt"
+	"strings"
 )
 
 // Table references a ScopeDB table.
@@ -62,7 +63,7 @@ func (t *Table) AppendNDJSON(ctx context.Context, ndjson []byte) (AppendRowsResu
 
 // Identifier returns the quoted table identifier.
 func (t *Table) Identifier() string {
-	var b bytes.Buffer
+	var b strings.Builder
 	if t.Database != "" {
 		b.WriteString(quoteIdentifier(t.Database))
 		b.WriteByte('.')
@@ -77,22 +78,16 @@ func (t *Table) Identifier() string {
 }
 
 func (t *Table) databaseName() string {
-	if t.Database == "" {
-		return "scopedb"
-	}
-	return t.Database
+	return cmp.Or(t.Database, "scopedb")
 }
 
 func (t *Table) schemaName() string {
-	if t.Schema == "" {
-		return "public"
-	}
-	return t.Schema
+	return cmp.Or(t.Schema, "public")
 }
 
 func quoteIdentifier(s string) string {
 	const quote = '`'
-	var b bytes.Buffer
+	var b strings.Builder
 	b.WriteRune(quote)
 	for _, c := range s {
 		switch c {

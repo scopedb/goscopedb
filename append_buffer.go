@@ -18,6 +18,7 @@ package scopedb
 
 import (
 	"context"
+	"slices"
 	"sync"
 )
 
@@ -125,12 +126,9 @@ func (b *appendByteBudget) drainWaitersLocked() {
 
 func (b *appendByteBudget) removeWaiterLocked(target *appendBudgetWaiter) {
 	for index, waiter := range b.waiters {
-		if waiter != target {
-			continue
+		if waiter == target {
+			b.waiters = slices.Delete(b.waiters, index, index+1)
+			return
 		}
-		copy(b.waiters[index:], b.waiters[index+1:])
-		b.waiters[len(b.waiters)-1] = nil
-		b.waiters = b.waiters[:len(b.waiters)-1]
-		return
 	}
 }

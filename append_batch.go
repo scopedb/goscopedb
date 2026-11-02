@@ -159,23 +159,14 @@ func (w *appendWorker) startTimer() {
 	if w.timer == nil {
 		w.timer = time.NewTimer(w.stream.config.flushInterval)
 	} else {
-		if !w.timer.Stop() {
-			select {
-			case <-w.timer.C:
-			default:
-			}
-		}
 		w.timer.Reset(w.stream.config.flushInterval)
 	}
 	w.timerC = w.timer.C
 }
 
 func (w *appendWorker) stopTimer() {
-	if w.timer != nil && !w.timer.Stop() {
-		select {
-		case <-w.timer.C:
-		default:
-		}
+	if w.timer != nil {
+		w.timer.Stop()
 	}
 	w.timerC = nil
 }

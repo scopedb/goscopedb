@@ -144,14 +144,14 @@ func (c *Client) appendNDJSON(
 	})
 	resp, err := c.do(req.WithContext(ctx))
 	if err != nil {
-		apiErr := appendAmbiguousError(err.Error(), err, nil).withWriteContext(ctx)
+		apiErr := appendAmbiguousError(err.Error(), err, resp).withWriteContext(ctx)
 		// Keep connection evidence across redirects. A later dial failure cannot
 		// prove that an earlier endpoint did not process the append. Transports
 		// without tracing also retain an unknown outcome.
 		if acquiring.Load() && !connected.Load() {
 			apiErr.AppendDetails.Status = AppendOutcomeFailed
-			var certificateErr *tls.CertificateVerificationError
-			apiErr.Retryable = !errors.Is(err, context.Canceled) && !errors.As(err, &certificateErr)
+			_, isCertErr := errors.AsType[*tls.CertificateVerificationError](err)
+			apiErr.Retryable = !errors.Is(err, context.Canceled) && !isCertErr
 			if apiErr.WriteDetails != nil {
 				apiErr.WriteDetails.Outcome = AppendOutcomeFailed
 			}

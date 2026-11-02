@@ -26,6 +26,7 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -34,25 +35,28 @@ func TestClientWireRequests(t *testing.T) {
 		t.Run(string(codec), func(t *testing.T) {
 			id := uuid.New()
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				require.Equal(t, "Bearer test-key", r.Header.Get("Authorization"))
-				require.Equal(t, http.MethodPost, r.Method)
+				assert.Equal(t, "Bearer test-key", r.Header.Get("Authorization"))
+				assert.Equal(t, http.MethodPost, r.Method)
 				wantCodec := codec
 				if wantCodec == "" {
 					wantCodec = CompressionZstd
 				}
-				require.Equal(t, string(wantCodec), r.Header.Get("Content-Encoding"))
+				assert.Equal(t, string(wantCodec), r.Header.Get("Content-Encoding"))
 				body, err := decodeCompressedRequestBody(r)
-				require.NoError(t, err)
+				if !assert.NoError(t, err) {
+					w.WriteHeader(http.StatusBadRequest)
+					return
+				}
 				if strings.HasSuffix(r.URL.Path, "/statements") {
-					require.Equal(t, "/proxy/v1/statements", r.URL.Path)
-					require.Equal(t, strconv.Itoa(len(body)), r.Header.Get("X-ScopeDB-Uncompressed-Content-Length"))
-					require.Equal(t, "json", r.URL.Query().Get("format"))
-					require.JSONEq(t, `{"statement":"SELECT 42"}`, string(body))
+					assert.Equal(t, "/proxy/v1/statements", r.URL.Path)
+					assert.Equal(t, strconv.Itoa(len(body)), r.Header.Get("X-ScopeDB-Uncompressed-Content-Length"))
+					assert.Equal(t, "json", r.URL.Query().Get("format"))
+					assert.JSONEq(t, `{"statement":"SELECT 42"}`, string(body))
 					_, _ = w.Write([]byte(statementJSON(id, "finished", finishedResult)))
 				} else {
-					require.Equal(t, "/proxy/v1/catalog/databases/db%2Farchive/schemas/public/tables/events%3F%23%2Fraw/ingest", r.URL.EscapedPath())
-					require.Equal(t, "application/x-ndjson", r.Header.Get("Content-Type"))
-					require.Equal(t, "{}\n\n  \n{}", string(body))
+					assert.Equal(t, "/proxy/v1/catalog/databases/db%2Farchive/schemas/public/tables/events%3F%23%2Fraw/ingest", r.URL.EscapedPath())
+					assert.Equal(t, "application/x-ndjson", r.Header.Get("Content-Type"))
+					assert.Equal(t, "{}\n\n  \n{}", string(body))
 					_, _ = w.Write([]byte(`{"status":"committed","num_rows_inserted":2}`))
 				}
 			}))
@@ -78,12 +82,13 @@ func TestClientWireRequests(t *testing.T) {
 func TestClientRedirectPolicyAndOwnership(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/destination" {
+			w.Header().Set("X-Request-ID", "redirect-request")
 			http.Redirect(w, r, "/destination", http.StatusTemporaryRedirect)
 			return
 		}
 		body, err := decodeCompressedRequestBody(r)
-		require.NoError(t, err)
-		require.Equal(t, `{}`, string(body))
+		assert.NoError(t, err)
+		assert.Equal(t, `{}`, string(body))
 		_, _ = w.Write([]byte(`{"status":"committed","num_rows_inserted":1}`))
 	}))
 	t.Cleanup(server.Close)
@@ -104,6 +109,17 @@ func TestClientRedirectPolicyAndOwnership(t *testing.T) {
 	require.Equal(t, http.StatusTemporaryRedirect, requireError(t, err).HTTPStatus)
 	injected.Close()
 	require.False(t, transport.closed, "the injected transport belongs to its caller")
+
+	refused, err := NewClient(Config{Endpoint: server.URL, HTTPClient: &http.Client{
+		Transport:     transport,
+		CheckRedirect: func(*http.Request, []*http.Request) error { return errors.New("redirects disabled") },
+	}})
+	require.NoError(t, err)
+	_, err = refused.Table("events").AppendNDJSON(t.Context(), []byte(`{}`))
+	appendErr := requireError(t, err)
+	require.Equal(t, http.StatusTemporaryRedirect, appendErr.HTTPStatus)
+	require.Equal(t, "redirect-request", appendErr.RequestID)
+	require.Equal(t, AppendOutcomeAmbiguous, appendErr.AppendDetails.Status)
 }
 
 type trackedTransport struct {

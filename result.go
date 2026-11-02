@@ -27,7 +27,10 @@ import (
 	"time"
 )
 
-var fixedDurationPattern = regexp.MustCompile(`^(-)?PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)(?:\.(\d{1,9}))?S)?$`)
+var (
+	fixedDurationPattern = regexp.MustCompile(`^(-)?PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)(?:\.(\d{1,9}))?S)?$`)
+	intervalUnitReplacer = strings.NewReplacer("H", "h", "M", "m", "S", "s")
+)
 
 // Value stores the contents of a single cell from a ScopeDB statement result.
 type Value any
@@ -225,7 +228,7 @@ func parseInterval(value string) (time.Duration, error) {
 
 	duration := strings.TrimPrefix(value, "-")
 	duration = strings.TrimPrefix(duration, "PT")
-	duration = strings.NewReplacer("H", "h", "M", "m", "S", "s").Replace(duration)
+	duration = intervalUnitReplacer.Replace(duration)
 	if matches[1] == "-" {
 		duration = "-" + duration
 	}

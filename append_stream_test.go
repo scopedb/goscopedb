@@ -44,7 +44,7 @@ func newTestAppendStream(t *testing.T, options AppendStreamOptions, transport ro
 }
 
 func appendSuccess(rows int) *http.Response {
-	return httpResponse(200, fmt.Sprintf(`{"status":"committed","num_rows_inserted":%d}`, rows))
+	return httpResponse(200, fmt.Sprintf(`{"num_rows_inserted":%d}`, rows))
 }
 
 func appendFailure(status int, state AppendOutcome, retryable bool) *http.Response {
@@ -64,7 +64,9 @@ func TestAppendStreamBatchBoundaries(t *testing.T) {
 			tc.options.MaxConcurrentBatches, tc.options.FlushInterval = 1, time.Hour
 			stream := newTestAppendStream(t, tc.options, func(r *http.Request) (*http.Response, error) {
 				data, err := decodeCompressedRequestBody(r)
-				require.NoError(t, err)
+				if err != nil {
+					return nil, err
+				}
 				bodies = append(bodies, string(data))
 				return appendSuccess(len(strings.Split(string(data), "\n"))), nil
 			})
@@ -91,8 +93,7 @@ func TestAppendStreamFlushesPartialBatchOnTimer(t *testing.T) {
 		require.NoError(t, stream.Send(t.Context(), map[string]int{"id": 1}))
 		synctest.Wait()
 		require.Zero(t, calls.Load())
-		time.Sleep(time.Second)
-		synctest.Wait()
+		synctest.Sleep(time.Second)
 		require.EqualValues(t, 1, calls.Load())
 		_, err := stream.Shutdown(t.Context())
 		require.NoError(t, err)
@@ -239,7 +240,9 @@ func TestAppendStreamConcurrencyAndShutdownSettlement(t *testing.T) {
 		stream := newTestAppendStream(t, AppendStreamOptions{TargetBatchBytes: 1, MaxConcurrentBatches: 2}, func(r *http.Request) (*http.Response, error) {
 			calls.Add(1)
 			body, err := decodeCompressedRequestBody(r)
-			require.NoError(t, err)
+			if err != nil {
+				return nil, err
+			}
 			if strings.Contains(string(body), `"id":0`) {
 				<-rejected
 				return appendFailure(422, AppendOutcomeFailed, false), nil
@@ -283,9 +286,13 @@ func TestAppendStreamConcurrentSendAndShutdown(t *testing.T) {
 	seen := make(map[int]bool)
 	stream := newTestAppendStream(t, AppendStreamOptions{MaxBatchRows: 1}, func(r *http.Request) (*http.Response, error) {
 		body, err := decodeCompressedRequestBody(r)
-		require.NoError(t, err)
+		if err != nil {
+			return nil, err
+		}
 		var row map[string]int
-		require.NoError(t, json.Unmarshal(body, &row))
+		if err := json.Unmarshal(body, &row); err != nil {
+			return nil, err
+		}
 		mu.Lock()
 		if seen[row["id"]] {
 			t.Errorf("duplicate row %d", row["id"])
@@ -367,4 +374,53 @@ func (row blockedRow) MarshalJSON() ([]byte, error) {
 	close(row.started)
 	<-row.release
 	return []byte(`{"id":1}`), nil
+}
+
+func TestAppendStreamOptionsAndFIFOBudget(t *testing.T) {
+	table := newTestClient(t, func(*http.Request) (*http.Response, error) { return appendSuccess(0), nil }).Table("events")
+	for _, options := range []AppendStreamOptions{
+		{FailurePolicy: AppendFailurePolicy(99)},
+		{TargetBatchBytes: -1},
+		{TargetBatchBytes: maxAppendBodyBytes + 1},
+		{MaxBatchRows: -1},
+		{MaxBatchRows: maxAppendRows + 1},
+		{FlushInterval: -time.Second},
+		{MaxBufferedBytes: -1},
+		{MaxConcurrentBatches: -1},
+		{MaxConcurrentBatches: maxAppendConcurrentBatches + 1},
+		{AttemptTimeout: new(-time.Second)},
+		{Retry: &AppendRetryOptions{MaxRetries: -1}},
+		{Retry: &AppendRetryOptions{InitialBackoff: 2 * time.Second, MaxBackoff: time.Second}},
+	} {
+		_, err := table.AppendStream(options)
+		require.Equal(t, ErrorKindConfigInvalid, requireError(t, err).Kind)
+	}
+
+	synctest.Test(t, func(t *testing.T) {
+		budget := newAppendByteBudget(10)
+		require.NoError(t, budget.acquire(t.Context(), 6))
+
+		ctx1, cancel1 := context.WithCancel(t.Context())
+		defer cancel1()
+		waiter1 := make(chan error, 1)
+		go func() { waiter1 <- budget.acquire(ctx1, 8) }()
+		synctest.Wait()
+
+		// A smaller waiter must not bypass the older blocked waiter even though 2 <= 10-6.
+		require.False(t, budget.tryAcquire(2))
+		waiter2 := make(chan error, 1)
+		go func() { waiter2 <- budget.acquire(t.Context(), 2) }()
+		synctest.Wait()
+		select {
+		case err := <-waiter2:
+			t.Fatalf("smaller waiter bypassed blocked head waiter: %v", err)
+		default:
+		}
+
+		// Cancelling the head waiter drains the queue and grants capacity to waiter2.
+		cancel1()
+		require.ErrorIs(t, <-waiter1, context.Canceled)
+		require.NoError(t, <-waiter2)
+		budget.release(8)
+	})
 }

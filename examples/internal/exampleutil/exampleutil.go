@@ -18,6 +18,7 @@
 package exampleutil
 
 import (
+	"cmp"
 	"errors"
 	"os"
 	"strings"
@@ -33,36 +34,20 @@ const (
 
 // NewClient creates a client from the example environment variables.
 func NewClient() (*scopedb.Client, error) {
-	endpoint := os.Getenv("SCOPEDB_ENDPOINT")
-	if endpoint == "" {
-		endpoint = defaultEndpoint
-	}
-
-	apiKey := os.Getenv("SCOPEDB_API_KEY")
-	if apiKey == "" {
-		apiKey = os.Getenv("SCOPEDB_TOKEN")
-	}
-
 	return scopedb.NewClient(scopedb.Config{
-		Endpoint: endpoint,
-		APIKey:   apiKey,
+		Endpoint: cmp.Or(os.Getenv("SCOPEDB_ENDPOINT"), defaultEndpoint),
+		APIKey:   cmp.Or(os.Getenv("SCOPEDB_API_KEY"), os.Getenv("SCOPEDB_TOKEN")),
 	})
 }
 
 // Database returns the configured database name.
 func Database() string {
-	if database := os.Getenv("SCOPEDB_DATABASE"); database != "" {
-		return database
-	}
-	return defaultDatabase
+	return cmp.Or(os.Getenv("SCOPEDB_DATABASE"), defaultDatabase)
 }
 
 // Schema returns the configured schema name.
 func Schema() string {
-	if schema := os.Getenv("SCOPEDB_SCHEMA"); schema != "" {
-		return schema
-	}
-	return defaultSchema
+	return cmp.Or(os.Getenv("SCOPEDB_SCHEMA"), defaultSchema)
 }
 
 // WriteTable returns the explicitly selected destination for a write example.

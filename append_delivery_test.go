@@ -24,6 +24,7 @@ import (
 	"testing/synctest"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -50,15 +51,17 @@ func TestAppendStreamRetryRequiresSafeRejectionOrReplayOptIn(t *testing.T) {
 					MaxRetries: 2, RetryAmbiguous: tc.replay, InitialBackoff: time.Millisecond, MaxBackoff: time.Millisecond,
 				}}, func(r *http.Request) (*http.Response, error) {
 					body, err := decodeCompressedRequestBody(r)
-					require.NoError(t, err)
-					require.JSONEq(t, `{"id":1}`, string(body))
+					if err != nil {
+						return nil, err
+					}
+					assert.JSONEq(t, `{"id":1}`, string(body))
 					calls++
 					if calls > 1 {
 						if tc.permanentSecond {
 							return appendFailure(422, AppendOutcomeFailed, false), nil
 						}
 						if tc.status == 429 {
-							require.GreaterOrEqual(t, time.Since(started), time.Second)
+							assert.GreaterOrEqual(t, time.Since(started), time.Second)
 						}
 						return appendSuccess(1), nil
 					}

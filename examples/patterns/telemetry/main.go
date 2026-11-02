@@ -54,7 +54,7 @@ func run(ctx context.Context) error {
 	}
 
 	startedAt := time.Now().UTC()
-	for id := 0; id < 1_000; id++ {
+	for id := range 1_000 {
 		row := map[string]any{
 			"id":          id,
 			"event_id":    fmt.Sprintf("go-telemetry-%d-%d", startedAt.UnixNano(), id),
