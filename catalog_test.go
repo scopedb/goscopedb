@@ -17,6 +17,8 @@
 package scopedb
 
 import (
+	"bytes"
+	"encoding/json"
 	"io"
 	"net/http"
 	"testing"
@@ -77,12 +79,21 @@ func TestCatalogConditionalWorkflow(t *testing.T) {
 
 func TestCatalogRawPreservesUnknownNestedFields(t *testing.T) {
 	const definition = `{"name":"events","columns":[{"name":"id","data_type":"int","future":{"precise":9007199254740993}}]}`
+	decode := func(data []byte) any {
+		t.Helper()
+		var value any
+		decoder := json.NewDecoder(bytes.NewReader(data))
+		decoder.UseNumber()
+		require.NoError(t, decoder.Decode(&value))
+		return value
+	}
+	want := decode([]byte(definition))
 	client := newTestClient(t, func(r *http.Request) (*http.Response, error) {
 		body := definition
 		if r.Method == http.MethodPut {
 			data, err := io.ReadAll(r.Body)
 			require.NoError(t, err)
-			require.JSONEq(t, definition, string(data))
+			require.Equal(t, want, decode(data))
 			body = `{"before":` + definition + `,"after":` + definition + `,"destructive":false}`
 		}
 		resp := httpResponse(200, body)
@@ -96,8 +107,7 @@ func TestCatalogRawPreservesUnknownNestedFields(t *testing.T) {
 	require.NoError(t, err)
 	result, err := resource.Raw().Apply(t.Context(), snapshot.Definition, CatalogOptions{ExpectedVersion: snapshot.Version})
 	require.NoError(t, err)
-	require.JSONEq(t, definition, string(result.After))
-	require.Contains(t, string(result.After), "9007199254740993")
+	require.Equal(t, want, decode(result.After))
 	_, err = client.Catalog().Raw().Delete(t.Context())
 	require.Equal(t, ErrorKindConfigInvalid, requireError(t, err).Kind)
 }
