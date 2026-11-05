@@ -18,7 +18,9 @@ package integration_test
 
 import (
 	"context"
+	"encoding/json"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -72,7 +74,11 @@ func TestCatalogAppendAndStatementLifecycle(t *testing.T) {
 	require.Equal(t, int64(-1<<63), rows[0]["i"])
 	require.Equal(t, int64(1<<63-1), rows[1]["i"])
 	require.Equal(t, uint64(1<<63-1), rows[0]["u"])
-	require.JSONEq(t, `{"id":9007199254740993}`, rows[0]["object"].(string))
+	var object map[string]any
+	decoder := json.NewDecoder(strings.NewReader(rows[0]["object"].(string)))
+	decoder.UseNumber()
+	require.NoError(t, decoder.Decode(&object))
+	require.Equal(t, map[string]any{"id": json.Number("9007199254740993")}, object)
 	late, err := client.StatementHandle(handle.ID()).Cancel(ctx)
 	require.NoError(t, err)
 	require.Equal(t, scopedb.StatementStatusFinished, late.Status)
